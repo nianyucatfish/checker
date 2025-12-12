@@ -30,6 +30,7 @@ from logic_checker import LogicChecker
 # --- 配置常量 ---
 CONFIG_FILE = "ide_config.json"
 RECENT_WORKSPACE_KEY = "last_workspace"
+SPLITTER_SIZES_KEY = "splitter_sizes"
 
 
 class MainWindow(QMainWindow):
@@ -66,7 +67,9 @@ class MainWindow(QMainWindow):
     # ================= 配置与工作区管理 =================
 
     def _load_config(self):
-        """从配置文件加载上次打开的工作区路径"""
+        """从配置文件加载上次打开的工作区路径和界面布局"""
+        self.saved_splitter_sizes = None  # 初始化保存的分割器尺寸
+
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -77,13 +80,21 @@ class MainWindow(QMainWindow):
                         self.root_dir = path
                         # 此处调用 log() 现在不会报错
                         self.log(f"已加载上次工作区: {self.root_dir}")
+
+                    # 加载分割器尺寸
+                    self.saved_splitter_sizes = config.get(SPLITTER_SIZES_KEY)
             except (json.JSONDecodeError, IOError) as e:
                 self.log(f"加载配置失败，使用默认目录: {e}")
 
     def _save_config(self):
-        """保存当前工作区路径到配置文件"""
+        """保存当前工作区路径和界面布局到配置文件"""
         try:
-            config = {RECENT_WORKSPACE_KEY: self.root_dir}
+            config = {
+                RECENT_WORKSPACE_KEY: self.root_dir,
+                SPLITTER_SIZES_KEY: (
+                    self.splitter_v.sizes() if hasattr(self, "splitter_v") else None
+                ),
+            }
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
         except IOError as e:
@@ -291,10 +302,19 @@ class MainWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.bottom_tabs.addTab(self.log_view, "输出 (Output)")
 
+        self.splitter_v = splitter_v  # 保存引用以便后续保存尺寸
         splitter_v.addWidget(splitter_h)
         splitter_v.addWidget(self.bottom_tabs)
         splitter_v.setStretchFactor(0, 7)
         splitter_v.setStretchFactor(1, 2)
+
+        # 加载保存的分割器尺寸,如果没有则使用默认值
+        if self.saved_splitter_sizes and len(self.saved_splitter_sizes) == 2:
+            splitter_v.setSizes(self.saved_splitter_sizes)
+            self.log(f"已恢复界面布局: {self.saved_splitter_sizes}")
+        else:
+            # 设置默认初始高度：上部编辑区 700px，下部日志/问题面板 200px
+            splitter_v.setSizes([700, 200])
 
         layout.addWidget(splitter_v)
 
@@ -528,6 +548,13 @@ class MainWindow(QMainWindow):
             new_path = os.path.join(os.path.dirname(path), new_name)
             try:
                 os.rename(path, new_path)
+                # 新增：重命名后触发扫描和刷新
+                self.trigger_partial_scan(new_path)
+                self.refresh_model()
+                # 可选：刷新文件树
+                self.model.setRootPath(self.root_dir)
+                self.tree.setRootIndex(self.model.index(self.root_dir))
+                self.log(f"已重命名: {old_name} → {new_name}")
             except Exception as e:
                 QMessageBox.critical(self, "错误", str(e))
 
@@ -542,6 +569,12 @@ class MainWindow(QMainWindow):
                     shutil.rmtree(path)
                 else:
                     os.remove(path)
+                # 删除后触发增量扫描和刷新
+                self.trigger_partial_scan(os.path.dirname(path))
+                self.refresh_model()
+                self.model.setRootPath(self.root_dir)
+                self.tree.setRootIndex(self.model.index(self.root_dir))
+                self.log(f"已删除: {os.path.basename(path)}")
             except Exception as e:
                 QMessageBox.critical(self, "错误", str(e))
 

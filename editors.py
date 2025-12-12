@@ -3,6 +3,7 @@
 包含文本编辑器、音频播放器、MIDI预览器和编辑器管理器
 """
 
+from PyQt6.QtCore import pyqtSignal
 import os
 import struct
 from PyQt6.QtWidgets import (
@@ -13,9 +14,135 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QStackedWidget,
     QMessageBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QPushButton,
+    QHBoxLayout,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor, QKeySequence
+import csv
+
+
+class CsvTableEditor(QWidget):
+    """
+    CSV表格编辑器，支持基本的单元格编辑和保存
+    """
+
+    on_save = pyqtSignal(str, str)  # path, content
+    on_change = pyqtSignal(str)  # path
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # 操作按钮区
+        btn_layout = QHBoxLayout()
+        btn_add_row = QPushButton("添加行")
+        btn_add_col = QPushButton("添加列")
+        btn_del_row = QPushButton("删除行")
+        btn_del_col = QPushButton("删除列")
+        btn_layout.addWidget(btn_add_row)
+        btn_layout.addWidget(btn_add_col)
+        btn_layout.addWidget(btn_del_row)
+        btn_layout.addWidget(btn_del_col)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        self.table = QTableWidget()
+        self.table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
+        self.table.itemChanged.connect(self._handle_item_changed)
+        layout.addWidget(self.table)
+
+        btn_add_row.clicked.connect(self.add_row)
+        btn_add_col.clicked.connect(self.add_column)
+        btn_del_row.clicked.connect(self.remove_row)
+        btn_del_col.clicked.connect(self.remove_column)
+
+        self.current_path = None
+        self.loading = False
+        self._changed = False
+
+    def load_file(self, path):
+        self.loading = True
+        self.current_path = path
+        self._changed = False
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                data = list(reader)
+            if not data:
+                data = [[]]
+            self.table.clear()
+            self.table.setRowCount(len(data))
+            self.table.setColumnCount(max(len(row) for row in data))
+            for r, row in enumerate(data):
+                for c, val in enumerate(row):
+                    item = QTableWidgetItem(val)
+                    self.table.setItem(r, c, item)
+        except Exception as e:
+            raise RuntimeError(f"CSV解析失败: {e}")
+        self.loading = False
+
+    def clear(self):
+        self.loading = True
+        self.current_path = None
+        self.table.clear()
+        self.table.setRowCount(0)
+        self.table.setColumnCount(0)
+        self.loading = False
+
+    def _handle_item_changed(self, item):
+        if not self.loading and self.current_path:
+            self._changed = True
+            self.on_change.emit(self.current_path)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Save):
+            if self.current_path:
+                self.on_save.emit(self.current_path, self._to_csv_string())
+        else:
+            super().keyPressEvent(event)
+
+    def _to_csv_string(self):
+        # 导出当前表格为CSV字符串
+        from io import StringIO
+
+        output = StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        for r in range(self.table.rowCount()):
+            row = []
+            for c in range(self.table.columnCount()):
+                item = self.table.item(r, c)
+                row.append(item.text() if item else "")
+            writer.writerow(row)
+        return output.getvalue()
+
+    def add_row(self):
+        self.table.insertRow(self.table.rowCount())
+
+    def add_column(self):
+        self.table.insertColumn(self.table.columnCount())
+
+    def remove_row(self):
+        row = self.table.currentRow()
+        if row >= 0:
+            self.table.removeRow(row)
+
+    def remove_column(self):
+        col = self.table.currentColumn()
+        if col >= 0:
+            self.table.removeColumn(col)
+
+
+from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtGui import (
+    QFont,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+    QColor,
+    QKeySequence,
+)
 from audio_player import MediaPlayer
 import numpy as np
 import librosa  # 用于高效加载音频数据
@@ -93,6 +220,44 @@ class TextEditor(QWidget):
             super().keyPressEvent(event)
 
 
+class WaveformLoader(QThread):
+    """后台线程: 负责读取与降采样音频，避免阻塞 UI"""
+
+    loaded = pyqtSignal(object, int, object)  # data, sr, resampled
+    failed = pyqtSignal(str)
+
+    def __init__(self, path, target_points):
+        super().__init__()
+        self.path = path
+        self.target_points = target_points
+
+    def run(self):
+        try:
+            data, sr = librosa.load(self.path, sr=None, mono=True)
+            if len(data) > self.target_points:
+                resampled = self._downsample_data(data, self.target_points)
+            else:
+                resampled = data
+            self.loaded.emit(data, sr, resampled)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+    @staticmethod
+    def _downsample_data(data, target_points):
+        step = len(data) // target_points
+        if step < 1:
+            return data
+        downsampled = []
+        for i in range(0, len(data), step):
+            block = data[i : i + step]
+            if len(block) > 0:
+                max_val = np.max(block)
+                min_val = np.min(block)
+                downsampled.append(max_val)
+                downsampled.append(min_val)
+        return np.array(downsampled)
+
+
 class WaveformWidget(QWidget):
     """
     音频波形图预览组件
@@ -108,47 +273,49 @@ class WaveformWidget(QWidget):
         self.sr = 0  # 采样率
         self.resampled_data = None  # 用于绘制的降采样数据 (新)
         self.current_time_ms = 0  # 当前播放时间 (毫秒) (新)
+        self._loader = None
+        self._loading = False
+        self._is_playing = False  # 是否正在播放，用于控制竖线显示 (新)
 
     def load_file(self, path):
-        try:
-            # 使用 librosa 加载音频数据，默认转为单声道
-            self.data, self.sr = librosa.load(path, sr=None, mono=True)
+        # 终止旧线程，防止并发加载
+        if self._loader and self._loader.isRunning():
+            self._loader.requestInterruption()
+            self._loader.wait()
 
-            # --- 解决波形渲染慢: 降采样/数据压缩 --- (新)
-            # 目标点数：例如 1500 个点，确保在大多数屏幕宽度下渲染速度快
-            target_points = 1500
-            if len(self.data) > target_points:
-                # 使用 librosa.resample 或简单取最大值（这里使用更简单的最大值抽样）
-                self.resampled_data = self._downsample_data(self.data, target_points)
-            else:
-                self.resampled_data = self.data
+        self.data = None
+        self.resampled_data = None
+        self.sr = 0
+        self.current_time_ms = 0
+        self._loading = True
+        self.update()
 
-            self.current_time_ms = 0  # 重置进度
-            self.update()  # 触发 paintEvent 重新绘制
-        except Exception as e:
-            QMessageBox.critical(self, "音频加载错误", f"无法加载音频文件: {e}")
-            self.data = None
-            self.sr = 0
-            self.resampled_data = None
-            self.update()
+        target_points = 1500
+        self._loader = WaveformLoader(path, target_points)
+        self._loader.loaded.connect(self._on_loaded)
+        self._loader.failed.connect(self._on_failed)
+        self._loader.start()
 
-    def _downsample_data(self, data, target_points):
-        """对音频数据进行最大值抽样降采样，用于快速绘制"""
-        step = len(data) // target_points
-        if step < 1:
-            return data
+    def _on_loaded(self, data, sr, resampled):
+        self.data = data
+        self.sr = sr
+        self.resampled_data = resampled
+        self.current_time_ms = 0
+        # 加载完成后立刻显示进度竖线在最左侧（即0位置）
+        # 即使未开始播放也可见，满足“打开就显示”的需求
+        self._is_playing = True
+        self._loading = False
+        self.update()
 
-        # 简单块级最大值抽样
-        downsampled = []
-        for i in range(0, len(data), step):
-            block = data[i : i + step]
-            if len(block) > 0:
-                # 保留正负最大值，用于绘制上下包络线
-                max_val = np.max(block)
-                min_val = np.min(block)
-                downsampled.append(max_val)
-                downsampled.append(min_val)  # 每次采样有两个点
-        return np.array(downsampled)
+    def _on_failed(self, message):
+        QMessageBox.critical(self, "音频加载错误", f"无法加载音频文件: {message}")
+        self.data = None
+        self.sr = 0
+        self.resampled_data = None
+        # 加载失败不显示竖线
+        self._is_playing = False
+        self._loading = False
+        self.update()
 
     def get_duration_ms(self):
         """获取音频总时长 (毫秒)"""
@@ -161,11 +328,26 @@ class WaveformWidget(QWidget):
         self.current_time_ms = current_time_ms
         self.update()  # 重新绘制
 
+    def set_playing(self, is_playing: bool):
+        """更新播放状态，仅播放时显示竖线 (新)"""
+        self._is_playing = is_playing
+        # 暂停/停止后不显示竖线，播放时根据当前位置显示
+        self.update()
+
     def paintEvent(self, event):
         """自定义绘制波形图和进度竖线"""
         super().paintEvent(event)
 
         # 使用 resampled_data 进行绘制 (新)
+        if self._loading:
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(255, 255, 255))
+            painter.setPen(QPen(QColor(120, 120, 120), 1))
+            painter.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter, "正在加载波形..."
+            )
+            return
+
         if self.resampled_data is None or len(self.resampled_data) == 0:
             return
 
@@ -207,7 +389,8 @@ class WaveformWidget(QWidget):
 
         # --- 绘制同步竖线 (新) ---
         total_duration_ms = self.get_duration_ms()
-        if total_duration_ms > 0 and self.current_time_ms > 0:
+        # 仅在播放状态下显示竖线；初始位置为0时不显示
+        if total_duration_ms > 0 and self._is_playing:
             # 计算竖线在波形图上的 X 坐标
             progress_ratio = self.current_time_ms / total_duration_ms
             x_pos = int(progress_ratio * width)
@@ -236,9 +419,7 @@ class WaveformWidget(QWidget):
 
             # 发送信号，请求播放器跳转
             self.on_seek_request.emit(target_time_ms)
-
-            # 立即更新竖线位置，给用户反馈
-            self.update_play_position(target_time_ms)
+            # 不在此处更新竖线位置；竖线仅在播放时显示，由播放器位置驱动
 
         super().mousePressEvent(event)
 
@@ -265,6 +446,9 @@ class AudioPlayerWithWaveform(QWidget):
             self.waveform_widget.update_play_position
         )
 
+        # 3. 连接播放状态变化，控制竖线显示 (新)
+        self.media_player.play_state_changed.connect(self.waveform_widget.set_playing)
+
         layout.addWidget(self.waveform_widget)
         layout.addWidget(self.media_player)
 
@@ -274,6 +458,9 @@ class AudioPlayerWithWaveform(QWidget):
 
     def stop(self):
         self.media_player.stop()
+        # 停止后复位波形位置到起点并隐藏竖线
+        self.waveform_widget.set_playing(False)
+        self.waveform_widget.update_play_position(0)
 
 
 class MidiPreview(QWidget):
@@ -446,23 +633,33 @@ class EditorManager(QWidget):
         self.empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.stack.addWidget(self.empty_lbl)
 
-        # Page 1: Text Editor
+        # Page 1: CSV Tab (表格+文本切换)
+        self.csv_tab = QTabWidget()
+        self.csv_table_editor = CsvTableEditor()
+        self.csv_text_editor = TextEditor()
+        self.csv_table_editor.on_save.connect(self._save_csv_file)
+        self.csv_table_editor.on_change.connect(self.file_changed.emit)
+        self.csv_text_editor.on_save.connect(self._save_text_file)
+        self.csv_text_editor.on_change.connect(self.file_changed.emit)
+        self.csv_tab.addTab(self.csv_table_editor, "表格视图")
+        self.csv_tab.addTab(self.csv_text_editor, "纯文本视图")
+        self.stack.addWidget(self.csv_tab)
+
+        # Page 2: Text Editor (非csv)
         self.text_editor = TextEditor()
         self.text_editor.on_save.connect(self._save_text_file)
         self.text_editor.on_change.connect(self.file_changed.emit)
         self.stack.addWidget(self.text_editor)
 
-        # Page 2: Audio Player (新的集成组件)
-        # 注意: self.media_player 现在是 AudioPlayerWithWaveform 的实例，
-        # 它内部包含了旧的 MediaPlayer 实例
+        # Page 3: Audio Player (新的集成组件)
         self.audio_widget = AudioPlayerWithWaveform()
         self.stack.addWidget(self.audio_widget)
 
-        # Page 3: MIDI Preview (新的钢琴卷帘组件)
-        self.midi_preview = PianoRollWidget()  # 使用新的 PianoRollWidget
+        # Page 4: MIDI Preview (新的钢琴卷帘组件)
+        self.midi_preview = PianoRollWidget()
         self.stack.addWidget(self.midi_preview)
 
-        # Page 4: Old MIDI Info (作为备用，可以移除)
+        # Page 5: Old MIDI Info (备用)
         self.midi_info_old = MidiPreview()
         self.stack.addWidget(self.midi_info_old)
 
@@ -479,19 +676,33 @@ class EditorManager(QWidget):
 
         ext = os.path.splitext(path)[1].lower()
 
-        if ext in [".txt", ".csv", ".py", ".md", ".log", ".json"]:
+        if ext == ".csv":
+            # 优先尝试表格视图，失败则切换到纯文本
             self.stack.setCurrentIndex(1)
+            try:
+                self.csv_table_editor.load_file(path)
+                self.csv_tab.setTabEnabled(0, True)
+                self.csv_tab.setTabEnabled(1, True)
+                self.csv_tab.setCurrentIndex(0)
+                self.csv_text_editor.load_file(path)  # 也加载文本，便于切换
+            except Exception as e:
+                # 解析失败，禁用表格页，仅显示文本
+                self.csv_tab.setTabEnabled(0, False)
+                self.csv_tab.setTabEnabled(1, True)
+                self.csv_tab.setCurrentIndex(1)
+                self.csv_text_editor.load_file(path)
+
+        elif ext in [".txt", ".py", ".md", ".log", ".json"]:
+            self.stack.setCurrentIndex(2)
             self.text_editor.load_file(path)
 
-        # 使用新的集成音频组件
         elif ext in [".wav", ".mp3", ".ogg", ".flac"]:
-            self.stack.setCurrentIndex(2)
-            self.audio_widget.load_file(path)  # 调用新组件的 load_file
-
-        # 使用新的钢琴卷帘组件
-        elif ext in [".mid", ".midi"]:
             self.stack.setCurrentIndex(3)
-            self.midi_preview.load_file(path)  # 调用新组件的 load_file
+            self.audio_widget.load_file(path)
+
+        elif ext in [".mid", ".midi"]:
+            self.stack.setCurrentIndex(4)
+            self.midi_preview.load_file(path)
 
         else:
             self.stack.setCurrentIndex(0)
@@ -499,19 +710,23 @@ class EditorManager(QWidget):
 
     def close_all_tabs(self):
         """关闭所有打开的编辑器/预览器，重置为空白状态"""
-        # 1. 停止播放
-        self.media_player.stop()  # 通过 property 访问内部播放器
-
-        # 2. 清空文本编辑器 (使用 clear 避免触发 change 信号)
+        self.media_player.stop()
         self.text_editor.clear()
-
-        # 3. 切换回空白页
+        self.csv_table_editor.clear()
+        self.csv_text_editor.clear()
         self.stack.setCurrentIndex(0)
         self.empty_lbl.setText("请在左侧选择文件")
 
     def _save_text_file(self, path, content):
         try:
-            # 使用 newline='' 确保在 Windows 上保存 CSV 文件时不会产生额外的空行
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(content)
+            self.file_saved.emit(path)
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", str(e))
+
+    def _save_csv_file(self, path, content):
+        try:
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
                 f.write(content)
             self.file_saved.emit(path)
