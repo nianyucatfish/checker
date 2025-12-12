@@ -98,28 +98,75 @@ class WaveformWidget(QWidget):
     音频波形图预览组件
     """
 
+    # 新增信号: 请求跳转到指定时间 (毫秒)
+    on_seek_request = pyqtSignal(int)
+
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(200)
-        self.data = None  # 音频数据
+        self.data = None  # 原始音频数据
         self.sr = 0  # 采样率
+        self.resampled_data = None  # 用于绘制的降采样数据 (新)
+        self.current_time_ms = 0  # 当前播放时间 (毫秒) (新)
 
     def load_file(self, path):
         try:
-            # 使用 librosa 加载音频数据，默认转为单声道，以便绘制
-            # 设置 sr=None 以保留原始采样率
+            # 使用 librosa 加载音频数据，默认转为单声道
             self.data, self.sr = librosa.load(path, sr=None, mono=True)
+
+            # --- 解决波形渲染慢: 降采样/数据压缩 --- (新)
+            # 目标点数：例如 1500 个点，确保在大多数屏幕宽度下渲染速度快
+            target_points = 1500
+            if len(self.data) > target_points:
+                # 使用 librosa.resample 或简单取最大值（这里使用更简单的最大值抽样）
+                self.resampled_data = self._downsample_data(self.data, target_points)
+            else:
+                self.resampled_data = self.data
+
+            self.current_time_ms = 0  # 重置进度
             self.update()  # 触发 paintEvent 重新绘制
         except Exception as e:
             QMessageBox.critical(self, "音频加载错误", f"无法加载音频文件: {e}")
             self.data = None
             self.sr = 0
+            self.resampled_data = None
             self.update()
 
+    def _downsample_data(self, data, target_points):
+        """对音频数据进行最大值抽样降采样，用于快速绘制"""
+        step = len(data) // target_points
+        if step < 1:
+            return data
+
+        # 简单块级最大值抽样
+        downsampled = []
+        for i in range(0, len(data), step):
+            block = data[i : i + step]
+            if len(block) > 0:
+                # 保留正负最大值，用于绘制上下包络线
+                max_val = np.max(block)
+                min_val = np.min(block)
+                downsampled.append(max_val)
+                downsampled.append(min_val)  # 每次采样有两个点
+        return np.array(downsampled)
+
+    def get_duration_ms(self):
+        """获取音频总时长 (毫秒)"""
+        if self.data is None or self.sr == 0:
+            return 0
+        return int(len(self.data) / self.sr * 1000)
+
+    def update_play_position(self, current_time_ms):
+        """更新播放竖线的位置 (新)"""
+        self.current_time_ms = current_time_ms
+        self.update()  # 重新绘制
+
     def paintEvent(self, event):
-        """自定义绘制波形图"""
+        """自定义绘制波形图和进度竖线"""
         super().paintEvent(event)
-        if self.data is None or len(self.data) == 0:
+
+        # 使用 resampled_data 进行绘制 (新)
+        if self.resampled_data is None or len(self.resampled_data) == 0:
             return
 
         painter = QPainter(self)
@@ -129,11 +176,10 @@ class WaveformWidget(QWidget):
 
         # 背景和基础设置
         painter.fillRect(rect, QColor(255, 255, 255))
-        painter.setPen(QPen(QColor(0, 120, 215), 1))  # 波形颜色
 
-        # 压缩数据以适应像素宽度（最大值抽样）
-        step = len(self.data) / width
-        max_amplitude = np.max(np.abs(self.data)) or 1.0
+        # 实际绘制的数据和最大振幅 (使用原始数据的最大振幅进行归一化，以避免降采样引入的偏差)
+        data_to_draw = self.resampled_data
+        max_amplitude = np.max(np.abs(self.data)) or 1.0  # 使用原始最大振幅
 
         # 绘制中心线 (0幅值)
         center_y = height / 2
@@ -142,27 +188,59 @@ class WaveformWidget(QWidget):
 
         painter.setPen(QPen(QColor(0, 120, 215), 1))
 
-        # 绘制波形
-        # 我们只画一条线来代表波形的外轮廓 (上包络线)
-        points = []
-        for x in range(width):
-            start = int(x * step)
-            end = int((x + 1) * step)
+        # 绘制波形 (使用降采样数据)
+        # 降采样后，每两个点代表一个X坐标上的最大/最小振幅
+        num_points = len(data_to_draw) // 2
+        for i in range(num_points):
+            x = int(i / num_points * width)
 
-            # 从数据窗口中采样，取最大幅值（代表波形高度）
-            window = self.data[start:end]
-            if len(window) > 0:
-                # 归一化后映射到绘图区域
-                y_max = np.max(window) / max_amplitude
-                y_min = np.min(window) / max_amplitude
+            # 归一化并映射到屏幕坐标
+            y_max_norm = data_to_draw[i * 2] / max_amplitude
+            y_min_norm = data_to_draw[i * 2 + 1] / max_amplitude
 
-                # 映射到屏幕坐标
-                # 绘制上下包络线
-                y1 = center_y - (y_max * center_y * 0.9)  # 90%高度
-                y2 = center_y - (y_min * center_y * 0.9)
+            # 映射到屏幕坐标
+            y1 = center_y - (y_max_norm * center_y * 0.9)  # 90%高度
+            y2 = center_y - (y_min_norm * center_y * 0.9)
 
-                # 使用 QPainter.drawLine 绘制垂直的采样线段
-                painter.drawLine(x, int(y1), x, int(y2))
+            # 使用 QPainter.drawLine 绘制垂直的采样线段
+            painter.drawLine(x, int(y1), x, int(y2))
+
+        # --- 绘制同步竖线 (新) ---
+        total_duration_ms = self.get_duration_ms()
+        if total_duration_ms > 0 and self.current_time_ms > 0:
+            # 计算竖线在波形图上的 X 坐标
+            progress_ratio = self.current_time_ms / total_duration_ms
+            x_pos = int(progress_ratio * width)
+
+            # 绘制醒目的进度竖线
+            painter.setPen(QPen(QColor(255, 0, 0), 2))  # 红色，2像素宽
+            painter.drawLine(x_pos, 0, x_pos, height)
+
+    def mousePressEvent(self, event):
+        """点击波形图跳转到对应时间 (新)"""
+        if self.data is None or self.sr == 0:
+            super().mousePressEvent(event)
+            return
+
+        width = self.rect().width()
+        total_duration_ms = self.get_duration_ms()
+
+        if event.button() == Qt.MouseButton.LeftButton and total_duration_ms > 0:
+            x_click = event.position().x()
+
+            # 计算点击位置占总宽度的比例
+            click_ratio = max(0, min(1, x_click / width))
+
+            # 转换为目标时间 (毫秒)
+            target_time_ms = int(click_ratio * total_duration_ms)
+
+            # 发送信号，请求播放器跳转
+            self.on_seek_request.emit(target_time_ms)
+
+            # 立即更新竖线位置，给用户反馈
+            self.update_play_position(target_time_ms)
+
+        super().mousePressEvent(event)
 
 
 class AudioPlayerWithWaveform(QWidget):
@@ -177,6 +255,15 @@ class AudioPlayerWithWaveform(QWidget):
 
         self.waveform_widget = WaveformWidget()
         self.media_player = MediaPlayer()  # 假设 MediaPlayer 提供了播放控制 UI
+
+        # --- 新增连接逻辑 (现在 MediaPlayer 有 position_changed 信号) ---
+        # 1. 连接波形图点击跳转请求到播放器
+        self.waveform_widget.on_seek_request.connect(self.media_player.seek_ms)
+
+        # 2. 连接播放器位置更新信号到波形图，以同步竖线 (已修正)
+        self.media_player.position_changed.connect(
+            self.waveform_widget.update_play_position
+        )
 
         layout.addWidget(self.waveform_widget)
         layout.addWidget(self.media_player)
