@@ -204,15 +204,178 @@ class LogicChecker:
             file_check_callback=None,
         )
 
-        # 特殊检查：CSV 内容表头 (保留原有的特殊逻辑)
+        # 更严格的_Beat.csv检查：严格两列，表头必须为TIME,LABEL，且全大写
         beat_path = os.path.join(csv_root, f"{song_name}_Beat.csv")
         if os.path.exists(beat_path):
             try:
                 with open(beat_path, "r", encoding="utf-8-sig") as f:
-                    line1 = f.readline().strip()
-                    if "TIME,LABEL" not in line1.upper():
-                        add_error(beat_path, "[表头错误] 需包含 TIME,LABEL")
-            except:
-                pass
+                    lines = f.readlines()
+                if not lines:
+                    add_error(beat_path, "[内容错误] 文件为空")
+                else:
+                    header = lines[0].strip()
+                    if header != "TIME,LABEL":
+                        add_error(
+                            beat_path,
+                            "[表头错误] 必须严格为 TIME,LABEL（全大写，逗号分隔，不能有多余空格）",
+                        )
+                    for idx, line in enumerate(lines[1:], start=2):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.split(",")
+                        if len(parts) != 2:
+                            add_error(beat_path, f"[列数错误] 第{idx}行不是2列")
+                        # 检查是否有多余的列名（如小写、空格等）
+                        if idx == 2 and (
+                            "time" in line.lower() or "label" in line.lower()
+                        ):
+                            add_error(
+                                beat_path, f"[内容错误] 第{idx}行疑似表头重复或格式不符"
+                            )
+            except Exception as e:
+                add_error(beat_path, f"[读取错误] {e}")
+
+        # 更严格的_Structure.csv检查：只能用Intro,Verse,Chorus,Bridge,Chorus,Outro六种，且时间格式为mm:ss
+        structure_path = os.path.join(csv_root, f"{song_name}_Structure.csv")
+        allowed_labels = {"Intro", "Verse", "Chorus", "Bridge", "Outro"}
+        if os.path.exists(structure_path):
+            try:
+                with open(structure_path, "r", encoding="utf-8-sig") as f:
+                    lines = f.readlines()
+                if not lines:
+                    add_error(structure_path, "[内容错误] 文件为空")
+                else:
+                    header = lines[0].strip()
+                    header_labels = [h.strip() for h in header.split(",") if h.strip()]
+                    if not header_labels:
+                        add_error(structure_path, "[表头错误] 不能为空")
+                    for h in header_labels:
+                        if h not in allowed_labels:
+                            add_error(
+                                structure_path,
+                                f"[表头错误] {h} 不在允许的段落类型 {allowed_labels}",
+                            )
+                    # 检查内容行
+                    for idx, line in enumerate(lines[1:], start=2):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = [p.strip() for p in line.split(",") if p.strip()]
+                        if len(parts) != len(header_labels):
+                            add_error(
+                                structure_path,
+                                f"[列数错误] 第{idx}行应为{len(header_labels)}列",
+                            )
+                        for t in parts:
+                            # 检查时间格式 mm:ss
+                            if not re.match(r"^\d{2}:\d{2}$", t):
+                                add_error(
+                                    structure_path,
+                                    f"[时间格式错误] 第{idx}行 {t} 应为mm:ss格式",
+                                )
+            except Exception as e:
+                add_error(structure_path, f"[读取错误] {e}")
+
+        # =========================================================
+        #  7. 混音工程原文件夹检查
+        # =========================================================
+        mix_proj_root = os.path.join(song_path, "混音工程原文件")
+        instr_map_path = os.path.join(mix_proj_root, "乐器音源对照表.csv")
+        if os.path.exists(instr_map_path):
+            try:
+                with open(instr_map_path, "r", encoding="utf-8-sig") as f:
+                    lines = f.readlines()
+                if not lines:
+                    add_error(instr_map_path, "[内容错误] 文件为空")
+                else:
+                    header = lines[0].strip()
+                    if header != "乐器,音源":
+                        add_error(instr_map_path, "[表头错误] 必须严格为 乐器,音源")
+                    for idx, line in enumerate(lines[1:], start=2):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.split(",")
+                        if len(parts) != 2:
+                            add_error(instr_map_path, f"[列数错误] 第{idx}行不是2列")
+            except Exception as e:
+                add_error(instr_map_path, f"[读取错误] {e}")
+
+            if os.path.exists(mix_proj_root):
+                # 获取歌曲名称 (假设 song_path 的最后一级目录即为歌曲名)
+                # 如果你的 song_name 变量已经在前面定义过，可以直接使用
+
+                # 获取所有wav文件
+                wav_files = [
+                    f for f in os.listdir(mix_proj_root) if f.lower().endswith(".wav")
+                ]
+
+                # 用于统计每个乐器的文件信息
+                # 结构: { "乐器名": [ {"file": "文件名", "has_num": True/False}, ... ] }
+                instrument_groups = {}
+
+                for wav_file in wav_files:
+                    # 1. 检查前缀 (歌曲名_...)
+                    if not wav_file.startswith(song_name + "_"):
+                        add_error(
+                            os.path.join(mix_proj_root, wav_file),
+                            f"[命名错误] 文件必须以歌曲名 '{song_name}_' 开头",
+                        )
+                        continue
+
+                    # 去掉后缀和前面的歌曲名，只剩下 "乐器_序号" 或 "乐器"
+                    content_part = os.path.splitext(wav_file)[0][len(song_name) + 1 :]
+
+                    parts = content_part.split("_")
+
+                    inst_name = ""
+                    has_num = False
+
+                    # 2. 解析命名结构
+                    if len(parts) == 1:
+                        # 格式：歌曲名_乐器 (无序号)
+                        inst_name = parts[0]
+                        has_num = False
+                    elif len(parts) == 2 and parts[1].isdigit():
+                        # 格式：歌曲名_乐器_序号 (有序号)
+                        inst_name = parts[0]
+                        has_num = True
+                    else:
+                        # 格式异常 (例如由多个下划线，或者序号不是数字)
+                        add_error(
+                            os.path.join(mix_proj_root, wav_file),
+                            "[格式错误] 命名应为 '歌曲名_乐器名' 或 '歌曲名_乐器名_序号'",
+                        )
+                        continue
+
+                    # 存入字典进行后续统计
+                    if inst_name not in instrument_groups:
+                        instrument_groups[inst_name] = []
+                    instrument_groups[inst_name].append(
+                        {"file": wav_file, "has_num": has_num}
+                    )
+
+                # 3. 校验“单轨无序号，多轨有序号”的逻辑
+                for inst_name, items in instrument_groups.items():
+                    count = len(items)
+
+                    if count == 1:
+                        # 只有一个轨道，规则要求：不用写序号
+                        item = items[0]
+                        if item["has_num"]:
+                            add_error(
+                                os.path.join(mix_proj_root, item["file"]),
+                                f"[命名冗余] 乐器 '{inst_name}' 只有一条轨道，不应包含序号",
+                            )
+
+                    elif count > 1:
+                        # 有多个轨道，规则要求：必须写序号
+                        for item in items:
+                            if not item["has_num"]:
+                                add_error(
+                                    os.path.join(mix_proj_root, item["file"]),
+                                    f"[命名缺失] 乐器 '{inst_name}' 有 {count} 条轨道，必须通过序号区分",
+                                )
 
         return error_map

@@ -3,9 +3,11 @@
 包含文本编辑器、音频播放器、MIDI预览器和编辑器管理器
 """
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt, QThread
 import os
 import struct
+import csv
+from io import StringIO
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -20,7 +22,21 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QHBoxLayout,
 )
-import csv
+from PyQt6.QtGui import (
+    QFont,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+    QColor,
+    QKeySequence,
+    QPainter,
+    QBrush,
+    QPen,
+)
+import numpy as np
+import librosa
+import mido
+import pyqtgraph as pg
+from audio_player import MediaPlayer
 
 
 class CsvTableEditor(QWidget):
@@ -64,25 +80,40 @@ class CsvTableEditor(QWidget):
         self._changed = False
 
     def load_file(self, path):
-        self.loading = True
+        """从文件加载"""
         self.current_path = path
-        self._changed = False
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
-                reader = csv.reader(f)
-                data = list(reader)
+                content = f.read()
+            self.load_from_string(content)
+        except Exception as e:
+            raise RuntimeError(f"CSV文件读取失败: {e}")
+
+    def load_from_string(self, content):
+        """从字符串加载数据 (用于视图同步)"""
+        self.loading = True
+        self._changed = False
+        try:
+            f = StringIO(content)
+            reader = csv.reader(f)
+            data = list(reader)
+
             if not data:
                 data = [[]]
+
             self.table.clear()
             self.table.setRowCount(len(data))
-            self.table.setColumnCount(max(len(row) for row in data))
+            self.table.setColumnCount(max(len(row) for row in data) if data else 0)
+
             for r, row in enumerate(data):
                 for c, val in enumerate(row):
                     item = QTableWidgetItem(val)
                     self.table.setItem(r, c, item)
         except Exception as e:
-            raise RuntimeError(f"CSV解析失败: {e}")
-        self.loading = False
+            # 解析出错时不崩溃，弹窗提示或者在表格显示错误
+            print(f"CSV解析警告: {e}")
+        finally:
+            self.loading = False
 
     def clear(self):
         self.loading = True
@@ -106,8 +137,6 @@ class CsvTableEditor(QWidget):
 
     def _to_csv_string(self):
         # 导出当前表格为CSV字符串
-        from io import StringIO
-
         output = StringIO()
         writer = csv.writer(output, lineterminator="\n")
         for r in range(self.table.rowCount()):
@@ -120,35 +149,28 @@ class CsvTableEditor(QWidget):
 
     def add_row(self):
         self.table.insertRow(self.table.rowCount())
+        self._handle_manual_change()
 
     def add_column(self):
         self.table.insertColumn(self.table.columnCount())
+        self._handle_manual_change()
 
     def remove_row(self):
         row = self.table.currentRow()
         if row >= 0:
             self.table.removeRow(row)
+            self._handle_manual_change()
 
     def remove_column(self):
         col = self.table.currentColumn()
         if col >= 0:
             self.table.removeColumn(col)
+            self._handle_manual_change()
 
-
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
-from PyQt6.QtGui import (
-    QFont,
-    QSyntaxHighlighter,
-    QTextCharFormat,
-    QColor,
-    QKeySequence,
-)
-from audio_player import MediaPlayer
-import numpy as np
-import librosa  # 用于高效加载音频数据
-import mido  # 用于解析 MIDI 文件
-import pyqtgraph as pg  # 用于高效的波形和钢琴卷帘绘图
-from PyQt6.QtGui import QPainter, QBrush, QPen
+    def _handle_manual_change(self):
+        """处理增删行列等非itemChanged触发的修改"""
+        if not self.loading and self.current_path:
+            self.on_change.emit(self.current_path)
 
 
 class CsvHighlighter(QSyntaxHighlighter):
@@ -198,6 +220,15 @@ class TextEditor(QWidget):
         except Exception as e:
             self.editor.setPlainText(f"无法读取文件: {e}")
         self.loading = False
+
+    def set_content(self, content):
+        """用于同步视图内容的设置方法"""
+        self.loading = True
+        self.editor.setPlainText(content)
+        self.loading = False
+
+    def get_content(self):
+        return self.editor.toPlainText()
 
     def clear(self):
         """清空编辑器且不触发修改信号"""
@@ -263,22 +294,20 @@ class WaveformWidget(QWidget):
     音频波形图预览组件
     """
 
-    # 新增信号: 请求跳转到指定时间 (毫秒)
     on_seek_request = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(200)
-        self.data = None  # 原始音频数据
-        self.sr = 0  # 采样率
-        self.resampled_data = None  # 用于绘制的降采样数据 (新)
-        self.current_time_ms = 0  # 当前播放时间 (毫秒) (新)
+        self.data = None
+        self.sr = 0
+        self.resampled_data = None
+        self.current_time_ms = 0
         self._loader = None
         self._loading = False
-        self._is_playing = False  # 是否正在播放，用于控制竖线显示 (新)
+        self._is_playing = False
 
     def load_file(self, path):
-        # 终止旧线程，防止并发加载
         if self._loader and self._loader.isRunning():
             self._loader.requestInterruption()
             self._loader.wait()
@@ -301,8 +330,6 @@ class WaveformWidget(QWidget):
         self.sr = sr
         self.resampled_data = resampled
         self.current_time_ms = 0
-        # 加载完成后立刻显示进度竖线在最左侧（即0位置）
-        # 即使未开始播放也可见，满足“打开就显示”的需求
         self._is_playing = True
         self._loading = False
         self.update()
@@ -312,33 +339,26 @@ class WaveformWidget(QWidget):
         self.data = None
         self.sr = 0
         self.resampled_data = None
-        # 加载失败不显示竖线
         self._is_playing = False
         self._loading = False
         self.update()
 
     def get_duration_ms(self):
-        """获取音频总时长 (毫秒)"""
         if self.data is None or self.sr == 0:
             return 0
         return int(len(self.data) / self.sr * 1000)
 
     def update_play_position(self, current_time_ms):
-        """更新播放竖线的位置 (新)"""
         self.current_time_ms = current_time_ms
-        self.update()  # 重新绘制
+        self.update()
 
     def set_playing(self, is_playing: bool):
-        """更新播放状态，仅播放时显示竖线 (新)"""
         self._is_playing = is_playing
-        # 暂停/停止后不显示竖线，播放时根据当前位置显示
         self.update()
 
     def paintEvent(self, event):
-        """自定义绘制波形图和进度竖线"""
         super().paintEvent(event)
 
-        # 使用 resampled_data 进行绘制 (新)
         if self._loading:
             painter = QPainter(self)
             painter.fillRect(self.rect(), QColor(255, 255, 255))
@@ -356,51 +376,36 @@ class WaveformWidget(QWidget):
         width = rect.width()
         height = rect.height()
 
-        # 背景和基础设置
         painter.fillRect(rect, QColor(255, 255, 255))
 
-        # 实际绘制的数据和最大振幅 (使用原始数据的最大振幅进行归一化，以避免降采样引入的偏差)
         data_to_draw = self.resampled_data
-        max_amplitude = np.max(np.abs(self.data)) or 1.0  # 使用原始最大振幅
+        max_amplitude = np.max(np.abs(self.data)) or 1.0
 
-        # 绘制中心线 (0幅值)
         center_y = height / 2
         painter.setPen(QPen(QColor(180, 180, 180), 1))
         painter.drawLine(0, int(center_y), width, int(center_y))
 
         painter.setPen(QPen(QColor(0, 120, 215), 1))
 
-        # 绘制波形 (使用降采样数据)
-        # 降采样后，每两个点代表一个X坐标上的最大/最小振幅
         num_points = len(data_to_draw) // 2
         for i in range(num_points):
             x = int(i / num_points * width)
-
-            # 归一化并映射到屏幕坐标
             y_max_norm = data_to_draw[i * 2] / max_amplitude
             y_min_norm = data_to_draw[i * 2 + 1] / max_amplitude
 
-            # 映射到屏幕坐标
-            y1 = center_y - (y_max_norm * center_y * 0.9)  # 90%高度
+            y1 = center_y - (y_max_norm * center_y * 0.9)
             y2 = center_y - (y_min_norm * center_y * 0.9)
 
-            # 使用 QPainter.drawLine 绘制垂直的采样线段
             painter.drawLine(x, int(y1), x, int(y2))
 
-        # --- 绘制同步竖线 (新) ---
         total_duration_ms = self.get_duration_ms()
-        # 仅在播放状态下显示竖线；初始位置为0时不显示
         if total_duration_ms > 0 and self._is_playing:
-            # 计算竖线在波形图上的 X 坐标
             progress_ratio = self.current_time_ms / total_duration_ms
             x_pos = int(progress_ratio * width)
-
-            # 绘制醒目的进度竖线
-            painter.setPen(QPen(QColor(255, 0, 0), 2))  # 红色，2像素宽
+            painter.setPen(QPen(QColor(255, 0, 0), 2))
             painter.drawLine(x_pos, 0, x_pos, height)
 
     def mousePressEvent(self, event):
-        """点击波形图跳转到对应时间 (新)"""
         if self.data is None or self.sr == 0:
             super().mousePressEvent(event)
             return
@@ -410,43 +415,26 @@ class WaveformWidget(QWidget):
 
         if event.button() == Qt.MouseButton.LeftButton and total_duration_ms > 0:
             x_click = event.position().x()
-
-            # 计算点击位置占总宽度的比例
             click_ratio = max(0, min(1, x_click / width))
-
-            # 转换为目标时间 (毫秒)
             target_time_ms = int(click_ratio * total_duration_ms)
-
-            # 发送信号，请求播放器跳转
             self.on_seek_request.emit(target_time_ms)
-            # 不在此处更新竖线位置；竖线仅在播放时显示，由播放器位置驱动
 
         super().mousePressEvent(event)
 
 
 class AudioPlayerWithWaveform(QWidget):
-    """
-    整合了播放器和波形图的容器
-    """
-
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.waveform_widget = WaveformWidget()
-        self.media_player = MediaPlayer()  # 假设 MediaPlayer 提供了播放控制 UI
+        self.media_player = MediaPlayer()
 
-        # --- 新增连接逻辑 (现在 MediaPlayer 有 position_changed 信号) ---
-        # 1. 连接波形图点击跳转请求到播放器
         self.waveform_widget.on_seek_request.connect(self.media_player.seek_ms)
-
-        # 2. 连接播放器位置更新信号到波形图，以同步竖线 (已修正)
         self.media_player.position_changed.connect(
             self.waveform_widget.update_play_position
         )
-
-        # 3. 连接播放状态变化，控制竖线显示 (新)
         self.media_player.play_state_changed.connect(self.waveform_widget.set_playing)
 
         layout.addWidget(self.waveform_widget)
@@ -454,20 +442,15 @@ class AudioPlayerWithWaveform(QWidget):
 
     def load_file(self, path):
         self.waveform_widget.load_file(path)
-        self.media_player.load_file(path)  # 假设 MediaPlayer 也有 load_file 方法
+        self.media_player.load_file(path)
 
     def stop(self):
         self.media_player.stop()
-        # 停止后复位波形位置到起点并隐藏竖线
         self.waveform_widget.set_playing(False)
         self.waveform_widget.update_play_position(0)
 
 
 class MidiPreview(QWidget):
-    """
-    MIDI 信息预览（无声，仅解析结构）
-    """
-
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
@@ -481,7 +464,6 @@ class MidiPreview(QWidget):
         self.text_view.setText(info)
 
     def _parse_midi_header(self, path):
-        # 简单的二进制解析，无需依赖 mido
         try:
             with open(path, "rb") as f:
                 chunk_type = f.read(4)
@@ -490,7 +472,6 @@ class MidiPreview(QWidget):
 
                 length = struct.unpack(">I", f.read(4))[0]
                 data = f.read(length)
-                # 格式: format, tracks, division (3个16位无符号整数)
                 fmt, tracks, division = struct.unpack(">hhh", data[:6])
 
                 info = f"=== MIDI 文件信息 ===\n\n"
@@ -505,10 +486,6 @@ class MidiPreview(QWidget):
 
 
 class PianoRollWidget(QWidget):
-    """
-    多轨 MIDI 钢琴卷帘预览（使用 PyQtGraph）
-    """
-
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
@@ -519,12 +496,9 @@ class PianoRollWidget(QWidget):
         self.plot_item.setTitle("MIDI 钢琴卷帘预览")
         self.plot_item.setLabel("left", "音高 (MIDI Note)")
         self.plot_item.setLabel("bottom", "时间 (Beats/Ticks)")
-        self.plot_item.setYRange(21, 108)  # 标准钢琴音符范围 A0-C8
-
-        # 禁用默认的交互式横轴缩放/拖动，让音符看起来更像矩形
+        self.plot_item.setYRange(21, 108)
         self.plot_item.hideAxis("bottom")
 
-        # 颜色映射表 (用于区分不同音轨/通道)
         self.colors = [
             (255, 0, 0),
             (0, 0, 255),
@@ -539,8 +513,7 @@ class PianoRollWidget(QWidget):
         layout.addWidget(self.plot_widget)
 
     def load_file(self, path):
-        self.plot_item.clear()  # 清空旧的绘图
-
+        self.plot_item.clear()
         try:
             mid = mido.MidiFile(path)
         except Exception as e:
@@ -549,19 +522,16 @@ class PianoRollWidget(QWidget):
 
         max_time = 0
 
-        # 遍历每个音轨
         for i, track in enumerate(mid.tracks):
             current_time = 0
-            open_notes = {}  # {note_number: start_time}
-            track_notes = []  # [(start_time, duration, pitch, velocity)]
+            open_notes = {}
+            track_notes = []
 
-            # 使用 mido 的累积时间
             for msg in track:
                 current_time += msg.time
 
                 if msg.type == "note_on" and msg.velocity > 0:
                     open_notes[msg.note] = current_time
-
                 elif msg.type == "note_off" or (
                     msg.type == "note_on" and msg.velocity == 0
                 ):
@@ -569,7 +539,6 @@ class PianoRollWidget(QWidget):
                     if note in open_notes:
                         start_time = open_notes.pop(note)
                         duration = current_time - start_time
-
                         if duration > 0:
                             track_notes.append(
                                 {
@@ -580,27 +549,17 @@ class PianoRollWidget(QWidget):
                                 }
                             )
 
-            # --- 绘制音符矩形 ---
-            # Pyqtgraph 不直接支持高效的矩形绘制，我们使用 BarGraphItem 模拟或使用 fillBetween
-
-            # 采用 QGraphicsRectItem 的方式，这是更准确的钢琴卷帘实现
             color = self.colors[i % len(self.colors)]
             brush = QBrush(QColor(*color, 180))
             pen = QPen(QColor(*color, 255), 0.5)
 
-            # 绘制音符的图形项
             for note_data in track_notes:
                 start = note_data["start"]
                 duration = note_data["end"] - start
                 pitch = note_data["pitch"]
 
-                # 转换为图形坐标 (x, y, width, height)
-                x = start
-                y = pitch - 0.5  # 音符框占据整个音高行
-                width = duration
-                height = 1.0
-
-                rect = pg.QtGui.QGraphicsRectItem(x, y, width, height)
+                # QGraphicsRectItem 绘制矩形
+                rect = pg.QtGui.QGraphicsRectItem(start, pitch - 0.5, duration, 1.0)
                 rect.setBrush(brush)
                 rect.setPen(pen)
                 self.plot_item.addItem(rect)
@@ -608,9 +567,9 @@ class PianoRollWidget(QWidget):
                 max_time = max(max_time, note_data["end"])
 
         if max_time > 0:
-            self.plot_item.setXRange(0, max_time * 1.05)  # X轴范围
+            self.plot_item.setXRange(0, max_time * 1.05)
             self.plot_item.setYRange(21, 108)
-            self.plot_item.showAxis("bottom")  # 有了范围后重新显示X轴
+            self.plot_item.showAxis("bottom")
 
 
 class EditorManager(QWidget):
@@ -637,12 +596,20 @@ class EditorManager(QWidget):
         self.csv_tab = QTabWidget()
         self.csv_table_editor = CsvTableEditor()
         self.csv_text_editor = TextEditor()
+
+        # 信号连接
         self.csv_table_editor.on_save.connect(self._save_csv_file)
         self.csv_table_editor.on_change.connect(self.file_changed.emit)
         self.csv_text_editor.on_save.connect(self._save_text_file)
         self.csv_text_editor.on_change.connect(self.file_changed.emit)
+
+        # 添加 Tab
         self.csv_tab.addTab(self.csv_table_editor, "表格视图")
         self.csv_tab.addTab(self.csv_text_editor, "纯文本视图")
+
+        # --- 修复缺陷：监听 Tab 切换以同步数据 ---
+        self.csv_tab.currentChanged.connect(self._on_csv_tab_changed)
+
         self.stack.addWidget(self.csv_tab)
 
         # Page 2: Text Editor (非csv)
@@ -651,24 +618,36 @@ class EditorManager(QWidget):
         self.text_editor.on_change.connect(self.file_changed.emit)
         self.stack.addWidget(self.text_editor)
 
-        # Page 3: Audio Player (新的集成组件)
+        # Page 3: Audio Player
         self.audio_widget = AudioPlayerWithWaveform()
         self.stack.addWidget(self.audio_widget)
 
-        # Page 4: MIDI Preview (新的钢琴卷帘组件)
+        # Page 4: MIDI Preview
         self.midi_preview = PianoRollWidget()
         self.stack.addWidget(self.midi_preview)
 
-        # Page 5: Old MIDI Info (备用)
+        # Page 5: Old MIDI Info
         self.midi_info_old = MidiPreview()
         self.stack.addWidget(self.midi_info_old)
 
         self.layout.addWidget(self.stack)
 
-    # 提供对内部播放器的访问，供上层调用 stop()
     @property
     def media_player(self):
         return self.audio_widget.media_player
+
+    def _on_csv_tab_changed(self, index):
+        """处理CSV视图切换时的数据同步"""
+        # index 0: 表格视图, index 1: 文本视图
+
+        if index == 0:
+            # 切换到表格：从文本编辑器获取文本 -> 解析 -> 填入表格
+            text_content = self.csv_text_editor.get_content()
+            self.csv_table_editor.load_from_string(text_content)
+        elif index == 1:
+            # 切换到文本：从表格获取内容 -> 转换为CSV字符串 -> 填入文本编辑器
+            csv_string = self.csv_table_editor._to_csv_string()
+            self.csv_text_editor.set_content(csv_string)
 
     def open_file(self, path):
         # 切换前停止播放
@@ -677,14 +656,22 @@ class EditorManager(QWidget):
         ext = os.path.splitext(path)[1].lower()
 
         if ext == ".csv":
-            # 优先尝试表格视图，失败则切换到纯文本
             self.stack.setCurrentIndex(1)
             try:
+                # 初始加载时，只加载表格，并尝试切换到表格页
+                # 文本页会在用户点击 Tab 切换时自动同步
                 self.csv_table_editor.load_file(path)
+
+                # 同时静默加载文本编辑器，防止第一次切换闪烁或没数据
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    self.csv_text_editor.set_content(f.read())
+                    # 更新当前路径，确保保存功能正常
+                    self.csv_text_editor.current_path = path
+
                 self.csv_tab.setTabEnabled(0, True)
                 self.csv_tab.setTabEnabled(1, True)
                 self.csv_tab.setCurrentIndex(0)
-                self.csv_text_editor.load_file(path)  # 也加载文本，便于切换
+
             except Exception as e:
                 # 解析失败，禁用表格页，仅显示文本
                 self.csv_tab.setTabEnabled(0, False)
@@ -709,7 +696,6 @@ class EditorManager(QWidget):
             self.empty_lbl.setText(f"不支持预览此文件类型: {ext}")
 
     def close_all_tabs(self):
-        """关闭所有打开的编辑器/预览器，重置为空白状态"""
         self.media_player.stop()
         self.text_editor.clear()
         self.csv_table_editor.clear()
