@@ -1,0 +1,30 @@
+# 1. 忽略 Python 编译产生的垃圾文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 2. 忽略虚拟环境 (非常重要！)
+# 你的环境名叫 venv，所以这行必须有
+venv/
+env/
+.venv/
+.env
+
+# 3. 忽略 PyInstaller 打包产物
+# 你的 exe 在 dist 里，中间产物在 build 里，都不需要上传
+build/
+dist/
+*.spec
+
+# 4. 忽略 IDE 配置文件 (看你用什么编辑器)
+.idea/
+.vscode/
+*.swp
+
+# 5. 忽略操作系统生成的文件
+.DS_Store
+Thumbs.db
+
+# 6. 忽略本地的敏感配置 (如果有)
+# 比如包含密码的 config.ini，如果不想公开就加上
+# config.ini
