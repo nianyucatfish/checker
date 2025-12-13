@@ -165,17 +165,24 @@ class MixPlaybackWorker(QThread):
     position_update = pyqtSignal(int)
     finished = pyqtSignal()
 
-    def __init__(self, tracks: List[MixTrack], samplerate: int):
+    def __init__(self, tracks: List[MixTrack], samplerate: int, start_frame: int = 0):
         super().__init__()
         self.tracks = tracks
         self.samplerate = samplerate
         self.stop_requested = False
         self.pause_requested = False
         self.master_gain = 1.0
-        self.current_frame = 0
+        # allow starting playback from an arbitrary frame (seeking)
+        self.current_frame = max(0, int(start_frame))
         self.max_frames = (
             max((track.data.size for track in tracks), default=0) if tracks else 0
         )
+
+    def set_max_frames(self, max_frames: int) -> None:
+        self.max_frames = max(0, int(max_frames))
+
+    def set_current_frame(self, frame: int) -> None:
+        self.current_frame = max(0, int(frame))
 
     def run(self) -> None:
         if self.max_frames == 0 or self.samplerate <= 0:
@@ -259,6 +266,9 @@ class MixConsoleWindow(QMainWindow):
         self.mix_samplerate: Optional[int] = None
         self.playback_worker: Optional[MixPlaybackWorker] = None
         self.is_paused = False
+        # Seeking UI state
+        self.user_seeking = False
+        self._was_playing_during_seek = False
         self.total_duration_ms = 0
 
         self._init_ui()
@@ -315,6 +325,10 @@ class MixConsoleWindow(QMainWindow):
         self.position_slider = QSlider(Qt.Orientation.Horizontal)
         self.position_slider.setEnabled(False)
         self.position_slider.setRange(0, 0)
+        # 支持点击/拖动寻位
+        self.position_slider.sliderPressed.connect(self._on_seek_pressed)
+        self.position_slider.sliderMoved.connect(self._on_seek_moved)
+        self.position_slider.sliderReleased.connect(self._on_seek_released)
         position_row.addWidget(self.position_slider)
 
         self.position_label = QLabel("00:00 / 00:00")
@@ -395,9 +409,9 @@ class MixConsoleWindow(QMainWindow):
         self.track_widgets[track.path] = widget
 
     def _remove_track(self, track: MixTrack) -> None:
-        if self.playback_worker and self.playback_worker.isRunning():
-            self._stop_playback(reset_position=True)
-
+        # Remove the track from list and UI. If playback is running, keep playing
+        # and update the worker's max_frames so the playback continues from the
+        # current position without resetting to start.
         idx = next((i for i, t in enumerate(self.tracks) if t.path == track.path), -1)
         if idx >= 0:
             self.tracks.pop(idx)
@@ -407,8 +421,20 @@ class MixConsoleWindow(QMainWindow):
             widget.setParent(None)
             widget.deleteLater()
 
+        # If no tracks remain, stop playback and reset position. Otherwise,
+        # update the worker's max frames so playback continues smoothly.
         if not self.tracks:
             self.mix_samplerate = None
+            if self.playback_worker and self.playback_worker.isRunning():
+                self._stop_playback(reset_position=True)
+        else:
+            worker = self.playback_worker
+            if worker and worker.isRunning():
+                new_max = max((t.data.size for t in self.tracks), default=0)
+                worker.set_max_frames(new_max)
+                # keep current frame within new bounds
+                if worker.current_frame >= worker.max_frames:
+                    worker.set_current_frame(min(worker.current_frame, worker.max_frames))
 
         self._refresh_duration()
         self._update_controls_state()
@@ -457,10 +483,12 @@ class MixConsoleWindow(QMainWindow):
             return
 
         self._stop_playback(reset_position=False)
-        self.position_slider.setValue(0)
-        self._update_time_label(0)
 
-        self.playback_worker = MixPlaybackWorker(self.tracks, self.mix_samplerate)
+        # Start from current slider position (seek support)
+        start_ms = self.position_slider.value() if self.position_slider.maximum() > 0 else 0
+        start_frame = int(start_ms * self.mix_samplerate / 1000) if self.mix_samplerate else 0
+
+        self.playback_worker = MixPlaybackWorker(self.tracks, self.mix_samplerate, start_frame=start_frame)
         self.playback_worker.set_master_gain(self.master_slider.value() / 100.0)
         self.playback_worker.position_update.connect(self._on_position_update)
         self.playback_worker.finished.connect(self._on_playback_finished)
@@ -471,6 +499,10 @@ class MixConsoleWindow(QMainWindow):
         self.is_paused = False
 
     def _on_position_update(self, position_ms: int) -> None:
+        # 如果用户正在拖动/寻位，则不覆盖滑块位置
+        if self.user_seeking:
+            return
+
         self.position_slider.setValue(min(position_ms, self.total_duration_ms))
         self._update_time_label(position_ms)
 
@@ -537,6 +569,41 @@ class MixConsoleWindow(QMainWindow):
             # 恢复各自的静音状态
             for path, widget in self.track_widgets.items():
                 widget.track.muted = widget.mute_btn.isChecked()
+
+    # ------------------------------------------------------------------
+    # Seeking handlers for position slider
+    def _on_seek_pressed(self) -> None:
+        self.user_seeking = True
+        # 如果正在播放，则临时暂停 worker（但不重置位置）
+        worker = self.playback_worker
+        if worker and worker.isRunning():
+            self._was_playing_during_seek = not self.is_paused
+            worker.pause_playback(True)
+            # reflect UI as paused
+            self.btn_play.setText("继续")
+
+    def _on_seek_moved(self, pos: int) -> None:
+        # 只更新时间显示，不改变播放状态
+        self._update_time_label(pos)
+
+    def _on_seek_released(self) -> None:
+        pos_ms = self.position_slider.value()
+        # 更新 worker 的播放位置（帧）
+        if self.mix_samplerate and self.playback_worker:
+            new_frame = int(pos_ms * self.mix_samplerate / 1000)
+            try:
+                self.playback_worker.set_current_frame(new_frame)
+            except Exception:
+                self.playback_worker.current_frame = new_frame
+
+        # 恢复播放（如果释放前正在播放）
+        if self.playback_worker and self.playback_worker.isRunning() and self._was_playing_during_seek:
+            self.playback_worker.pause_playback(False)
+            self.is_paused = False
+            self.btn_play.setText("暂停")
+
+        self._was_playing_during_seek = False
+        self.user_seeking = False
 
     # ------------------------------------------------------------------
     # Event overrides
