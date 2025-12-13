@@ -34,8 +34,8 @@ from PyQt6.QtGui import (
 )
 import numpy as np
 import librosa
-import mido
-import pyqtgraph as pg
+
+# 已移除图形 MIDI 预览依赖 (mido, pyqtgraph)。
 from audio_player import MediaPlayer
 
 
@@ -485,91 +485,7 @@ class MidiPreview(QWidget):
             return f"解析失败: {e}"
 
 
-class PianoRollWidget(QWidget):
-    def __init__(self):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.plot_widget = pg.PlotWidget()
-        self.plot_item = self.plot_widget.getPlotItem()
-        self.plot_item.setTitle("MIDI 钢琴卷帘预览")
-        self.plot_item.setLabel("left", "音高 (MIDI Note)")
-        self.plot_item.setLabel("bottom", "时间 (Beats/Ticks)")
-        self.plot_item.setYRange(21, 108)
-        self.plot_item.hideAxis("bottom")
-
-        self.colors = [
-            (255, 0, 0),
-            (0, 0, 255),
-            (0, 150, 0),
-            (255, 128, 0),
-            (128, 0, 128),
-            (0, 128, 128),
-            (150, 150, 0),
-            (50, 50, 50),
-        ]
-
-        layout.addWidget(self.plot_widget)
-
-    def load_file(self, path):
-        self.plot_item.clear()
-        try:
-            mid = mido.MidiFile(path)
-        except Exception as e:
-            QMessageBox.critical(self, "MIDI 加载错误", f"无法加载 MIDI 文件: {e}")
-            return
-
-        max_time = 0
-
-        for i, track in enumerate(mid.tracks):
-            current_time = 0
-            open_notes = {}
-            track_notes = []
-
-            for msg in track:
-                current_time += msg.time
-
-                if msg.type == "note_on" and msg.velocity > 0:
-                    open_notes[msg.note] = current_time
-                elif msg.type == "note_off" or (
-                    msg.type == "note_on" and msg.velocity == 0
-                ):
-                    note = msg.note
-                    if note in open_notes:
-                        start_time = open_notes.pop(note)
-                        duration = current_time - start_time
-                        if duration > 0:
-                            track_notes.append(
-                                {
-                                    "start": start_time,
-                                    "end": current_time,
-                                    "pitch": note,
-                                    "channel": msg.channel,
-                                }
-                            )
-
-            color = self.colors[i % len(self.colors)]
-            brush = QBrush(QColor(*color, 180))
-            pen = QPen(QColor(*color, 255), 0.5)
-
-            for note_data in track_notes:
-                start = note_data["start"]
-                duration = note_data["end"] - start
-                pitch = note_data["pitch"]
-
-                # QGraphicsRectItem 绘制矩形
-                rect = pg.QtGui.QGraphicsRectItem(start, pitch - 0.5, duration, 1.0)
-                rect.setBrush(brush)
-                rect.setPen(pen)
-                self.plot_item.addItem(rect)
-
-                max_time = max(max_time, note_data["end"])
-
-        if max_time > 0:
-            self.plot_item.setXRange(0, max_time * 1.05)
-            self.plot_item.setYRange(21, 108)
-            self.plot_item.showAxis("bottom")
+# 已移除 PianoRollWidget（图形 MIDI 预览）。
 
 
 class EditorManager(QWidget):
@@ -622,13 +538,9 @@ class EditorManager(QWidget):
         self.audio_widget = AudioPlayerWithWaveform()
         self.stack.addWidget(self.audio_widget)
 
-        # Page 4: MIDI Preview
-        self.midi_preview = PianoRollWidget()
-        self.stack.addWidget(self.midi_preview)
-
-        # Page 5: Old MIDI Info
-        self.midi_info_old = MidiPreview()
-        self.stack.addWidget(self.midi_info_old)
+        # Page 4: MIDI 元信息预览（只显示文件头信息）
+        self.midi_info = MidiPreview()
+        self.stack.addWidget(self.midi_info)
 
         self.layout.addWidget(self.stack)
 
@@ -688,8 +600,9 @@ class EditorManager(QWidget):
             self.audio_widget.load_file(path)
 
         elif ext in [".mid", ".midi"]:
+            # 仅显示 MIDI 元信息（文件头），不进行图形化预览
             self.stack.setCurrentIndex(4)
-            self.midi_preview.load_file(path)
+            self.midi_info.load_file(path)
 
         else:
             self.stack.setCurrentIndex(0)

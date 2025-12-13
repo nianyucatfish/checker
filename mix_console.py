@@ -96,6 +96,15 @@ class MixTrackWidget(QWidget):
             pass
         self.plot.setMinimumHeight(60)
         self.plot.setMaximumHeight(70)
+        # 允许父级滚动区域处理鼠标事件（尤其是滚轮），
+        # 否则 pyqtgraph 的 PlotWidget 会拦截滚轮事件导致页面无法上下滚动。
+        try:
+            self.plot.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+            )
+        except Exception:
+            # 兼容性保底：若属性不存在或设置失败，则不阻塞程序运行
+            pass
         self._draw_waveform(track.data, track.samplerate)
         wave_area_layout.addWidget(self.plot)
 
@@ -327,9 +336,7 @@ class MixConsoleWindow(QMainWindow):
         control_row = QHBoxLayout()
         control_row.setSpacing(10)
 
-        self.btn_add = QPushButton("添加轨道...")
-        self.btn_add.clicked.connect(self._on_add_button_clicked)
-        control_row.addWidget(self.btn_add)
+        # 已移除 UI 中的“添加轨道”按钮（由程序或其它模块负责添加轨道）
 
         self.btn_play = QPushButton("播放")
         self.btn_play.clicked.connect(self._toggle_play_pause)
@@ -503,18 +510,6 @@ class MixConsoleWindow(QMainWindow):
     def _on_track_solo(self, track: MixTrack, solo: bool) -> None:
         # 只要有任意轨道solo，则仅solo轨道发声，其余全部静音
         self._update_playback_mute_solo()
-
-    def _on_add_button_clicked(self) -> None:
-        from PyQt6.QtWidgets import QFileDialog
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择 WAV 文件",
-            os.getcwd(),
-            "WAV Files (*.wav)",
-        )
-        if file_path:
-            self.add_track_from_file(file_path)
 
     def _toggle_play_pause(self) -> None:
         if self.playback_worker and self.playback_worker.isRunning():

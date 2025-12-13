@@ -211,6 +211,35 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar("Tools")
         self.addToolBar(toolbar)
 
+        # --- 文件菜单动作 (纯文本) ---
+        # 将 "文件" 菜单放到工具栏最左侧，所以先创建菜单和对应 QAction
+        self.file_menu = QMenu(self)
+
+        # 文件菜单项
+        act_new_ws = QAction("新建工作区...", self)
+        act_new_ws.triggered.connect(self.open_new_workspace)
+        self.file_menu.addAction(act_new_ws)
+
+        act_open_ws = QAction("从文件夹打开工作区...", self)
+        act_open_ws.triggered.connect(self.open_workspace_from_folder)
+        self.file_menu.addAction(act_open_ws)
+
+        self.file_menu.addSeparator()
+
+        act_reveal = QAction("在资源管理器中显示根目录", self)
+        act_reveal.setToolTip(f"当前根目录: {self.root_dir}")
+        act_reveal.triggered.connect(
+            lambda: os.startfile(self.root_dir) if os.name == "nt" else None
+        )
+        self.file_menu.addAction(act_reveal)
+
+        # QAction "文件" 触发菜单显示（放到最左侧）
+        action_file = QAction("文件", self)
+        action_file.triggered.connect(
+            lambda: self._show_menu_under_action(action_file, toolbar)
+        )
+        toolbar.addAction(action_file)
+
         # 1. 扫描动作 (纯文本)
         action_scan = QAction("扫描", self)
         action_scan.setShortcut(QKeySequence("F5"))
@@ -223,45 +252,6 @@ class MainWindow(QMainWindow):
         self.action_mix_console.setCheckable(True)
         self.action_mix_console.toggled.connect(self.toggle_mix_console)
         toolbar.addAction(self.action_mix_console)
-
-        # 1.2 添加当前选中项到混音台
-        action_add_to_mixer = QAction("添加到混音台", self)
-        action_add_to_mixer.setShortcut(QKeySequence("Ctrl+M"))
-        action_add_to_mixer.triggered.connect(self.add_selected_to_mix_console)
-        toolbar.addAction(action_add_to_mixer)
-
-        # 2. 文件菜单动作 (纯文本)
-        self.file_menu = QMenu(self)
-
-        # 文件菜单项
-        act_new_ws = QAction("新建工作区...", self)
-        act_new_ws.triggered.connect(self.open_new_workspace)
-        self.file_menu.addAction(act_new_ws)
-
-        act_open_ws = QAction("从文件夹打开工作区...", self)
-        act_open_ws.triggered.connect(self.open_workspace_from_folder)
-        self.file_menu.addAction(act_open_ws)
-
-        # act_add_proj = QAction("添加工程...", self)
-        # act_add_proj.triggered.connect(self.add_project)
-        # self.file_menu.addAction(act_add_proj)
-
-        self.file_menu.addSeparator()
-
-        act_reveal = QAction("在资源管理器中显示根目录", self)
-        act_reveal.setToolTip(f"当前根目录: {self.root_dir}")
-        act_reveal.triggered.connect(
-            lambda: os.startfile(self.root_dir) if os.name == "nt" else None
-        )
-        self.file_menu.addAction(act_reveal)
-
-        # QAction "文件" 触发菜单显示
-        action_file = QAction("文件", self)
-        # 连接到槽函数，用于在工具栏按钮下方显示菜单
-        action_file.triggered.connect(
-            lambda: self._show_menu_under_action(action_file, toolbar)
-        )
-        toolbar.addAction(action_file)
 
         # --- Main Layout ---
         central = QWidget()
@@ -619,6 +609,13 @@ class MainWindow(QMainWindow):
             act_add_mix.triggered.connect(lambda: self.add_file_to_mix_console(path))
             menu.addAction(act_add_mix)
 
+        if os.path.isdir(path):
+            act_add_mix_folder = QAction("添加文件夹到混音台", self)
+            act_add_mix_folder.triggered.connect(
+                lambda: self.add_folder_to_mix_console(path)
+            )
+            menu.addAction(act_add_mix_folder)
+
         menu.exec(self.tree.mapToGlobal(pos))
 
     def ensure_mix_console(self):
@@ -664,6 +661,52 @@ class MainWindow(QMainWindow):
         self.mix_console_window.activateWindow()
         self.action_mix_console.setChecked(True)
         self.mix_console_window.add_track_from_file(path)
+
+    def add_folder_to_mix_console(self, path):
+        """将指定文件夹下（不递归）的所有 WAV 文件添加到混音台。"""
+        if not path or not os.path.isdir(path):
+            QMessageBox.warning(self, "无效路径", "无法识别所选文件夹。")
+            return
+
+        # 列出目录下的所有文件（非递归），筛选 wav
+        try:
+            entries = sorted(os.listdir(path))
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法读取目录: {e}")
+            return
+
+        wav_files = []
+        for name in entries:
+            fp = os.path.join(path, name)
+            if os.path.isfile(fp) and os.path.splitext(name)[1].lower() == ".wav":
+                wav_files.append(fp)
+
+        if not wav_files:
+            QMessageBox.information(
+                self, "无 WAV 文件", "该文件夹中未发现任何 WAV 文件。"
+            )
+            return
+
+        # 确保混音台窗口存在并显示
+        self.ensure_mix_console()
+        self.mix_console_window.show()
+        self.mix_console_window.raise_()
+        self.mix_console_window.activateWindow()
+        if hasattr(self, "action_mix_console"):
+            self.action_mix_console.setChecked(True)
+
+        added = 0
+        for wf in wav_files:
+            try:
+                self.mix_console_window.add_track_from_file(wf)
+                added += 1
+            except Exception:
+                # add_track_from_file 内部会弹窗，因此这里只是确保循环继续
+                pass
+
+        self.log(
+            f"已向混音台添加 {added} 个文件（来自文件夹: {os.path.basename(path)})"
+        )
 
     def do_rename(self, path):
         old_name = os.path.basename(path)
