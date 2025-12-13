@@ -34,6 +34,145 @@ class LogicChecker:
         except Exception as e:
             return f"[无法读取WAV] ({e})"
 
+    @staticmethod
+    def get_wav_duration_seconds(wav_path):
+        """读取 WAV 时长（秒）。失败返回 None。"""
+        try:
+            with sf.SoundFile(wav_path) as f:
+                if not f.samplerate or f.samplerate <= 0:
+                    return None
+                return float(f.frames) / float(f.samplerate)
+        except Exception:
+            return None
+
+    @staticmethod
+    def get_wav_duration_inconsistency_summary(
+        folder_path,
+        tolerance_seconds=0.02,
+        label="",
+        max_show=5,
+    ):
+        """返回时长不一致摘要字符串；一致/不可检查则返回 None。"""
+        if not os.path.isdir(folder_path):
+            return None
+
+        try:
+            names = sorted(os.listdir(folder_path))
+        except Exception:
+            return None
+
+        wav_paths = []
+        for name in names:
+            if not name.lower().endswith(".wav"):
+                continue
+            p = os.path.join(folder_path, name)
+            if os.path.isfile(p):
+                wav_paths.append(p)
+
+        if len(wav_paths) <= 1:
+            return None
+
+        ref_path = None
+        ref_dur = None
+        for p in wav_paths:
+            d = LogicChecker.get_wav_duration_seconds(p)
+            if d is not None:
+                ref_path = p
+                ref_dur = d
+                break
+
+        if ref_dur is None:
+            return None
+
+        mismatches = []
+        for p in wav_paths:
+            d = LogicChecker.get_wav_duration_seconds(p)
+            if d is None:
+                continue
+            diff = abs(d - ref_dur)
+            if diff > tolerance_seconds:
+                mismatches.append((os.path.basename(p), d, diff))
+
+        if not mismatches:
+            return None
+
+        # 展示部分不一致项，避免信息过长
+        show = mismatches[: max_show if max_show and max_show > 0 else len(mismatches)]
+        parts = [f"{name}({dur:.3f}s)" for name, dur, _ in show]
+        more = ""
+        if len(mismatches) > len(show):
+            more = f" 等{len(mismatches)}个"
+
+        prefix = f"[{label}] " if label else ""
+        return (
+            f"{prefix}[时长不一致] 参考 {os.path.basename(ref_path)}({ref_dur:.3f}s)，"
+            f"不一致: {', '.join(parts)}{more}"
+        )
+
+    @staticmethod
+    def is_wav_durations_consistent_between_folders(
+        folder_a,
+        folder_b,
+        tolerance_seconds=0.02,
+    ):
+        """检查两个文件夹内所有 WAV 的时长是否一致（允许少量容差）。"""
+        if not os.path.isdir(folder_a) or not os.path.isdir(folder_b):
+            return True
+
+        def _list_wavs(folder):
+            try:
+                names = sorted(os.listdir(folder))
+            except Exception:
+                return []
+            out = []
+            for name in names:
+                if not name.lower().endswith(".wav"):
+                    continue
+                p = os.path.join(folder, name)
+                if os.path.isfile(p):
+                    out.append(p)
+            return out
+
+        wavs = _list_wavs(folder_a) + _list_wavs(folder_b)
+        if len(wavs) <= 1:
+            return True
+
+        ref_dur = None
+        for p in wavs:
+            d = LogicChecker.get_wav_duration_seconds(p)
+            if d is not None:
+                ref_dur = d
+                break
+
+        if ref_dur is None:
+            return True
+
+        for p in wavs:
+            d = LogicChecker.get_wav_duration_seconds(p)
+            if d is None:
+                continue
+            if abs(d - ref_dur) > tolerance_seconds:
+                return False
+
+        return True
+
+    @staticmethod
+    def check_wav_durations_consistent(
+        folder_path,
+        add_error_func,
+        tolerance_seconds=0.02,
+        label="",
+    ):
+        """检查指定文件夹下所有 WAV 文件时长是否一致（允许少量容差）。"""
+        # 兼容保留：仍可用于直接报错，但现在默认只报一条（挂在 folder_path 上）
+        summary = LogicChecker.get_wav_duration_inconsistency_summary(
+            folder_path=folder_path,
+            tolerance_seconds=tolerance_seconds,
+            label=label,
+        )
+        if summary:
+            add_error_func(folder_path, summary)
+
     # =========================================================
     #  新增通用检查逻辑：覆盖原有的重复检查代码
     # =========================================================
@@ -168,6 +307,16 @@ class LogicChecker:
             add_error_func=add_error,
             file_check_callback=LogicChecker.check_wav_format,
         )
+
+        # =========================================================
+        #  4.x 分轨/总轨 WAV 时长一致性检查（每首歌仅报一条，且仅报跨目录不一致）
+        # =========================================================
+        if not LogicChecker.is_wav_durations_consistent_between_folders(
+            folder_a=wav_root,
+            folder_b=mix_root,
+            tolerance_seconds=0.02,
+        ):
+            add_error(song_path, "[总轨/分轨音频文件之间时长不一致]")
 
         # =========================================================
         #  5. MIDI 检查 (MID)
