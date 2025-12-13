@@ -145,6 +145,18 @@ class MixTrackWidget(QWidget):
         self.plot.plot(times, reduced, pen=pg.mkPen("#0078d7"))
         self.plot.setYRange(-1.05, 1.05)
 
+        # 添加用于显示播放进度的竖直线（初始不可见）
+        try:
+            self.progress_line = pg.InfiniteLine(
+                pos=0, angle=90, pen=pg.mkPen("#ff0000", width=1)
+            )
+            self.progress_line.setZValue(10)
+            self.plot.addItem(self.progress_line)
+            self.progress_line.setVisible(False)
+        except Exception:
+            # 如果 pyqtgraph 版本或环境不支持 InfiniteLine，则忽略
+            self.progress_line = None
+
     def _handle_mute(self):
         checked = self.mute_btn.isChecked()
         self.track.muted = checked
@@ -157,6 +169,33 @@ class MixTrackWidget(QWidget):
         checked = self.solo_btn.isChecked()
         self._solo_state = checked
         self._on_solo_change(checked)
+
+    def set_position_ms(self, pos_ms: int) -> None:
+        """将竖线移动到对应的时间位置（毫秒）。如果轨道太短或没有竖线则隐藏。"""
+        if not hasattr(self, "progress_line") or self.progress_line is None:
+            return
+
+        if self.track.duration_ms <= 0:
+            self.progress_line.setVisible(False)
+            return
+
+        pos_sec = pos_ms / 1000.0
+        duration_sec = max(0.0, self.track.duration_ms / 1000.0)
+        # 限制到轨道范围内
+        pos_sec = min(max(0.0, pos_sec), duration_sec)
+        try:
+            self.progress_line.setPos(pos_sec)
+            self.progress_line.setVisible(True)
+        except Exception:
+            pass
+
+    def reset_position(self) -> None:
+        if hasattr(self, "progress_line") and self.progress_line is not None:
+            try:
+                self.progress_line.setPos(0)
+                self.progress_line.setVisible(False)
+            except Exception:
+                pass
 
 
 class MixPlaybackWorker(QThread):
@@ -514,6 +553,13 @@ class MixConsoleWindow(QMainWindow):
         self.position_slider.setValue(min(position_ms, self.total_duration_ms))
         self._update_time_label(position_ms)
 
+        # 更新每个轨道的竖直播放进度线
+        for widget in self.track_widgets.values():
+            try:
+                widget.set_position_ms(position_ms)
+            except Exception:
+                pass
+
     def _on_playback_finished(self) -> None:
         self._stop_playback(reset_position=True)
 
@@ -531,6 +577,12 @@ class MixConsoleWindow(QMainWindow):
         if reset_position:
             self.position_slider.setValue(0)
             self._update_time_label(0)
+            # 重置每个轨道的进度线
+            for widget in self.track_widgets.values():
+                try:
+                    widget.reset_position()
+                except Exception:
+                    pass
 
     def _on_master_volume_changed(self, value: int) -> None:
         self.master_label.setText(f"主音量: {value}%")
@@ -562,6 +614,11 @@ class MixConsoleWindow(QMainWindow):
         has_tracks = bool(self.tracks)
         self.btn_play.setEnabled(has_tracks)
         self.btn_stop.setEnabled(has_tracks)
+        # 允许在存在轨道时拖动进度条以寻位
+        try:
+            self.position_slider.setEnabled(has_tracks)
+        except Exception:
+            pass
 
     def _update_playback_mute_solo(self):
         # 检查所有轨道的独奏状态
