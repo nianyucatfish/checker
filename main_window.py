@@ -26,6 +26,7 @@ from file_model import ProjectModel
 from editors import EditorManager
 from workers import InitialScanWorker
 from logic_checker import LogicChecker
+from mix_console import MixConsoleWindow
 
 # --- 配置常量 ---
 CONFIG_FILE = "ide_config.json"
@@ -51,6 +52,8 @@ class MainWindow(QMainWindow):
         # 新增：问题显示模式（'all' 或 'current_folder'）
         self.error_display_mode = "all"
         self.current_folder_path = None  # 当前选中文件/文件夹的父目录
+        self.last_selected_path = None
+        self.mix_console_window = None
 
         # 1. 配置加载与工作区初始化
         self.root_dir = os.path.abspath(r".")  # 默认值
@@ -214,6 +217,18 @@ class MainWindow(QMainWindow):
         action_scan.setToolTip("强制重新扫描所有歌曲文件夹 (F5)")
         action_scan.triggered.connect(self.run_full_scan)
         toolbar.addAction(action_scan)
+
+        # 1.1 混音台开关
+        self.action_mix_console = QAction("混音台", self)
+        self.action_mix_console.setCheckable(True)
+        self.action_mix_console.toggled.connect(self.toggle_mix_console)
+        toolbar.addAction(self.action_mix_console)
+
+        # 1.2 添加当前选中项到混音台
+        action_add_to_mixer = QAction("添加到混音台", self)
+        action_add_to_mixer.setShortcut(QKeySequence("Ctrl+M"))
+        action_add_to_mixer.triggered.connect(self.add_selected_to_mix_console)
+        toolbar.addAction(action_add_to_mixer)
 
         # 2. 文件菜单动作 (纯文本)
         self.file_menu = QMenu(self)
@@ -524,11 +539,14 @@ class MainWindow(QMainWindow):
         # 记录当前选中文件/文件夹的父目录（用于过滤）
         if os.path.isfile(path):
             self.current_folder_path = os.path.dirname(path)
+            self.last_selected_path = path
             self.editor_manager.open_file(path)
         elif os.path.isdir(path):
             self.current_folder_path = path
+            self.last_selected_path = None
         else:
             self.current_folder_path = None
+            self.last_selected_path = None
         # 切换到“当前文件夹问题”时自动刷新
         if self.error_display_mode == "current_folder":
             self.refresh_model()
@@ -596,7 +614,56 @@ class MainWindow(QMainWindow):
         act_del.triggered.connect(lambda: self.do_delete(path))
         menu.addAction(act_del)
 
+        if os.path.isfile(path) and os.path.splitext(path)[1].lower() == ".wav":
+            act_add_mix = QAction("添加到混音台", self)
+            act_add_mix.triggered.connect(lambda: self.add_file_to_mix_console(path))
+            menu.addAction(act_add_mix)
+
         menu.exec(self.tree.mapToGlobal(pos))
+
+    def ensure_mix_console(self):
+        if self.mix_console_window is None:
+            self.mix_console_window = MixConsoleWindow(self)
+            self.mix_console_window.visibility_changed.connect(
+                self._on_mix_console_visibility_change
+            )
+
+    def toggle_mix_console(self, checked):
+        self.ensure_mix_console()
+        if checked:
+            if not self.mix_console_window.isVisible():
+                self.mix_console_window.show()
+                self.mix_console_window.raise_()
+                self.mix_console_window.activateWindow()
+        else:
+            if self.mix_console_window.isVisible():
+                self.mix_console_window.hide()
+
+    def _on_mix_console_visibility_change(self, visible):
+        if hasattr(self, "action_mix_console"):
+            self.action_mix_console.setChecked(visible)
+
+    def add_selected_to_mix_console(self):
+        if not self.last_selected_path:
+            QMessageBox.information(self, "未选择文件", "请先在文件树中选择 WAV 文件。")
+            return
+        self.add_file_to_mix_console(self.last_selected_path)
+
+    def add_file_to_mix_console(self, path):
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "无效路径", "无法识别所选文件。")
+            return
+
+        if os.path.splitext(path)[1].lower() != ".wav":
+            QMessageBox.warning(self, "类型不支持", "仅支持将 WAV 文件添加到混音台。")
+            return
+
+        self.ensure_mix_console()
+        self.mix_console_window.show()
+        self.mix_console_window.raise_()
+        self.mix_console_window.activateWindow()
+        self.action_mix_console.setChecked(True)
+        self.mix_console_window.add_track_from_file(path)
 
     def do_rename(self, path):
         old_name = os.path.basename(path)
