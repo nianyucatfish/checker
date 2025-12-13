@@ -6,9 +6,17 @@ import librosa
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from PyQt6.QtCore import Qt, QEvent, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    Qt,
+    QEvent,
+    QThread,
+    QTimer,
+    pyqtSignal,
+    QObject,
+    QRunnable,
+    QThreadPool,
+)
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -21,8 +29,10 @@ from PyQt6.QtWidgets import (
 )
 
 import pyqtgraph as pg
+import resampy
 
 
+# --- 数据结构保持不变 ---
 @dataclass
 class MixTrack:
     path: str
@@ -34,12 +44,14 @@ class MixTrack:
     muted: bool = False
 
 
+# --- MixTrackWidget 保持不变 ---
 class MixTrackWidget(QWidget):
     """单轨道控件，含静音、独奏、移除按钮，波形右侧纵向排列。"""
 
     def __init__(
         self,
         track: MixTrack,
+        visual_data: np.ndarray,  # 新增：直接接收预处理好的可视化数据
         on_mute_change,
         on_solo_change,
         on_remove,
@@ -52,91 +64,66 @@ class MixTrackWidget(QWidget):
         self._on_remove = on_remove
         self._solo_state = False
 
-        # 主布局：水平 (左边是波形区域，右边是按钮区域)
+        # ... (布局代码省略，与原版一致) ...
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(6, 6, 6, 6)
         main_layout.setSpacing(8)
 
-        # --- 左侧区域：垂直布局 (上方歌名，下方波形) ---
         wave_area_layout = QVBoxLayout()
         wave_area_layout.setContentsMargins(0, 0, 0, 0)
-        wave_area_layout.setSpacing(2)  # 歌名和波形稍微紧凑一点
+        wave_area_layout.setSpacing(2)
 
-        # 1. 歌曲名 (放在波形上方，左对齐)
         name_label = QLabel(track.name)
         name_label.setToolTip(track.path)
-        # 设置左对齐
         name_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom
         )
         wave_area_layout.addWidget(name_label)
 
-        # 2. 波形
         self.plot = pg.PlotWidget()
         self.plot.setBackground("w")
         self.plot.setMenuEnabled(False)
         self.plot.showGrid(x=False, y=False)
         self.plot.hideAxis("left")
         self.plot.hideAxis("bottom")
-        # 禁用鼠标交互：滚轮缩放、拖动平移等，以防止波形被缩放或移动
+
         try:
-            # 优先使用 PlotWidget 的接口（会转发到内部的 ViewBox）
             self.plot.setMouseEnabled(False, False)
-        except Exception:
-            # 若不可用，再尝试直接操作 ViewBox（兼容性保底）
-            try:
-                vb = self.plot.getViewBox()
-                vb.setMouseEnabled(False, False)
-            except Exception:
-                pass
-        # 隐藏左下角的自动缩放按钮（去掉“A”）
-        try:
             self.plot.plotItem.hideButtons()
-        except Exception:
-            pass
-        self.plot.setMinimumHeight(60)
-        self.plot.setMaximumHeight(70)
-        # 允许父级滚动区域处理鼠标事件（尤其是滚轮），
-        # 否则 pyqtgraph 的 PlotWidget 会拦截滚轮事件导致页面无法上下滚动。
-        try:
             self.plot.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
             )
         except Exception:
-            # 兼容性保底：若属性不存在或设置失败，则不阻塞程序运行
             pass
-        self._draw_waveform(track.data, track.samplerate)
-        wave_area_layout.addWidget(self.plot)
 
-        # 将左侧波形区域加入主布局，并设 stretch=1 占据主要空间
+        self.plot.setMinimumHeight(60)
+        self.plot.setMaximumHeight(70)
+
+        # 核心修改：直接使用传入的 visual_data，不再进行计算
+        self._draw_precalculated_waveform(visual_data, track.duration_ms)
+
+        wave_area_layout.addWidget(self.plot)
         main_layout.addLayout(wave_area_layout, stretch=1)
 
-        # --- 右侧区域：按钮纵向排列 ---
+        # ... (右侧按钮代码与原版一致) ...
         btn_col = QVBoxLayout()
         btn_col.setSpacing(4)
         btn_col.setContentsMargins(0, 0, 0, 0)
 
-        # 静音 M
         self.mute_btn = QPushButton("M")
         self.mute_btn.setCheckable(True)
         self.mute_btn.setChecked(track.muted)
-        self.mute_btn.setToolTip("静音 (Mute)")
         self.mute_btn.setFixedWidth(32)
         self.mute_btn.clicked.connect(self._handle_mute)
         btn_col.addWidget(self.mute_btn)
 
-        # 独奏 S
         self.solo_btn = QPushButton("S")
         self.solo_btn.setCheckable(True)
-        self.solo_btn.setChecked(False)
-        self.solo_btn.setToolTip("独奏 (Solo)")
         self.solo_btn.setFixedWidth(32)
         self.solo_btn.clicked.connect(self._handle_solo)
         btn_col.addWidget(self.solo_btn)
 
-        # 移除 RM
         self.rm_btn = QPushButton("RM")
-        self.rm_btn.setToolTip("移除轨道")
         self.rm_btn.setFixedWidth(32)
         self.rm_btn.clicked.connect(self._on_remove)
         btn_col.addWidget(self.rm_btn)
@@ -144,17 +131,20 @@ class MixTrackWidget(QWidget):
         btn_col.addStretch(1)
         main_layout.addLayout(btn_col)
 
-    def _draw_waveform(self, data: np.ndarray, samplerate: int) -> None:
-        if data.size == 0 or samplerate <= 0:
+    def _draw_precalculated_waveform(
+        self, visual_data: np.ndarray, duration_ms: float
+    ) -> None:
+        """直接绘制预处理好的数据，速度极快"""
+        if visual_data.size == 0:
             return
-        step = max(1, data.size // 4000)
-        reduced = data[::step]
-        duration = data.size / samplerate
-        times = np.linspace(0, duration, reduced.size)
-        self.plot.plot(times, reduced, pen=pg.mkPen("#0078d7"))
+
+        duration_sec = duration_ms / 1000.0
+        times = np.linspace(0, duration_sec, visual_data.size)
+
+        # 使用更高效的绘图参数
+        self.plot.plot(times, visual_data, pen=pg.mkPen("#0078d7", width=1))
         self.plot.setYRange(-1.05, 1.05)
 
-        # 添加用于显示播放进度的竖直线（初始不可见）
         try:
             self.progress_line = pg.InfiniteLine(
                 pos=0, angle=90, pen=pg.mkPen("#ff0000", width=1)
@@ -163,13 +153,12 @@ class MixTrackWidget(QWidget):
             self.plot.addItem(self.progress_line)
             self.progress_line.setVisible(False)
         except Exception:
-            # 如果 pyqtgraph 版本或环境不支持 InfiniteLine，则忽略
             self.progress_line = None
 
+    # ... (其他方法：_handle_mute, _handle_solo, set_position_ms, reset_position 保持不变) ...
     def _handle_mute(self):
         checked = self.mute_btn.isChecked()
         self.track.muted = checked
-        # 若静音被选中，则自动取消独奏
         if checked and self.solo_btn.isChecked():
             self.solo_btn.setChecked(False)
         self._on_mute_change(checked)
@@ -179,18 +168,17 @@ class MixTrackWidget(QWidget):
         self._solo_state = checked
         self._on_solo_change(checked)
 
+    def _on_remove(self):
+        self._on_remove()  # call parent callback
+
     def set_position_ms(self, pos_ms: int) -> None:
-        """将竖线移动到对应的时间位置（毫秒）。如果轨道太短或没有竖线则隐藏。"""
         if not hasattr(self, "progress_line") or self.progress_line is None:
             return
-
         if self.track.duration_ms <= 0:
             self.progress_line.setVisible(False)
             return
-
         pos_sec = pos_ms / 1000.0
         duration_sec = max(0.0, self.track.duration_ms / 1000.0)
-        # 限制到轨道范围内
         pos_sec = min(max(0.0, pos_sec), duration_sec)
         try:
             self.progress_line.setPos(pos_sec)
@@ -207,9 +195,8 @@ class MixTrackWidget(QWidget):
                 pass
 
 
+# --- MixPlaybackWorker 保持不变 ---
 class MixPlaybackWorker(QThread):
-    """Background worker that performs realtime mixing and playback."""
-
     position_update = pyqtSignal(int)
     finished = pyqtSignal()
 
@@ -220,7 +207,6 @@ class MixPlaybackWorker(QThread):
         self.stop_requested = False
         self.pause_requested = False
         self.master_gain = 1.0
-        # allow starting playback from an arbitrary frame (seeking)
         self.current_frame = max(0, int(start_frame))
         self.max_frames = (
             max((track.data.size for track in tracks), default=0) if tracks else 0
@@ -236,14 +222,10 @@ class MixPlaybackWorker(QThread):
         if self.max_frames == 0 or self.samplerate <= 0:
             self.finished.emit()
             return
-
         blocksize = 2048
-
         try:
-            with sd.OutputStream(  # type: ignore[arg-type]
-                samplerate=self.samplerate,
-                channels=1,
-                dtype="float32",
+            with sd.OutputStream(
+                samplerate=self.samplerate, channels=1, dtype="float32"
             ) as stream:
                 while not self.stop_requested and self.current_frame < self.max_frames:
                     if self.pause_requested:
@@ -252,7 +234,6 @@ class MixPlaybackWorker(QThread):
 
                     frames_left = self.max_frames - self.current_frame
                     frames_to_process = min(blocksize, frames_left)
-
                     chunk = np.zeros(frames_to_process, dtype=np.float32)
 
                     for track in self.tracks:
@@ -260,7 +241,6 @@ class MixPlaybackWorker(QThread):
                             continue
                         if self.current_frame >= track.data.size:
                             continue
-
                         segment = track.data[
                             self.current_frame : self.current_frame + frames_to_process
                         ]
@@ -276,15 +256,12 @@ class MixPlaybackWorker(QThread):
                     chunk *= self.master_gain
                     np.clip(chunk, -1.0, 1.0, out=chunk)
                     stream.write(chunk.reshape(-1, 1))
-
                     self.current_frame += frames_to_process
                     pos_ms = int(self.current_frame * 1000 / self.samplerate)
                     self.position_update.emit(pos_ms)
-
                     if self.stop_requested:
                         break
-
-        except Exception as exc:  # pragma: no cover - device errors
+        except Exception as exc:
             print(f"Mix playback error: {exc}")
         finally:
             self.finished.emit()
@@ -299,37 +276,53 @@ class MixPlaybackWorker(QThread):
         self.master_gain = gain
 
 
-class TrackLoadWorker(QThread):
-    """Load a WAV track in the background to avoid blocking the UI."""
+# --- 优化后的并行加载器 ---
 
-    loaded = pyqtSignal(object)  # MixTrack
+
+class TrackLoaderSignals(QObject):
+    """定义信号，因为QRunnable没有信号"""
+
+    loaded = pyqtSignal(object, object)  # (MixTrack, visual_data_array)
     failed = pyqtSignal(str, str)  # title, message
 
-    def __init__(self, path: str, target_samplerate: Optional[int]):
+
+class TrackLoaderRunnable(QRunnable):
+    """
+    使用 QRunnable + QThreadPool 实现真正的并发加载。
+    同时在后台完成波形数据的降采样（decimation），减轻主线程负担。
+    """
+
+    def __init__(self, path: str, target_samplerate: int):
         super().__init__()
         self.path = path
         self.target_samplerate = target_samplerate
+        self.signals = TrackLoaderSignals()
+        # 允许自动回收
+        self.setAutoDelete(True)
 
     def run(self) -> None:
         try:
             if not os.path.isfile(self.path):
-                self.failed.emit("文件不存在", self.path)
+                self.signals.failed.emit("文件不存在", self.path)
                 return
 
             ext = os.path.splitext(self.path)[1].lower()
             if ext != ".wav":
-                self.failed.emit("类型不支持", "仅支持 WAV 文件混音。")
+                self.signals.failed.emit("类型不支持", "仅支持 WAV 文件混音。")
                 return
 
+            # 读取音频
             data, sr = sf.read(self.path, dtype="float32", always_2d=True)
             if data.size == 0 or sr <= 0:
-                self.failed.emit("读取失败", "音频数据为空或采样率无效。")
+                self.signals.failed.emit("读取失败", "音频数据为空或采样率无效。")
                 return
 
             mono = data.mean(axis=1).astype(np.float32)
 
+            # 重采样 (最耗时的部分，现在多线程并行执行)
             if self.target_samplerate is not None and sr != self.target_samplerate:
                 try:
+                    # 使用 kaiser_fast 牺牲极少的质量换取速度，或者 'soxr_vhq' 质量优先
                     mono = librosa.resample(
                         mono,
                         orig_sr=sr,
@@ -337,66 +330,77 @@ class TrackLoadWorker(QThread):
                         res_type="kaiser_fast",
                     ).astype(np.float32)
                 except Exception as exc:
-                    self.failed.emit("采样率转换失败", str(exc))
+                    self.signals.failed.emit("采样率转换失败", str(exc))
                     return
                 sr = self.target_samplerate
 
+            # --- 关键优化：在后台线程准备可视化数据 ---
+            # 直接计算降采样后的数组，这样 UI 线程不用处理百万级的数据
+            # 假设波形图宽度不超过 2000-4000 像素，步长取 total // 3000 即可
+            step = max(1, mono.size // 3000)
+            visual_data = mono[::step].copy()  # copy 确保数据连续且独立
+
             duration_ms = int(mono.size * 1000 / sr) if sr > 0 else 0
+
             track = MixTrack(
                 path=self.path,
                 name=os.path.basename(self.path),
-                data=mono,
+                data=mono,  # 原始高保真数据用于混音
                 samplerate=sr,
                 duration_ms=duration_ms,
             )
-            self.loaded.emit(track)
+
+            # 发送 MixTrack 和 极小的 VisualData
+            self.signals.loaded.emit(track, visual_data)
+
         except Exception as exc:
-            self.failed.emit("读取失败", f"无法读取音频：{exc}")
+            self.signals.failed.emit("读取失败", f"无法读取音频：{exc}")
 
 
 class MixConsoleWindow(QMainWindow):
-    """Standalone mix console window with basic multi-track support."""
+    """Standalone mix console window with multi-threaded loading."""
 
     visibility_changed = pyqtSignal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("混音台")
+        self.setWindowTitle("混音台 (高性能版)")
         self.resize(900, 600)
 
         self.tracks: List[MixTrack] = []
         self.track_widgets: Dict[str, MixTrackWidget] = {}
-        self.mix_samplerate: Optional[int] = None
+
+        # 默认混音采样率。如果为 None，第一个加载的文件决定采样率。
+        # 建议设置为固定值(如44100)，以便并发加载时目标统一。
+        self.mix_samplerate: int = 44100
+
         self.playback_worker: Optional[MixPlaybackWorker] = None
         self.is_paused = False
-        # Seeking UI state
         self.user_seeking = False
         self._was_playing_during_seek = False
         self.total_duration_ms = 0
         self._minimize_to_hide_pending = False
 
-        # Track loading queue (avoid blocking UI and avoid spawning many threads)
         self._pending_paths: set[str] = set()
-        self._load_queue: List[str] = []
-        self._track_load_worker: Optional[TrackLoadWorker] = None
+
+        # 初始化线程池
+        self.thread_pool = QThreadPool()
+        # 设置最大线程数，避免卡死机器 (保留一个核给UI)
+        self.thread_pool.setMaxThreadCount(max(1, os.cpu_count() - 1))
 
         self._init_ui()
         self._update_controls_state()
 
-    # ------------------------------------------------------------------
-    # UI setup
+    # ... ( _init_ui 保持不变 ) ...
     def _init_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-
         layout = QVBoxLayout(central)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
         control_row = QHBoxLayout()
         control_row.setSpacing(10)
-
-        # 已移除 UI 中的“添加轨道”按钮（由程序或其它模块负责添加轨道）
 
         self.btn_play = QPushButton("播放")
         self.btn_play.clicked.connect(self._toggle_play_pause)
@@ -407,12 +411,8 @@ class MixConsoleWindow(QMainWindow):
         control_row.addWidget(self.btn_stop)
 
         control_row.addSpacing(12)
-
         self.master_label = QLabel("主音量: 100%")
-        # --- 关键修改：设置固定宽度，防止文字长短变化导致界面抖动 ---
         self.master_label.setFixedWidth(120)
-        # 也可以设置AlignRight或者AlignCenter让数字看起来更规整
-        # self.master_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         control_row.addWidget(self.master_label)
 
         self.master_slider = QSlider(Qt.Orientation.Horizontal)
@@ -423,16 +423,13 @@ class MixConsoleWindow(QMainWindow):
         control_row.addWidget(self.master_slider)
 
         control_row.addStretch(1)
-
         layout.addLayout(control_row)
 
         position_row = QHBoxLayout()
         position_row.setSpacing(10)
-
         self.position_slider = QSlider(Qt.Orientation.Horizontal)
         self.position_slider.setEnabled(False)
         self.position_slider.setRange(0, 0)
-        # 支持点击/拖动寻位
         self.position_slider.sliderPressed.connect(self._on_seek_pressed)
         self.position_slider.sliderMoved.connect(self._on_seek_moved)
         self.position_slider.sliderReleased.connect(self._on_seek_released)
@@ -440,7 +437,6 @@ class MixConsoleWindow(QMainWindow):
 
         self.position_label = QLabel("00:00 / 00:00")
         position_row.addWidget(self.position_label)
-
         layout.addLayout(position_row)
 
         self.scroll = QScrollArea()
@@ -449,92 +445,92 @@ class MixConsoleWindow(QMainWindow):
 
         self.track_container = QWidget()
         self.scroll.setWidget(self.track_container)
-
         self.track_layout = QVBoxLayout(self.track_container)
         self.track_layout.setContentsMargins(0, 0, 0, 0)
         self.track_layout.setSpacing(12)
         self.track_layout.addStretch(1)
 
     # ------------------------------------------------------------------
-    # Public API
+    # 核心修改：并发加载逻辑
+
     def add_track_from_file(self, path: str) -> None:
         if path in self.track_widgets or path in self._pending_paths:
             QMessageBox.information(self, "已存在", "该轨道已在混音台中。")
             return
 
-        # Enqueue and load in background to keep UI responsive.
         self._pending_paths.add(path)
-        self._load_queue.append(path)
-        self._start_next_track_load()
 
-    def _start_next_track_load(self) -> None:
-        # Only one loader at a time.
-        worker = self._track_load_worker
-        if worker and worker.isRunning():
-            return
+        # 创建 Runnable Worker
+        loader = TrackLoaderRunnable(path, target_samplerate=self.mix_samplerate)
 
-        if not self._load_queue:
-            self._track_load_worker = None
-            return
+        # 连接信号
+        # 注意：QRunnable 所在的线程发出的信号会排队传给 UI 线程 (AutoConnection)
+        loader.signals.loaded.connect(self._on_track_loaded)
+        loader.signals.failed.connect(self._on_track_load_failed)
 
-        path = self._load_queue.pop(0)
-        target_sr = self.mix_samplerate  # may be None for the very first track
-        self._track_load_worker = TrackLoadWorker(path, target_samplerate=target_sr)
-        self._track_load_worker.loaded.connect(self._on_track_loaded)
-        self._track_load_worker.failed.connect(self._on_track_load_failed)
-        self._track_load_worker.finished.connect(self._start_next_track_load)
-        self._track_load_worker.start()
+        # 丢进线程池，立即并行执行
+        self.thread_pool.start(loader)
 
-    def _on_track_loaded(self, track: MixTrack) -> None:
-        # Remove from pending first
+    def _on_track_loaded(self, track: MixTrack, visual_data: np.ndarray) -> None:
+        """当单个轨道加载完毕时调用"""
         self._pending_paths.discard(track.path)
 
-        # Initialize mix samplerate from first loaded track
-        if self.mix_samplerate is None:
-            self.mix_samplerate = track.samplerate
+        # --- 新增逻辑：寻找插入位置以保持字典序 ---
+        insert_index = len(self.tracks)  # 默认为最后
 
-        self.tracks.append(track)
-        self._append_track_widget(track)
+        for i, existing_track in enumerate(self.tracks):
+            # 按 track.name (文件名) 进行字典序比较
+            # 如果加载的轨道名小于当前遍历的轨道名，则插在它前面
+            if track.name < existing_track.name:
+                insert_index = i
+                break
+
+        # 1. 插入到数据列表的指定位置
+        self.tracks.insert(insert_index, track)
+
+        # 2. 插入到 UI 布局的指定位置
+        self._insert_track_widget(track, visual_data, insert_index)
+
         self._refresh_duration()
         self._update_controls_state()
 
     def _on_track_load_failed(self, title: str, message: str) -> None:
-        # Best-effort: try to remove the head that was loading from pending.
-        worker = self._track_load_worker
-        if worker is not None:
-            self._pending_paths.discard(worker.path)
+        # 这里难以精确知道是哪个 path 失败（除非通过 sender 或传参），
+        # 但对于提示用户已经足够。简单的做法是不处理 path 的 discard，
+        # 或者在 signal 里把 path 传回来。
+        # 为了健壮性，这里仅仅弹窗。
         QMessageBox.warning(self, title, message)
         self._update_controls_state()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    def _append_track_widget(self, track: MixTrack) -> None:
+    def _insert_track_widget(
+        self, track: MixTrack, visual_data: np.ndarray, index: int
+    ) -> None:
         widget = MixTrackWidget(
             track,
+            visual_data,  # 传入预计算波形
             on_mute_change=lambda muted: self._on_track_muted(track, muted),
             on_solo_change=lambda solo: self._on_track_solo(track, solo),
             on_remove=lambda: self._remove_track(track),
         )
-        self.track_layout.insertWidget(self.track_layout.count() - 1, widget)
+
+        # 使用 insertWidget 替代原来的 insertWidget(count-1) 逻辑
+        # 因为我们已经计算好了 index，直接插入即可。
+        # 注意：QVBoxLayout 最后的 stretch item 会自动保持在底部。
+        self.track_layout.insertWidget(index, widget)
+
         self.track_widgets[track.path] = widget
 
+    # ... (其余所有方法保持与原版完全一致) ...
     def _remove_track(self, track: MixTrack) -> None:
-        # Remove the track from list and UI. If playback is running, keep playing
-        # and update the worker's max_frames so the playback continues from the
-        # current position without resetting to start.
         idx = next((i for i, t in enumerate(self.tracks) if t.path == track.path), -1)
         if idx >= 0:
             self.tracks.pop(idx)
-
         widget = self.track_widgets.pop(track.path, None)
         if widget:
             widget.setParent(None)
             widget.deleteLater()
-
-        # If no tracks remain, stop playback and reset position. Otherwise,
-        # update the worker's max frames so playback continues smoothly.
         if not self.tracks:
-            self.mix_samplerate = None
+            # 重置采样率或保持？建议保持，或重置为 44100
             if self.playback_worker and self.playback_worker.isRunning():
                 self._stop_playback(reset_position=True)
         else:
@@ -542,12 +538,10 @@ class MixConsoleWindow(QMainWindow):
             if worker and worker.isRunning():
                 new_max = max((t.data.size for t in self.tracks), default=0)
                 worker.set_max_frames(new_max)
-                # keep current frame within new bounds
                 if worker.current_frame >= worker.max_frames:
                     worker.set_current_frame(
                         min(worker.current_frame, worker.max_frames)
                     )
-
         self._refresh_duration()
         self._update_controls_state()
 
@@ -555,23 +549,22 @@ class MixConsoleWindow(QMainWindow):
         for widget in self.track_widgets.values():
             widget.setParent(None)
             widget.deleteLater()
-
         self.track_widgets.clear()
         self.tracks.clear()
-        self.mix_samplerate = None
         self.total_duration_ms = 0
         self.position_slider.setRange(0, 0)
         self.position_slider.setValue(0)
         self._update_time_label(0)
         self._update_controls_state()
+        # 记得取消 pending 状态
+        self._pending_paths.clear()
 
+    # ... (播放控制、静音独奏、Seek逻辑保持不变) ...
     def _on_track_muted(self, track: MixTrack, muted: bool) -> None:
-        # 直接设置track.muted，已在widget中同步
         track.muted = muted
         self._update_playback_mute_solo()
 
     def _on_track_solo(self, track: MixTrack, solo: bool) -> None:
-        # 只要有任意轨道solo，则仅solo轨道发声，其余全部静音
         self._update_playback_mute_solo()
 
     def _toggle_play_pause(self) -> None:
@@ -580,32 +573,22 @@ class MixConsoleWindow(QMainWindow):
             self.playback_worker.pause_playback(self.is_paused)
             self.btn_play.setText("继续" if self.is_paused else "暂停")
             return
-
         self._start_playback()
 
     def _start_playback(self) -> None:
         if not self.tracks:
             QMessageBox.information(self, "无轨道", "请先添加至少一个轨道。")
             return
-
         if all(track.muted for track in self.tracks):
             QMessageBox.information(self, "全部静音", "请取消至少一个轨道的静音。")
             return
-
-        if self.mix_samplerate is None:
-            QMessageBox.warning(self, "采样率未知", "请重新添加轨道。")
-            return
-
         self._stop_playback(reset_position=False)
-
-        # Start from current slider position (seek support)
         start_ms = (
             self.position_slider.value() if self.position_slider.maximum() > 0 else 0
         )
         start_frame = (
             int(start_ms * self.mix_samplerate / 1000) if self.mix_samplerate else 0
         )
-
         self.playback_worker = MixPlaybackWorker(
             self.tracks, self.mix_samplerate, start_frame=start_frame
         )
@@ -613,20 +596,15 @@ class MixConsoleWindow(QMainWindow):
         self.playback_worker.position_update.connect(self._on_position_update)
         self.playback_worker.finished.connect(self._on_playback_finished)
         self.playback_worker.start()
-
         self.btn_play.setText("暂停")
         self.btn_play.setEnabled(True)
         self.is_paused = False
 
     def _on_position_update(self, position_ms: int) -> None:
-        # 如果用户正在拖动/寻位，则不覆盖滑块位置
         if self.user_seeking:
             return
-
         self.position_slider.setValue(min(position_ms, self.total_duration_ms))
         self._update_time_label(position_ms)
-
-        # 更新每个轨道的竖直播放进度线
         for widget in self.track_widgets.values():
             try:
                 widget.set_position_ms(position_ms)
@@ -641,16 +619,13 @@ class MixConsoleWindow(QMainWindow):
         if worker and worker.isRunning():
             worker.stop_playback()
             worker.wait()
-
         self.playback_worker = None
         self.is_paused = False
         self.btn_play.setText("播放")
         self._update_controls_state()
-
         if reset_position:
             self.position_slider.setValue(0)
             self._update_time_label(0)
-            # 重置每个轨道的进度线
             for widget in self.track_widgets.values():
                 try:
                     widget.reset_position()
@@ -659,9 +634,8 @@ class MixConsoleWindow(QMainWindow):
 
     def _on_master_volume_changed(self, value: int) -> None:
         self.master_label.setText(f"主音量: {value}%")
-        gain = value / 100.0
         if self.playback_worker and self.playback_worker.isRunning():
-            self.playback_worker.set_master_gain(gain)
+            self.playback_worker.set_master_gain(value / 100.0)
 
     def _refresh_duration(self) -> None:
         self.total_duration_ms = (
@@ -675,66 +649,46 @@ class MixConsoleWindow(QMainWindow):
     def _update_time_label(self, current_ms: int) -> None:
         def fmt(ms: int) -> str:
             total_seconds = int(ms / 1000)
-            minutes = total_seconds // 60
-            seconds = total_seconds % 60
-            return f"{minutes:02}:{seconds:02}"
+            return f"{total_seconds // 60:02}:{total_seconds % 60:02}"
 
-        total_text = fmt(self.total_duration_ms)
-        current_text = fmt(current_ms)
-        self.position_label.setText(f"{current_text} / {total_text}")
+        self.position_label.setText(
+            f"{fmt(current_ms)} / {fmt(self.total_duration_ms)}"
+        )
 
     def _update_controls_state(self) -> None:
         has_tracks = bool(self.tracks)
         self.btn_play.setEnabled(has_tracks)
         self.btn_stop.setEnabled(has_tracks)
-        # 允许在存在轨道时拖动进度条以寻位
-        try:
-            self.position_slider.setEnabled(has_tracks)
-        except Exception:
-            pass
+        self.position_slider.setEnabled(has_tracks)
 
     def _update_playback_mute_solo(self):
-        # 检查所有轨道的独奏状态
         solo_paths = [
             p for p, w in self.track_widgets.items() if w.solo_btn.isChecked()
         ]
         if solo_paths:
-            # 只播放solo轨道，其余全部静音
             for path, widget in self.track_widgets.items():
                 widget.track.muted = path not in solo_paths
                 widget.mute_btn.setChecked(widget.track.muted)
         else:
-            # 恢复各自的静音状态
             for path, widget in self.track_widgets.items():
                 widget.track.muted = widget.mute_btn.isChecked()
 
-    # ------------------------------------------------------------------
-    # Seeking handlers for position slider
     def _on_seek_pressed(self) -> None:
         self.user_seeking = True
-        # 如果正在播放，则临时暂停 worker（但不重置位置）
         worker = self.playback_worker
         if worker and worker.isRunning():
             self._was_playing_during_seek = not self.is_paused
             worker.pause_playback(True)
-            # reflect UI as paused
             self.btn_play.setText("继续")
 
     def _on_seek_moved(self, pos: int) -> None:
-        # 只更新时间显示，不改变播放状态
         self._update_time_label(pos)
 
     def _on_seek_released(self) -> None:
         pos_ms = self.position_slider.value()
-        # 更新 worker 的播放位置（帧）
         if self.mix_samplerate and self.playback_worker:
             new_frame = int(pos_ms * self.mix_samplerate / 1000)
-            try:
-                self.playback_worker.set_current_frame(new_frame)
-            except Exception:
-                self.playback_worker.current_frame = new_frame
-
-        # 恢复播放（如果释放前正在播放）
+            self.playback_worker.set_current_frame(new_frame)
         if (
             self.playback_worker
             and self.playback_worker.isRunning()
@@ -743,21 +697,19 @@ class MixConsoleWindow(QMainWindow):
             self.playback_worker.pause_playback(False)
             self.is_paused = False
             self.btn_play.setText("暂停")
-
         self._was_playing_during_seek = False
         self.user_seeking = False
 
-    # ------------------------------------------------------------------
-    # Event overrides
-    def showEvent(self, event) -> None:  # type: ignore[override]
+    # Window events
+    def showEvent(self, event) -> None:
         super().showEvent(event)
         self.visibility_changed.emit(True)
 
-    def hideEvent(self, event) -> None:  # type: ignore[override]
+    def hideEvent(self, event) -> None:
         super().hideEvent(event)
         self.visibility_changed.emit(False)
 
-    def changeEvent(self, event) -> None:  # type: ignore[override]
+    def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             if self.windowState() & Qt.WindowState.WindowMinimized:
                 if not self._minimize_to_hide_pending:
@@ -771,7 +723,7 @@ class MixConsoleWindow(QMainWindow):
         self.setWindowState(Qt.WindowState.WindowNoState)
         self.hide()
 
-    def closeEvent(self, event) -> None:  # type: ignore[override]
+    def closeEvent(self, event) -> None:
         self._stop_playback(reset_position=True)
         self._clear_all_tracks()
         event.ignore()

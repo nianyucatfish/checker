@@ -28,6 +28,10 @@ from workers import InitialScanWorker
 from logic_checker import LogicChecker
 from mix_console import MixConsoleWindow
 
+import librosa
+import numpy as np
+import resampy
+
 # --- 配置常量 ---
 CONFIG_FILE = "ide_config.json"
 RECENT_WORKSPACE_KEY = "last_workspace"
@@ -66,7 +70,7 @@ class MainWindow(QMainWindow):
 
         self._init_ui()
         self._init_watcher()
-
+        self._warmup_resampy()
         # 启动即进行一次全量扫描 (仅在加载到有效工作区时)
         if os.path.isdir(self.root_dir):
             QTimer.singleShot(500, self.run_full_scan)
@@ -763,3 +767,27 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         super().closeEvent(event)
+
+    def _warmup_resampy(self):
+        """
+        在主线程强制运行一次微小的重采样。
+        目的：
+        1. 强制 librosa 加载 resampy 模块，防止多线程懒加载导致的 'AttributeError'。
+        2. 触发 Numba 的 JIT 编译，缓存机器码，避免后续混音台线程卡顿。
+        """
+        try:
+            # 1. 创建极小的数据 (10个采样点)
+            dummy_data = np.zeros(10, dtype=np.float32)
+
+            # 2. 运行一次 kaiser_fast 重采样
+            # 注意：这里不需要接收返回值，只要它不报错就行
+            librosa.resample(
+                dummy_data, orig_sr=44100, target_sr=48000, res_type="kaiser_fast"
+            )
+
+            # 3. 记录日志 (确保 self.log_view 已初始化，我们在 init 最后调用是安全的)
+            self.log("系统就绪: 音频算法库已预热 (Resampy/Numba initialized).")
+
+        except Exception as e:
+            # 如果出错，仅记录警告，不阻断程序启动，但混音台可能会出问题
+            self.log(f"警告: 音频库预热失败 - {e}")
