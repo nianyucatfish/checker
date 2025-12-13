@@ -73,10 +73,6 @@ class LogicChecker:
         for item in all_items:
             item_path = os.path.join(folder_path, item)
 
-            # 忽略隐藏文件
-            if item.startswith("."):
-                continue
-
             # 检查是否为多余文件夹
             if os.path.isdir(item_path):
                 add_error_func(item_path, f"[多余文件夹] {item}")
@@ -281,101 +277,149 @@ class LogicChecker:
         #  7. 混音工程原文件夹检查
         # =========================================================
         mix_proj_root = os.path.join(song_path, "混音工程原文件")
-        instr_map_path = os.path.join(mix_proj_root, "乐器音源对照表.csv")
-        if os.path.exists(instr_map_path):
-            try:
-                with open(instr_map_path, "r", encoding="utf-8-sig") as f:
-                    lines = f.readlines()
-                if not lines:
-                    add_error(instr_map_path, "[内容错误] 文件为空")
+
+        # 定义允许的 DAW 工程后缀
+        allowed_daw_exts = (".flp", ".logicx", ".cpr")
+
+        if os.path.exists(mix_proj_root):
+            # 获取该目录下所有项目（包括隐藏文件）
+            all_items = list(os.listdir(mix_proj_root))
+
+            found_wavs = []
+            found_daw_files = []
+            found_csv = False
+
+            # --- 第一步：分类扫描所有文件，检查多余项 ---
+            for item in all_items:
+                item_path = os.path.join(mix_proj_root, item)
+                item_lower = item.lower()
+
+                if item_lower.endswith(".wav"):
+                    # 如果是文件夹命名成了 .wav，视为错误
+                    if os.path.isdir(item_path):
+                        add_error(item_path, f"[多余文件夹] {item} (WAV不应是文件夹)")
+                    else:
+                        found_wavs.append(item)
+
+                elif item_lower.endswith(allowed_daw_exts):
+                    # DAW 文件可能是文件夹 (如 .logicx)，所以不限制 isfile
+                    found_daw_files.append(item)
+
+                elif item == "乐器音源对照表.csv":
+                    if os.path.isdir(item_path):
+                        add_error(item_path, f"[类型错误] {item} 不应是文件夹")
+                    else:
+                        found_csv = True
+
                 else:
-                    header = lines[0].strip()
-                    if header != "乐器,音源":
-                        add_error(instr_map_path, "[表头错误] 必须严格为 乐器,音源")
-                    for idx, line in enumerate(lines[1:], start=2):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        parts = line.split(",")
-                        if len(parts) != 2:
-                            add_error(instr_map_path, f"[列数错误] 第{idx}行不是2列")
-            except Exception as e:
-                add_error(instr_map_path, f"[读取错误] {e}")
+                    # 既不是wav，不是daw，也不是指定的csv -> 多余项
+                    type_str = "文件夹" if os.path.isdir(item_path) else "文件"
+                    add_error(item_path, f"[多余{type_str}] {item}")
 
-            if os.path.exists(mix_proj_root):
-                # 获取歌曲名称 (假设 song_path 的最后一级目录即为歌曲名)
-                # 如果你的 song_name 变量已经在前面定义过，可以直接使用
+            # --- 第二步：检查 DAW 工程文件是否存在 ---
+            if not found_daw_files:
+                add_error(
+                    mix_proj_root,
+                    "[缺失文件] 缺少 DAW 工程文件 (需包含 .flp / .logicx / .cpr 任一)",
+                )
 
-                # 获取所有wav文件
-                wav_files = [
-                    f for f in os.listdir(mix_proj_root) if f.lower().endswith(".wav")
-                ]
+            # --- 第三步：检查 CSV 内容 (原有逻辑) ---
+            instr_map_path = os.path.join(mix_proj_root, "乐器音源对照表.csv")
+            if not found_csv:
+                # 只有在确实没找到时才报缺失，避免与上面的多余项逻辑冲突（虽然这里通常 expected list 更好，但在混合逻辑下这样写清晰）
+                # 这里如果不强求必须有 CSV，可以去掉报错；如果必须有：
+                add_error(mix_proj_root, "[缺失文件] 缺少 乐器音源对照表.csv")
+            else:
+                # 执行 CSV 内容检查
+                try:
+                    with open(instr_map_path, "r", encoding="utf-8-sig") as f:
+                        lines = f.readlines()
+                    if not lines:
+                        add_error(instr_map_path, "[内容错误] 文件为空")
+                    else:
+                        header = lines[0].strip()
+                        if header != "乐器,音源":
+                            add_error(instr_map_path, "[表头错误] 必须严格为 乐器,音源")
+                        for idx, line in enumerate(lines[1:], start=2):
+                            line = line.strip()
+                            if not line:
+                                continue
+                            parts = line.split(",")
+                            if len(parts) != 2:
+                                add_error(
+                                    instr_map_path, f"[列数错误] 第{idx}行不是2列"
+                                )
+                except Exception as e:
+                    add_error(instr_map_path, f"[读取错误] {e}")
 
-                # 用于统计每个乐器的文件信息
-                # 结构: { "乐器名": [ {"file": "文件名", "has_num": True/False}, ... ] }
-                instrument_groups = {}
+            # --- 第四步：检查 WAV 文件 (格式 + 命名逻辑) ---
 
-                for wav_file in wav_files:
-                    # 1. 检查前缀 (歌曲名_...)
-                    if not wav_file.startswith(song_name + "_"):
-                        add_error(
-                            os.path.join(mix_proj_root, wav_file),
-                            f"[命名错误] 文件必须以歌曲名 '{song_name}_' 开头",
-                        )
-                        continue
+            # 用于统计每个乐器的文件信息 { "乐器名": [ {"file": "文件名", "has_num": True/False}, ... ] }
+            instrument_groups = {}
 
-                    # 去掉后缀和前面的歌曲名，只剩下 "乐器_序号" 或 "乐器"
-                    content_part = os.path.splitext(wav_file)[0][len(song_name) + 1 :]
+            for wav_file in found_wavs:
+                wav_full_path = os.path.join(mix_proj_root, wav_file)
 
-                    parts = content_part.split("_")
+                # 4.1 [新增] 音频格式物理检查 (96k/24bit/Stereo)
+                fmt_err = LogicChecker.check_wav_format(wav_full_path)
+                if fmt_err:
+                    add_error(wav_full_path, fmt_err)
 
-                    inst_name = ""
-                    has_num = False
+                # 4.2 命名与逻辑检查
+                # 检查前缀 (歌曲名_...)
+                if not wav_file.startswith(song_name + "_"):
+                    add_error(
+                        wav_full_path,
+                        f"[命名错误] 文件必须以歌曲名 '{song_name}_' 开头",
+                    )
+                    continue
 
-                    # 2. 解析命名结构
-                    if len(parts) == 1:
-                        # 格式：歌曲名_乐器 (无序号)
-                        inst_name = parts[0]
-                        has_num = False
-                    elif len(parts) == 2 and parts[1].isdigit():
-                        # 格式：歌曲名_乐器_序号 (有序号)
-                        inst_name = parts[0]
+                # 去掉后缀和前面的歌曲名，只剩下 "乐器名" 或 "乐器名_序号"，乐器名可含下划线
+                content_part = os.path.splitext(wav_file)[0][len(song_name) + 1 :]
+                # 只以最后一个下划线分割
+                if "_" in content_part:
+                    inst_base, last = content_part.rsplit("_", 1)
+                    if last.isdigit():
+                        inst_name = inst_base
                         has_num = True
                     else:
-                        # 格式异常 (例如由多个下划线，或者序号不是数字)
-                        add_error(
-                            os.path.join(mix_proj_root, wav_file),
-                            "[格式错误] 命名应为 '歌曲名_乐器名' 或 '歌曲名_乐器名_序号'",
-                        )
-                        continue
+                        inst_name = content_part
+                        has_num = False
+                else:
+                    inst_name = content_part
+                    has_num = False
 
-                    # 存入字典进行后续统计
-                    if inst_name not in instrument_groups:
-                        instrument_groups[inst_name] = []
-                    instrument_groups[inst_name].append(
-                        {"file": wav_file, "has_num": has_num}
+                if not inst_name:
+                    add_error(
+                        wav_full_path,
+                        "[格式错误] 乐器名不能为空，命名应为 '歌曲名_乐器名' 或 '歌曲名_乐器名_序号'",
                     )
+                    continue
 
-                # 3. 校验“单轨无序号，多轨有序号”的逻辑
-                for inst_name, items in instrument_groups.items():
-                    count = len(items)
+                if inst_name not in instrument_groups:
+                    instrument_groups[inst_name] = []
+                instrument_groups[inst_name].append(
+                    {"file": wav_file, "has_num": has_num}
+                )
 
-                    if count == 1:
-                        # 只有一个轨道，规则要求：不用写序号
-                        item = items[0]
-                        if item["has_num"]:
+            # 4.3 校验“单轨无序号，多轨有序号”的逻辑
+            for inst_name, items in instrument_groups.items():
+                count = len(items)
+                if count == 1:
+                    # 只有一个轨道 -> 不用写序号
+                    item = items[0]
+                    if item["has_num"]:
+                        add_error(
+                            os.path.join(mix_proj_root, item["file"]),
+                            f"[命名冗余] 乐器 '{inst_name}' 只有一条轨道，不应包含序号",
+                        )
+                elif count > 1:
+                    # 有多个轨道 -> 必须写序号
+                    for item in items:
+                        if not item["has_num"]:
                             add_error(
                                 os.path.join(mix_proj_root, item["file"]),
-                                f"[命名冗余] 乐器 '{inst_name}' 只有一条轨道，不应包含序号",
+                                f"[命名缺失] 乐器 '{inst_name}' 有 {count} 条轨道，必须通过序号区分",
                             )
-
-                    elif count > 1:
-                        # 有多个轨道，规则要求：必须写序号
-                        for item in items:
-                            if not item["has_num"]:
-                                add_error(
-                                    os.path.join(mix_proj_root, item["file"]),
-                                    f"[命名缺失] 乐器 '{inst_name}' 有 {count} 条轨道，必须通过序号区分",
-                                )
 
         return error_map
