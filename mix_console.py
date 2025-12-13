@@ -6,7 +6,7 @@ import librosa
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -309,6 +309,7 @@ class MixConsoleWindow(QMainWindow):
         self.user_seeking = False
         self._was_playing_during_seek = False
         self.total_duration_ms = 0
+        self._minimize_to_hide_pending = False
 
         self._init_ui()
         self._update_controls_state()
@@ -478,6 +479,20 @@ class MixConsoleWindow(QMainWindow):
                     )
 
         self._refresh_duration()
+        self._update_controls_state()
+
+    def _clear_all_tracks(self) -> None:
+        for widget in self.track_widgets.values():
+            widget.setParent(None)
+            widget.deleteLater()
+
+        self.track_widgets.clear()
+        self.tracks.clear()
+        self.mix_samplerate = None
+        self.total_duration_ms = 0
+        self.position_slider.setRange(0, 0)
+        self.position_slider.setValue(0)
+        self._update_time_label(0)
         self._update_controls_state()
 
     def _on_track_muted(self, track: MixTrack, muted: bool) -> None:
@@ -682,10 +697,24 @@ class MixConsoleWindow(QMainWindow):
 
     def hideEvent(self, event) -> None:  # type: ignore[override]
         super().hideEvent(event)
-        self._stop_playback(reset_position=False)
         self.visibility_changed.emit(False)
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.windowState() & Qt.WindowState.WindowMinimized:
+                if not self._minimize_to_hide_pending:
+                    self._minimize_to_hide_pending = True
+                    QTimer.singleShot(0, self._handle_minimize_hide)
+                return
+        super().changeEvent(event)
+
+    def _handle_minimize_hide(self) -> None:
+        self._minimize_to_hide_pending = False
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        self.hide()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._stop_playback(reset_position=True)
+        self._clear_all_tracks()
         event.ignore()
         self.hide()
