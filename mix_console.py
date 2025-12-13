@@ -299,6 +299,61 @@ class MixPlaybackWorker(QThread):
         self.master_gain = gain
 
 
+class TrackLoadWorker(QThread):
+    """Load a WAV track in the background to avoid blocking the UI."""
+
+    loaded = pyqtSignal(object)  # MixTrack
+    failed = pyqtSignal(str, str)  # title, message
+
+    def __init__(self, path: str, target_samplerate: Optional[int]):
+        super().__init__()
+        self.path = path
+        self.target_samplerate = target_samplerate
+
+    def run(self) -> None:
+        try:
+            if not os.path.isfile(self.path):
+                self.failed.emit("文件不存在", self.path)
+                return
+
+            ext = os.path.splitext(self.path)[1].lower()
+            if ext != ".wav":
+                self.failed.emit("类型不支持", "仅支持 WAV 文件混音。")
+                return
+
+            data, sr = sf.read(self.path, dtype="float32", always_2d=True)
+            if data.size == 0 or sr <= 0:
+                self.failed.emit("读取失败", "音频数据为空或采样率无效。")
+                return
+
+            mono = data.mean(axis=1).astype(np.float32)
+
+            if self.target_samplerate is not None and sr != self.target_samplerate:
+                try:
+                    mono = librosa.resample(
+                        mono,
+                        orig_sr=sr,
+                        target_sr=self.target_samplerate,
+                        res_type="kaiser_fast",
+                    ).astype(np.float32)
+                except Exception as exc:
+                    self.failed.emit("采样率转换失败", str(exc))
+                    return
+                sr = self.target_samplerate
+
+            duration_ms = int(mono.size * 1000 / sr) if sr > 0 else 0
+            track = MixTrack(
+                path=self.path,
+                name=os.path.basename(self.path),
+                data=mono,
+                samplerate=sr,
+                duration_ms=duration_ms,
+            )
+            self.loaded.emit(track)
+        except Exception as exc:
+            self.failed.emit("读取失败", f"无法读取音频：{exc}")
+
+
 class MixConsoleWindow(QMainWindow):
     """Standalone mix console window with basic multi-track support."""
 
@@ -319,6 +374,11 @@ class MixConsoleWindow(QMainWindow):
         self._was_playing_during_seek = False
         self.total_duration_ms = 0
         self._minimize_to_hide_pending = False
+
+        # Track loading queue (avoid blocking UI and avoid spawning many threads)
+        self._pending_paths: set[str] = set()
+        self._load_queue: List[str] = []
+        self._track_load_worker: Optional[TrackLoadWorker] = None
 
         self._init_ui()
         self._update_controls_state()
@@ -398,49 +458,52 @@ class MixConsoleWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Public API
     def add_track_from_file(self, path: str) -> None:
-        if not os.path.isfile(path):
-            QMessageBox.warning(self, "文件不存在", path)
-            return
-
-        ext = os.path.splitext(path)[1].lower()
-        if ext != ".wav":
-            QMessageBox.warning(self, "类型不支持", "仅支持 WAV 文件混音。")
-            return
-
-        if path in self.track_widgets:
+        if path in self.track_widgets or path in self._pending_paths:
             QMessageBox.information(self, "已存在", "该轨道已在混音台中。")
             return
 
-        try:
-            data, sr = sf.read(path, dtype="float32", always_2d=True)
-        except Exception as exc:
-            QMessageBox.critical(self, "读取失败", f"无法读取音频：{exc}")
+        # Enqueue and load in background to keep UI responsive.
+        self._pending_paths.add(path)
+        self._load_queue.append(path)
+        self._start_next_track_load()
+
+    def _start_next_track_load(self) -> None:
+        # Only one loader at a time.
+        worker = self._track_load_worker
+        if worker and worker.isRunning():
             return
 
-        mono = data.mean(axis=1).astype(np.float32)
+        if not self._load_queue:
+            self._track_load_worker = None
+            return
 
+        path = self._load_queue.pop(0)
+        target_sr = self.mix_samplerate  # may be None for the very first track
+        self._track_load_worker = TrackLoadWorker(path, target_samplerate=target_sr)
+        self._track_load_worker.loaded.connect(self._on_track_loaded)
+        self._track_load_worker.failed.connect(self._on_track_load_failed)
+        self._track_load_worker.finished.connect(self._start_next_track_load)
+        self._track_load_worker.start()
+
+    def _on_track_loaded(self, track: MixTrack) -> None:
+        # Remove from pending first
+        self._pending_paths.discard(track.path)
+
+        # Initialize mix samplerate from first loaded track
         if self.mix_samplerate is None:
-            self.mix_samplerate = sr
-        elif sr != self.mix_samplerate:
-            try:
-                mono = librosa.resample(mono, orig_sr=sr, target_sr=self.mix_samplerate)
-            except Exception as exc:
-                QMessageBox.critical(self, "采样率转换失败", str(exc))
-                return
-            sr = self.mix_samplerate
-
-        duration_ms = int(mono.size * 1000 / sr) if sr > 0 else 0
-        track = MixTrack(
-            path=path,
-            name=os.path.basename(path),
-            data=mono,
-            samplerate=sr,
-            duration_ms=duration_ms,
-        )
+            self.mix_samplerate = track.samplerate
 
         self.tracks.append(track)
         self._append_track_widget(track)
         self._refresh_duration()
+        self._update_controls_state()
+
+    def _on_track_load_failed(self, title: str, message: str) -> None:
+        # Best-effort: try to remove the head that was loading from pending.
+        worker = self._track_load_worker
+        if worker is not None:
+            self._pending_paths.discard(worker.path)
+        QMessageBox.warning(self, title, message)
         self._update_controls_state()
 
     # ------------------------------------------------------------------
