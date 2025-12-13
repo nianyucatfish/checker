@@ -48,6 +48,10 @@ class MainWindow(QMainWindow):
         self.log_view = None
         self.status_lbl = None
 
+        # 新增：问题显示模式（'all' 或 'current_folder'）
+        self.error_display_mode = "all"
+        self.current_folder_path = None  # 当前选中文件/文件夹的父目录
+
         # 1. 配置加载与工作区初始化
         self.root_dir = os.path.abspath(r".")  # 默认值
         self._load_config()
@@ -293,9 +297,31 @@ class MainWindow(QMainWindow):
         """
         )
 
+        # 问题显示切换控件
+        from PyQt6.QtWidgets import QHBoxLayout, QComboBox
+
+        error_panel = QWidget()
+        error_layout = QVBoxLayout(error_panel)
+        error_layout.setContentsMargins(0, 0, 0, 0)
+        error_layout.setSpacing(2)
+
+        switch_row = QHBoxLayout()
+        switch_row.setContentsMargins(4, 4, 4, 4)
+        switch_row.setSpacing(8)
+        self.error_mode_combo = QComboBox()
+        self.error_mode_combo.addItems(["全部问题", "当前文件夹问题"])
+        self.error_mode_combo.setToolTip(
+            "切换显示全部问题或仅显示当前文件/文件夹所在文件夹的问题"
+        )
+        self.error_mode_combo.currentIndexChanged.connect(self.on_error_mode_changed)
+        switch_row.addWidget(self.error_mode_combo)
+        switch_row.addStretch(1)
+        error_layout.addLayout(switch_row)
+
         self.error_list = QListWidget()
         self.error_list.itemClicked.connect(self.on_error_jump)
-        self.bottom_tabs.addTab(self.error_list, "问题 (Problems)")
+        error_layout.addWidget(self.error_list)
+        self.bottom_tabs.addTab(error_panel, "问题 (Problems)")
 
         # log_view 在此被创建并赋值给 self.log_view
         self.log_view = QTextEdit()
@@ -453,14 +479,28 @@ class MainWindow(QMainWindow):
         """刷新树状图颜色和小圆点，刷新错误列表"""
         self.model.update_status(self.error_data, self.unsaved_files)
 
-        # 刷新列表
+        # 刷新问题列表，支持过滤
         self.error_list.clear()
         count = 0
-        for path, errs in self.error_data.items():
-            folder = os.path.basename(os.path.dirname(path))
+        # 过滤逻辑
+        if self.error_display_mode == "all" or not self.current_folder_path:
+            error_items = list(self.error_data.items())
+        else:
+            # 只显示当前文件夹及其子文件夹下的错误
+            folder = os.path.normpath(self.current_folder_path)
+            folder_with_sep = folder + os.sep
+            error_items = []
+            for p, errs in self.error_data.items():
+                p_norm = os.path.normpath(p)
+                # 精确匹配：1. 路径等于当前文件夹 2. 路径在当前文件夹下
+                if p_norm == folder or p_norm.startswith(folder_with_sep):
+                    error_items.append((p, errs))
+
+        for path, errs in error_items:
+            folder_name = os.path.basename(os.path.dirname(path))
             name = os.path.basename(path)
             for e in errs:
-                item = QListWidgetItem(f"[{folder}/{name}] {e}")
+                item = QListWidgetItem(f"[{folder_name}/{name}] {e}")
                 item.setData(Qt.ItemDataRole.UserRole, path)
                 item.setForeground(QColor("#d32f2f"))
                 self.error_list.addItem(item)
@@ -469,12 +509,29 @@ class MainWindow(QMainWindow):
             0, f"问题 ({count})" if count > 0 else "问题 (Problems)"
         )
 
+    def on_error_mode_changed(self, idx):
+        """切换问题显示模式"""
+        if idx == 0:
+            self.error_display_mode = "all"
+        else:
+            self.error_display_mode = "current_folder"
+        self.refresh_model()
+
     # ================= 事件响应 =================
 
     def on_file_clicked(self, index):
         path = self.model.filePath(index)
+        # 记录当前选中文件/文件夹的父目录（用于过滤）
         if os.path.isfile(path):
+            self.current_folder_path = os.path.dirname(path)
             self.editor_manager.open_file(path)
+        elif os.path.isdir(path):
+            self.current_folder_path = path
+        else:
+            self.current_folder_path = None
+        # 切换到“当前文件夹问题”时自动刷新
+        if self.error_display_mode == "current_folder":
+            self.refresh_model()
 
     def on_file_modified(self, path):
         """编辑器内容变动"""
