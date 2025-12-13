@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("音频工程质检 IDE")
+        self.setWindowTitle("音频工程质检工具")
         self.resize(1400, 900)
 
         # 【关键修复】确保 log_view 和 status_lbl 在 _load_config 调用 log() 之前存在
@@ -110,7 +110,7 @@ class MainWindow(QMainWindow):
     def _update_window_title(self):
         """更新窗口标题，显示当前工作区名称"""
         ws_name = os.path.basename(self.root_dir) if self.root_dir else "未打开工作区"
-        self.setWindowTitle(f"音频工程质检 IDE - [{ws_name}]")
+        self.setWindowTitle(f"音频工程质检工具 - [{ws_name}]")
 
     def _set_root_dir(self, new_root_dir):
         """切换工作区根目录并刷新UI"""

@@ -434,7 +434,9 @@ class MixConsoleWindow(QMainWindow):
                 worker.set_max_frames(new_max)
                 # keep current frame within new bounds
                 if worker.current_frame >= worker.max_frames:
-                    worker.set_current_frame(min(worker.current_frame, worker.max_frames))
+                    worker.set_current_frame(
+                        min(worker.current_frame, worker.max_frames)
+                    )
 
         self._refresh_duration()
         self._update_controls_state()
@@ -485,10 +487,16 @@ class MixConsoleWindow(QMainWindow):
         self._stop_playback(reset_position=False)
 
         # Start from current slider position (seek support)
-        start_ms = self.position_slider.value() if self.position_slider.maximum() > 0 else 0
-        start_frame = int(start_ms * self.mix_samplerate / 1000) if self.mix_samplerate else 0
+        start_ms = (
+            self.position_slider.value() if self.position_slider.maximum() > 0 else 0
+        )
+        start_frame = (
+            int(start_ms * self.mix_samplerate / 1000) if self.mix_samplerate else 0
+        )
 
-        self.playback_worker = MixPlaybackWorker(self.tracks, self.mix_samplerate, start_frame=start_frame)
+        self.playback_worker = MixPlaybackWorker(
+            self.tracks, self.mix_samplerate, start_frame=start_frame
+        )
         self.playback_worker.set_master_gain(self.master_slider.value() / 100.0)
         self.playback_worker.position_update.connect(self._on_position_update)
         self.playback_worker.finished.connect(self._on_playback_finished)
@@ -597,7 +605,11 @@ class MixConsoleWindow(QMainWindow):
                 self.playback_worker.current_frame = new_frame
 
         # 恢复播放（如果释放前正在播放）
-        if self.playback_worker and self.playback_worker.isRunning() and self._was_playing_during_seek:
+        if (
+            self.playback_worker
+            and self.playback_worker.isRunning()
+            and self._was_playing_during_seek
+        ):
             self.playback_worker.pause_playback(False)
             self.is_paused = False
             self.btn_play.setText("暂停")
