@@ -52,31 +52,57 @@ class MixTrackWidget(QWidget):
         self._on_remove = on_remove
         self._solo_state = False
 
+        # 主布局：水平 (左边是波形区域，右边是按钮区域)
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(6, 6, 6, 6)
         main_layout.setSpacing(8)
 
-        # 左侧：文件名
+        # --- 左侧区域：垂直布局 (上方歌名，下方波形) ---
+        wave_area_layout = QVBoxLayout()
+        wave_area_layout.setContentsMargins(0, 0, 0, 0)
+        wave_area_layout.setSpacing(2)  # 歌名和波形稍微紧凑一点
+
+        # 1. 歌曲名 (放在波形上方，左对齐)
         name_label = QLabel(track.name)
         name_label.setToolTip(track.path)
-        name_label.setMinimumWidth(120)
-        main_layout.addWidget(name_label)
+        # 设置左对齐
+        name_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom
+        )
+        wave_area_layout.addWidget(name_label)
 
-        # 中间：波形
+        # 2. 波形
         self.plot = pg.PlotWidget()
         self.plot.setBackground("w")
         self.plot.setMenuEnabled(False)
         self.plot.showGrid(x=False, y=False)
         self.plot.hideAxis("left")
         self.plot.hideAxis("bottom")
+        # 禁用鼠标交互：滚轮缩放、拖动平移等，以防止波形被缩放或移动
+        try:
+            # 优先使用 PlotWidget 的接口（会转发到内部的 ViewBox）
+            self.plot.setMouseEnabled(False, False)
+        except Exception:
+            # 若不可用，再尝试直接操作 ViewBox（兼容性保底）
+            try:
+                vb = self.plot.getViewBox()
+                vb.setMouseEnabled(False, False)
+            except Exception:
+                pass
+        # 隐藏左下角的自动缩放按钮（去掉“A”）
+        try:
+            self.plot.plotItem.hideButtons()
+        except Exception:
+            pass
         self.plot.setMinimumHeight(60)
         self.plot.setMaximumHeight(70)
         self._draw_waveform(track.data, track.samplerate)
-        main_layout.addWidget(self.plot, stretch=1)
+        wave_area_layout.addWidget(self.plot)
 
-        # 右侧：按钮纵向排列
-        from PyQt6.QtWidgets import QVBoxLayout
+        # 将左侧波形区域加入主布局，并设 stretch=1 占据主要空间
+        main_layout.addLayout(wave_area_layout, stretch=1)
 
+        # --- 右侧区域：按钮纵向排列 ---
         btn_col = QVBoxLayout()
         btn_col.setSpacing(4)
         btn_col.setContentsMargins(0, 0, 0, 0)
@@ -266,6 +292,10 @@ class MixConsoleWindow(QMainWindow):
         control_row.addSpacing(12)
 
         self.master_label = QLabel("主音量: 100%")
+        # --- 关键修改：设置固定宽度，防止文字长短变化导致界面抖动 ---
+        self.master_label.setFixedWidth(120)
+        # 也可以设置AlignRight或者AlignCenter让数字看起来更规整
+        # self.master_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         control_row.addWidget(self.master_label)
 
         self.master_slider = QSlider(Qt.Orientation.Horizontal)
