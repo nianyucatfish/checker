@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QPushButton,
     QHBoxLayout,
+    QHeaderView,
 )
 from PyQt6.QtGui import (
     QFont,
@@ -67,8 +68,24 @@ class CsvTableEditor(QWidget):
 
         self.table = QTableWidget()
         self.table.setEditTriggers(QTableWidget.EditTrigger.AllEditTriggers)
+
+        # 允许拖拽调整列宽/行高（类似 Excel 的“拉伸”）
+        h_header = self.table.horizontalHeader()
+        h_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        h_header.setMinimumSectionSize(24)
+
+        v_header = self.table.verticalHeader()
+        v_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        v_header.setMinimumSectionSize(18)
+
         self.table.itemChanged.connect(self._handle_item_changed)
-        layout.addWidget(self.table)
+
+        # 表格左右留白（避免自适应列宽贴边）
+        table_container = QWidget()
+        table_layout = QHBoxLayout(table_container)
+        table_layout.setContentsMargins(20, 0, 20, 0)
+        table_layout.addWidget(self.table)
+        layout.addWidget(table_container)
 
         btn_add_row.clicked.connect(self.add_row)
         btn_add_col.clicked.connect(self.add_column)
@@ -109,6 +126,10 @@ class CsvTableEditor(QWidget):
                 for c, val in enumerate(row):
                     item = QTableWidgetItem(val)
                     self.table.setItem(r, c, item)
+
+            # 初次加载时按内容做一次基础自适应，后续可手动拖拽微调
+            self.table.resizeColumnsToContents()
+            self.table.resizeRowsToContents()
         except Exception as e:
             # 解析出错时不崩溃，弹窗提示或者在表格显示错误
             print(f"CSV解析警告: {e}")
