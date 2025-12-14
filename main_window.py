@@ -1,6 +1,7 @@
 import os
 import shutil
 import json
+import math
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QListWidgetItem,
     QFileDialog,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint
 from PyQt6.QtGui import QAction, QKeySequence, QColor
@@ -31,11 +33,13 @@ from mix_console import MixConsoleWindow
 import librosa
 import numpy as np
 import resampy
+import soundfile as sf
 
 # --- 配置常量 ---
 CONFIG_FILE = "ide_config.json"
 RECENT_WORKSPACE_KEY = "last_workspace"
 SPLITTER_SIZES_KEY = "splitter_sizes"
+SUPPRESS_TRIM_DURATION_PROMPT_KEY = "suppress_trim_duration_prompt"
 
 
 class MainWindow(QMainWindow):
@@ -58,6 +62,7 @@ class MainWindow(QMainWindow):
         self.current_folder_path = None  # 当前选中文件/文件夹的父目录
         self.last_selected_path = None
         self.mix_console_window = None
+        self.suppress_trim_duration_prompt = False
 
         # 1. 配置加载与工作区初始化
         self.root_dir = os.path.abspath(r".")  # 默认值
@@ -94,6 +99,11 @@ class MainWindow(QMainWindow):
 
                     # 加载分割器尺寸
                     self.saved_splitter_sizes = config.get(SPLITTER_SIZES_KEY)
+
+                    # 是否不再提示“统一时长裁剪”警告
+                    self.suppress_trim_duration_prompt = bool(
+                        config.get(SUPPRESS_TRIM_DURATION_PROMPT_KEY, False)
+                    )
             except (json.JSONDecodeError, IOError) as e:
                 self.log(f"加载配置失败，使用默认目录: {e}")
 
@@ -105,11 +115,187 @@ class MainWindow(QMainWindow):
                 SPLITTER_SIZES_KEY: (
                     self.splitter_v.sizes() if hasattr(self, "splitter_v") else None
                 ),
+                SUPPRESS_TRIM_DURATION_PROMPT_KEY: bool(
+                    getattr(self, "suppress_trim_duration_prompt", False)
+                ),
             }
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
         except IOError as e:
             self.log(f"保存配置失败: {e}")
+
+    def _is_song_folder(self, path: str) -> bool:
+        """判断是否为工作区下的歌曲文件夹（一级子目录）。"""
+        if not path or not os.path.isdir(path) or not os.path.isdir(self.root_dir):
+            return False
+        parent = os.path.normpath(os.path.dirname(path))
+        root = os.path.normpath(self.root_dir)
+        if parent != root:
+            return False
+        # 至少包含一个目标子目录，避免对普通文件夹误触发
+        return os.path.isdir(os.path.join(path, "分轨wav")) or os.path.isdir(
+            os.path.join(path, "总轨wav")
+        )
+
+    def _confirm_trim_duration_action(self) -> bool:
+        """确认统一时长裁剪操作。可通过配置选择不再提示。"""
+        if getattr(self, "suppress_trim_duration_prompt", False):
+            return True
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("统一时长到最短音频")
+        box.setText(
+            "该功能会将该歌曲的‘分轨wav’与‘总轨wav’中的 WAV 文件统一裁剪到最短音频时长（仅切掉尾部）。"
+        )
+        box.setInformativeText(
+            "请先手动确认所有音频起始点已对齐后再使用，否则可能导致听感错位。"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        yes_btn = box.button(QMessageBox.StandardButton.Yes)
+        if yes_btn:
+            yes_btn.setText("确认裁剪")
+        cancel_btn = box.button(QMessageBox.StandardButton.Cancel)
+        if cancel_btn:
+            cancel_btn.setText("取消")
+
+        cb = QCheckBox("不再提示")
+        box.setCheckBox(cb)
+
+        result = box.exec()
+
+        if cb.isChecked():
+            self.suppress_trim_duration_prompt = True
+            self._save_config()
+
+        return result == QMessageBox.StandardButton.Yes
+
+    def trim_song_wavs_to_shortest(self, song_path: str) -> None:
+        """将歌曲文件夹内（分轨wav/总轨wav）所有 WAV 裁剪到最短时长（仅切尾部）。"""
+        if not song_path or not os.path.isdir(song_path):
+            QMessageBox.warning(self, "无效路径", "无法识别所选歌曲文件夹。")
+            return
+
+        if not self._confirm_trim_duration_action():
+            return
+
+        self.editor_manager.media_player.stop()
+
+        target_dirs = [
+            os.path.join(song_path, "分轨wav"),
+            os.path.join(song_path, "总轨wav"),
+        ]
+
+        wav_files: list[str] = []
+        for d in target_dirs:
+            if not os.path.isdir(d):
+                continue
+            try:
+                names = os.listdir(d)
+            except Exception:
+                continue
+            for name in names:
+                if not name.lower().endswith(".wav"):
+                    continue
+                fp = os.path.join(d, name)
+                if os.path.isfile(fp):
+                    wav_files.append(fp)
+
+        if not wav_files:
+            QMessageBox.information(self, "无 WAV 文件", "未找到可处理的 WAV 文件。")
+            return
+
+        # 1) 扫描最短时长（秒）
+        metas: list[tuple[str, int, int, int]] = []  # (path, sr, channels, frames)
+        min_dur_sec: float | None = None
+        for fp in wav_files:
+            try:
+                with sf.SoundFile(fp) as f:
+                    sr = int(f.samplerate)
+                    ch = int(f.channels)
+                    frames = int(f.frames)
+                    if sr <= 0 or frames <= 0:
+                        raise RuntimeError("采样率或帧数无效")
+                    dur = float(frames) / float(sr)
+            except Exception as e:
+                QMessageBox.critical(self, "读取失败", f"无法读取 WAV: {fp}\n\n{e}")
+                return
+
+            metas.append((fp, sr, ch, frames))
+            if min_dur_sec is None or dur < min_dur_sec:
+                min_dur_sec = dur
+
+        if not min_dur_sec or min_dur_sec <= 0:
+            QMessageBox.warning(self, "无法处理", "未能获取有效的最短时长。")
+            return
+
+        # 2) 执行裁剪（流式写入临时文件再覆盖原文件）
+        trimmed = 0
+        watcher = getattr(self, "watcher", None)
+        if watcher:
+            try:
+                watcher.blockSignals(True)
+            except Exception:
+                watcher = None
+
+        try:
+            for fp, sr, _ch, frames in metas:
+                target_frames = int(math.floor(min_dur_sec * sr))
+                target_frames = max(0, min(target_frames, frames))
+                if target_frames >= frames:
+                    continue
+
+                tmp_path = fp + ".trim_tmp.wav"
+                try:
+                    with sf.SoundFile(fp, mode="r") as in_f:
+                        with sf.SoundFile(
+                            tmp_path,
+                            mode="w",
+                            samplerate=in_f.samplerate,
+                            channels=in_f.channels,
+                            format=in_f.format,
+                            subtype=in_f.subtype,
+                        ) as out_f:
+                            remaining = target_frames
+                            block = 65536
+                            while remaining > 0:
+                                to_read = min(block, remaining)
+                                data = in_f.read(to_read, dtype="int32", always_2d=True)
+                                if data.size == 0:
+                                    break
+                                out_f.write(data)
+                                remaining -= data.shape[0]
+
+                    os.replace(tmp_path, fp)
+                    trimmed += 1
+                except Exception as e:
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+                    QMessageBox.critical(
+                        self,
+                        "裁剪失败",
+                        f"处理失败：{fp}\n\n{e}",
+                    )
+                    return
+        finally:
+            if watcher:
+                try:
+                    watcher.blockSignals(False)
+                except Exception:
+                    pass
+
+        self.log(
+            f"统一时长完成：目标 {min_dur_sec:.3f}s，已裁剪 {trimmed} 个文件（仅切尾部）"
+        )
+
+        # 3) 触发增量扫描刷新问题
+        self.trigger_partial_scan(song_path)
+        self.refresh_model()
 
     def _update_window_title(self):
         """更新窗口标题，显示当前工作区名称"""
@@ -607,6 +793,11 @@ class MainWindow(QMainWindow):
         act_del = QAction("删除", self)
         act_del.triggered.connect(lambda: self.do_delete(path))
         menu.addAction(act_del)
+
+        if self._is_song_folder(path):
+            act_trim = QAction("统一时长到最短音频(裁剪尾部)", self)
+            act_trim.triggered.connect(lambda: self.trim_song_wavs_to_shortest(path))
+            menu.addAction(act_trim)
 
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() == ".wav":
             act_add_mix = QAction("添加到混音台", self)
