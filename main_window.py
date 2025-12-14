@@ -20,8 +20,11 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QFileDialog,
     QCheckBox,
+    QStyledItemDelegate,
+    QStyle,
+    QApplication,
 )
-from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint
+from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect
 from PyQt6.QtGui import QAction, QKeySequence, QColor
 
 from file_model import ProjectModel
@@ -40,6 +43,79 @@ CONFIG_FILE = "ide_config.json"
 RECENT_WORKSPACE_KEY = "last_workspace"
 SPLITTER_SIZES_KEY = "splitter_sizes"
 SUPPRESS_TRIM_DURATION_PROMPT_KEY = "suppress_trim_duration_prompt"
+
+
+class WavDurationDelegate(QStyledItemDelegate):
+    """在文件树同一列中右对齐显示 WAV 时长(mm:ss)。"""
+
+    def paint(self, painter, option, index):
+        if index.column() != 0:
+            return super().paint(painter, option, index)
+
+        model = index.model()
+        try:
+            duration_text = model.data(index, ProjectModel.DurationRole)
+        except Exception:
+            duration_text = None
+
+        if not duration_text:
+            return super().paint(painter, option, index)
+
+        widget = option.widget
+        style = widget.style() if widget else QApplication.style()
+
+        opt = option
+        self.initStyleOption(opt, index)
+
+        # 如果空间过窄，回退默认绘制
+        fm = opt.fontMetrics
+        dur_w = fm.horizontalAdvance(str(duration_text))
+        text_rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, opt, widget
+        )
+        if text_rect.width() < dur_w + 12:
+            return super().paint(painter, option, index)
+
+        # 先让 style 画背景/图标/焦点框；我们自己画文本
+        saved_text = opt.text
+        opt.text = ""
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+        opt.text = saved_text
+
+        left_rect = QRect(text_rect)
+        left_rect.setRight(text_rect.right() - (dur_w + 12))
+        right_rect = QRect(text_rect)
+        right_rect.setLeft(left_rect.right() + 1)
+
+        painter.save()
+
+        # 颜色策略：优先使用模型提供的 ForegroundRole（错误红/未保存蓝）；否则用普通 Text 颜色。
+        # 不在选中时强制 HighlightedText（白色），避免在浅色选中背景下看不清。
+        fg = model.data(index, Qt.ItemDataRole.ForegroundRole)
+        if isinstance(fg, QColor):
+            text_color = fg
+        else:
+            # 根据 enabled/active 选择 ColorGroup
+            if not (opt.state & QStyle.StateFlag.State_Enabled):
+                cg = opt.palette.ColorGroup.Disabled
+            elif opt.state & QStyle.StateFlag.State_Active:
+                cg = opt.palette.ColorGroup.Active
+            else:
+                cg = opt.palette.ColorGroup.Inactive
+            text_color = opt.palette.color(cg, opt.palette.ColorRole.Text)
+
+        painter.setPen(text_color)
+        painter.drawText(
+            left_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            str(saved_text),
+        )
+        painter.drawText(
+            right_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+            str(duration_text),
+        )
+        painter.restore()
 
 
 class MainWindow(QMainWindow):
@@ -467,6 +543,7 @@ class MainWindow(QMainWindow):
         self.tree.setColumnHidden(1, True)
         self.tree.setColumnHidden(2, True)
         self.tree.setColumnHidden(3, True)
+        self.tree.setItemDelegateForColumn(0, WavDurationDelegate(self.tree))
         self.tree.clicked.connect(self.on_file_clicked)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.open_tree_menu)

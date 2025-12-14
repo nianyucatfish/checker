@@ -368,7 +368,7 @@ class MixConsoleWindow(QMainWindow):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("混音台 (高性能版)")
+        self.setWindowTitle("混音台")
         self.resize(900, 600)
 
         self.tracks: List[MixTrack] = []
