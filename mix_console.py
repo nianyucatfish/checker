@@ -283,7 +283,7 @@ class TrackLoaderSignals(QObject):
     """定义信号，因为QRunnable没有信号"""
 
     loaded = pyqtSignal(object, object)  # (MixTrack, visual_data_array)
-    failed = pyqtSignal(str, str)  # title, message
+    failed = pyqtSignal(str, str, str)  # path, title, message
 
 
 class TrackLoaderRunnable(QRunnable):
@@ -303,18 +303,22 @@ class TrackLoaderRunnable(QRunnable):
     def run(self) -> None:
         try:
             if not os.path.isfile(self.path):
-                self.signals.failed.emit("文件不存在", self.path)
+                self.signals.failed.emit(self.path, "文件不存在", self.path)
                 return
 
             ext = os.path.splitext(self.path)[1].lower()
             if ext != ".wav":
-                self.signals.failed.emit("类型不支持", "仅支持 WAV 文件混音。")
+                self.signals.failed.emit(
+                    self.path, "类型不支持", "仅支持 WAV 文件混音。"
+                )
                 return
 
             # 读取音频
             data, sr = sf.read(self.path, dtype="float32", always_2d=True)
             if data.size == 0 or sr <= 0:
-                self.signals.failed.emit("读取失败", "音频数据为空或采样率无效。")
+                self.signals.failed.emit(
+                    self.path, "读取失败", "音频数据为空或采样率无效。"
+                )
                 return
 
             mono = data.mean(axis=1).astype(np.float32)
@@ -330,7 +334,7 @@ class TrackLoaderRunnable(QRunnable):
                         res_type="kaiser_fast",
                     ).astype(np.float32)
                 except Exception as exc:
-                    self.signals.failed.emit("采样率转换失败", str(exc))
+                    self.signals.failed.emit(self.path, "采样率转换失败", str(exc))
                     return
                 sr = self.target_samplerate
 
@@ -354,7 +358,7 @@ class TrackLoaderRunnable(QRunnable):
             self.signals.loaded.emit(track, visual_data)
 
         except Exception as exc:
-            self.signals.failed.emit("读取失败", f"无法读取音频：{exc}")
+            self.signals.failed.emit(self.path, "读取失败", f"无法读取音频：{exc}")
 
 
 class MixConsoleWindow(QMainWindow):
@@ -382,6 +386,8 @@ class MixConsoleWindow(QMainWindow):
         self._minimize_to_hide_pending = False
 
         self._pending_paths: set[str] = set()
+        self._loading_total: int = 0
+        self._loading_done: int = 0
 
         # 初始化线程池
         self.thread_pool = QThreadPool()
@@ -411,6 +417,7 @@ class MixConsoleWindow(QMainWindow):
         control_row.addWidget(self.btn_stop)
 
         control_row.addSpacing(12)
+
         self.master_label = QLabel("主音量: 100%")
         self.master_label.setFixedWidth(120)
         control_row.addWidget(self.master_label)
@@ -439,6 +446,11 @@ class MixConsoleWindow(QMainWindow):
         position_row.addWidget(self.position_label)
         layout.addLayout(position_row)
 
+        # 加载提示：放在进度条下方、分轨之前；加载完成自动隐藏
+        self.loading_label = QLabel("")
+        self.loading_label.setVisible(False)
+        layout.addWidget(self.loading_label)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         layout.addWidget(self.scroll)
@@ -450,6 +462,25 @@ class MixConsoleWindow(QMainWindow):
         self.track_layout.setSpacing(12)
         self.track_layout.addStretch(1)
 
+        # 初始化一次加载提示
+        self._update_loading_indicator()
+
+    def _update_loading_indicator(self) -> None:
+        pending = len(self._pending_paths)
+
+        # 如果没有正在加载的任务，隐藏并重置计数
+        if pending <= 0:
+            self.loading_label.setVisible(False)
+            self._loading_total = 0
+            self._loading_done = 0
+            return
+
+        # 有任务在跑：显示 done/total
+        total = max(1, int(self._loading_total))
+        done = min(int(self._loading_done), total)
+        self.loading_label.setText(f"正在加载 {done}/{total}")
+        self.loading_label.setVisible(True)
+
     # ------------------------------------------------------------------
     # 核心修改：并发加载逻辑
 
@@ -459,6 +490,8 @@ class MixConsoleWindow(QMainWindow):
             return
 
         self._pending_paths.add(path)
+        self._loading_total += 1
+        self._update_loading_indicator()
 
         # 创建 Runnable Worker
         loader = TrackLoaderRunnable(path, target_samplerate=self.mix_samplerate)
@@ -474,6 +507,8 @@ class MixConsoleWindow(QMainWindow):
     def _on_track_loaded(self, track: MixTrack, visual_data: np.ndarray) -> None:
         """当单个轨道加载完毕时调用"""
         self._pending_paths.discard(track.path)
+        self._loading_done += 1
+        self._update_loading_indicator()
 
         # --- 新增逻辑：寻找插入位置以保持字典序 ---
         insert_index = len(self.tracks)  # 默认为最后
@@ -494,11 +529,10 @@ class MixConsoleWindow(QMainWindow):
         self._refresh_duration()
         self._update_controls_state()
 
-    def _on_track_load_failed(self, title: str, message: str) -> None:
-        # 这里难以精确知道是哪个 path 失败（除非通过 sender 或传参），
-        # 但对于提示用户已经足够。简单的做法是不处理 path 的 discard，
-        # 或者在 signal 里把 path 传回来。
-        # 为了健壮性，这里仅仅弹窗。
+    def _on_track_load_failed(self, path: str, title: str, message: str) -> None:
+        self._pending_paths.discard(path)
+        self._loading_done += 1
+        self._update_loading_indicator()
         QMessageBox.warning(self, title, message)
         self._update_controls_state()
 
@@ -558,6 +592,7 @@ class MixConsoleWindow(QMainWindow):
         self._update_controls_state()
         # 记得取消 pending 状态
         self._pending_paths.clear()
+        self._update_loading_indicator()
 
     # ... (播放控制、静音独奏、Seek逻辑保持不变) ...
     def _on_track_muted(self, track: MixTrack, muted: bool) -> None:

@@ -1,0 +1,7 @@
+PyQt6
+numpy
+librosa
+soundfile
+sounddevice
+resampy
+pyqtgraph
