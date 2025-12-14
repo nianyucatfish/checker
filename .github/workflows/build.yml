@@ -1,74 +1,122 @@
 name: Build and Release
 
-# 触发条件：当你推送类似 'v1.0.0' 的标签时触发，或者手动触发
 on:
   push:
     tags:
-      - 'v*' 
+      - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# 定义全局变量，方便修改应用名称
+env:
+  APP_NAME: "AudioQC" # 你的可执行文件将以此命名，例如 AudioQC.exe
+
 jobs:
   build:
-    name: Build packages
-    # 矩阵策略：同时在三个平台上运行
+    name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             TARGET: linux
-            CMD_BUILD: pyinstaller -F -w -n MyApp main.py
-            OUT_FILE_NAME: MyApp
-            ASSET_MIME: application/x-executable
+            # Linux下生成 tar.gz
+            ARCHIVE_EXT: tar.gz
           - os: macos-latest
             TARGET: macos
-            CMD_BUILD: pyinstaller -F -w -n MyApp main.py
-            OUT_FILE_NAME: MyApp.app # Mac通常打包成.app，如果是单文件则是名字
-            ASSET_MIME: application/zip
+            # Mac下生成 zip
+            ARCHIVE_EXT: zip
           - os: windows-latest
             TARGET: windows
-            CMD_BUILD: pyinstaller -F -w -n MyApp main.py
-            OUT_FILE_NAME: MyApp.exe
-            ASSET_MIME: application/vnd.microsoft.portable-executable
+            # Windows下生成 zip
+            ARCHIVE_EXT: zip
 
     steps:
-    # 1. 拉取代码
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    # 2. 设置 Python 环境
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10' # 根据你的项目修改版本
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    # 3. 安装依赖
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
 
-    # 4. 执行打包 (PyInstaller)
-    - name: Build with PyInstaller
-      run: ${{ matrix.CMD_BUILD }}
+      # 1. 获取版本号 (去掉 refs/tags/v 前缀，例如 v1.0.0 -> 1.0.0)
+      # 如果是手动触发(workflow_dispatch)，默认为 snapshot
+      - name: Get Version
+        shell: bash
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION="snapshot"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Version detected: $VERSION"
 
-    # 5. 处理 Mac 的特殊情况 (如果是 .app 文件夹，需要压缩)
-    - name: Zip Mac App
-      if: matrix.os == 'macos-latest'
-      run: |
-        cd dist
-        zip -r MyApp-macos.zip MyApp.app
+      # 2. PyInstaller 打包
+      # 注意：这里使用 env.APP_NAME 统一命名
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller -F -w -n ${{ env.APP_NAME }} main.py
 
-    # 6. 上传 Artifact (用于 Release)
-    - name: Upload Release Asset
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: |
-          dist/${{ matrix.OUT_FILE_NAME }}
-          dist/MyApp-macos.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 3. 整理文件并打包 (Windows)
+      - name: Package for Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          # 定义最终包的目录名，如 AudioQC-1.0.0-windows
+          $RELEASE_DIR = "${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}"
+          New-Item -ItemType Directory -Force -Path $RELEASE_DIR
+          
+          # 移动可执行文件到目录中
+          Move-Item -Path "dist\${{ env.APP_NAME }}.exe" -Destination $RELEASE_DIR\
+          
+          # (可选) 如果你有 README 或 默认配置文件，也可以在这里复制进去
+          # Copy-Item "README.md" -Destination $RELEASE_DIR\
+          
+          # 压缩该目录
+          Compress-Archive -Path $RELEASE_DIR -DestinationPath "${RELEASE_DIR}.zip"
+
+      # 3. 整理文件并打包 (Linux/Mac)
+      - name: Package for Unix
+        if: matrix.os != 'windows-latest'
+        run: |
+          # 定义最终包的目录名
+          RELEASE_DIR="${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}"
+          mkdir -p "$RELEASE_DIR"
+          
+          # 移动构建产物
+          if [ "${{ matrix.os }}" == "macos-latest" ]; then
+            # Mac 移动 .app 包
+            mv "dist/${{ env.APP_NAME }}.app" "$RELEASE_DIR/"
+          else
+            # Linux 移动二进制文件
+            mv "dist/${{ env.APP_NAME }}" "$RELEASE_DIR/"
+          fi
+          
+          # (可选) 复制 README 等
+          # cp README.md "$RELEASE_DIR/"
+          
+          # 压缩
+          if [ "${{ matrix.TARGET }}" == "linux" ]; then
+            tar -czvf "${RELEASE_DIR}.tar.gz" "$RELEASE_DIR"
+          else
+            zip -r "${RELEASE_DIR}.zip" "$RELEASE_DIR"
+          fi
+
+      # 4. 上传 Release
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            ${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}.${{ matrix.ARCHIVE_EXT }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
