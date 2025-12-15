@@ -6,6 +6,7 @@
 import os
 import soundfile as sf
 import sounddevice as sd
+import numpy as np
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -72,6 +73,21 @@ class AudioPlaybackWorker(QThread):
         self.current_position = 0  # in frames
         self.seek_position = -1  # in frames, for seeking
 
+        self.beat_data = []
+        self.metronome_active = False
+        try:
+            self.ding_data, _ = sf.read("asset/ding.wav", dtype="float32")
+            self.da_data, _ = sf.read("asset/da.wav", dtype="float32")
+        except Exception:
+            self.ding_data = None
+            self.da_data = None
+
+    def set_beat_data(self, beat_data):
+        self.beat_data = beat_data
+
+    def set_metronome_active(self, active):
+        self.metronome_active = active
+
     def run(self):
         try:
             with sf.SoundFile(self.file_path, "r") as audio_file:
@@ -79,6 +95,8 @@ class AudioPlaybackWorker(QThread):
                 # 计算总时长 (ms)
                 duration_ms = int(audio_file.frames * 1000 / samplerate)
                 self.duration_update.emit(duration_ms)
+
+                active_clicks = []
 
                 # 使用默认的音频输出设备
                 with sd.OutputStream(
@@ -101,12 +119,51 @@ class AudioPlaybackWorker(QThread):
                             audio_file.seek(self.seek_position)
                             self.current_position = self.seek_position
                             self.seek_position = -1
+                            active_clicks.clear()
 
                         # 读取音频块
                         blocksize = 1024
                         data = audio_file.read(blocksize, dtype="float32")
                         if len(data) == 0:
                             break  # End of file
+
+                        # Metronome Mixing
+                        if self.metronome_active and self.ding_data is not None:
+                            start_frame = self.current_position
+                            end_frame = start_frame + len(data)
+
+                            # Add new clicks
+                            for beat_time, is_first in self.beat_data:
+                                b_frame = int(beat_time * samplerate)
+                                if start_frame <= b_frame < end_frame:
+                                    offset = b_frame - start_frame
+                                    sound = self.ding_data if is_first else self.da_data
+                                    active_clicks.append([sound, 0, offset])
+
+                            # Mix active clicks
+                            next_active_clicks = []
+                            for sound, s_idx, offset in active_clicks:
+                                write_start = max(0, offset)
+                                available_len = len(data) - write_start
+                                sound_len = len(sound) - s_idx
+                                to_write = min(available_len, sound_len)
+
+                                if to_write > 0:
+                                    target_slice = data[
+                                        write_start : write_start + to_write
+                                    ]
+                                    source_slice = sound[s_idx : s_idx + to_write]
+                                    if data.ndim == 2 and source_slice.ndim == 1:
+                                        source_slice = source_slice[:, np.newaxis]
+                                    try:
+                                        target_slice += source_slice
+                                    except Exception:
+                                        pass
+                                    s_idx += to_write
+
+                                if s_idx < len(sound):
+                                    next_active_clicks.append([sound, s_idx, 0])
+                            active_clicks = next_active_clicks
 
                         stream.write(data)
                         self.current_position += len(data)
@@ -173,6 +230,8 @@ class MediaPlayer(QWidget):
         self.is_seeking = (
             False  # 新增状态，避免在拖动/点击时，被 position_update 信号覆盖滑块值
         )
+        self.beat_data = []
+        self.metronome_active = False
 
         self._init_ui()
 
@@ -180,6 +239,16 @@ class MediaPlayer(QWidget):
         self.slider.seek_started.connect(self._handle_seek_started)
         self.slider.sliderMoved.connect(self._handle_slider_moved)
         self.slider.sliderReleased.connect(self._handle_slider_released)
+
+    def set_beat_data(self, beat_data):
+        self.beat_data = beat_data
+        if self.playback_worker:
+            self.playback_worker.set_beat_data(beat_data)
+
+    def set_metronome_active(self, active):
+        self.metronome_active = active
+        if self.playback_worker:
+            self.playback_worker.set_metronome_active(active)
 
     def _init_ui(self):
         # ... (此方法内容保持不变) ...
@@ -261,6 +330,8 @@ class MediaPlayer(QWidget):
             else:
                 # 启动新的播放线程
                 self.playback_worker = AudioPlaybackWorker(self.path)
+                self.playback_worker.set_beat_data(self.beat_data)
+                self.playback_worker.set_metronome_active(self.metronome_active)
 
                 # 如果用户在首次播放前已通过滑块/波形设定了起始位置，
                 # 则从该位置开始播放（ms -> frames）

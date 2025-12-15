@@ -7,6 +7,7 @@ from PyQt6.QtCore import pyqtSignal, Qt, QThread
 import os
 import struct
 import csv
+import re
 import base64
 from io import StringIO
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -522,6 +523,13 @@ class WaveformWidget(QWidget):
         self._loader = None
         self._loading = False
         self._is_playing = False
+        self.beat_data = []
+        self.render_beat = False
+
+    def set_beat_data(self, beat_data, render=True):
+        self.beat_data = beat_data
+        self.render_beat = render
+        self.update()
 
     def load_file(self, path):
         if self._loader and self._loader.isRunning():
@@ -615,6 +623,21 @@ class WaveformWidget(QWidget):
             painter.drawLine(x, int(y1), x, int(y2))
 
         total_duration_ms = self.get_duration_ms()
+
+        if self.render_beat and self.beat_data and total_duration_ms > 0:
+            for time_sec, is_first in self.beat_data:
+                time_ms = time_sec * 1000
+                ratio = time_ms / total_duration_ms
+                if 0 <= ratio <= 1:
+                    x = int(ratio * width)
+                    if is_first:
+                        painter.setPen(
+                            QPen(QColor(0, 200, 0), 2, Qt.PenStyle.SolidLine)
+                        )
+                    else:
+                        painter.setPen(QPen(QColor(0, 200, 0), 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(x, 0, x, height)
+
         if total_duration_ms > 0 and self._is_playing:
             progress_ratio = self.current_time_ms / total_duration_ms
             x_pos = int(progress_ratio * width)
@@ -644,6 +667,14 @@ class AudioPlayerWithWaveform(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        top_controls = QHBoxLayout()
+        self.btn_render_beat = QPushButton("渲染节奏")
+        self.btn_render_beat.setCheckable(True)
+        self.btn_render_beat.clicked.connect(self._toggle_beat_render)
+        top_controls.addWidget(self.btn_render_beat)
+        top_controls.addStretch()
+        layout.addLayout(top_controls)
+
         self.waveform_widget = WaveformWidget()
         self.media_player = MediaPlayer()
 
@@ -656,9 +687,74 @@ class AudioPlayerWithWaveform(QWidget):
         layout.addWidget(self.waveform_widget)
         layout.addWidget(self.media_player)
 
+    def _toggle_beat_render(self, checked):
+        if not checked:
+            self.waveform_widget.set_beat_data([], False)
+            self.media_player.set_metronome_active(False)
+            self.btn_render_beat.setText("渲染节奏")
+            return
+
+        if not self.media_player.path:
+            QMessageBox.warning(self, "提示", "请先加载音频文件")
+            self.btn_render_beat.setChecked(False)
+            return
+
+        wav_path = self.media_player.path
+        song_folder = os.path.dirname(os.path.dirname(wav_path))
+        song_folder_name = os.path.basename(song_folder)
+
+        match = re.match(r"^(.+?)_(.+?)_(.+?)$", song_folder_name)
+        if match:
+            song_name = match.group(2)
+        else:
+            QMessageBox.warning(
+                self,
+                "错误",
+                f"无法从文件夹名 '{song_folder_name}' 提取歌曲名。\n请确保文件夹命名格式为 '歌曲名_BPM_调号'",
+            )
+            self.btn_render_beat.setChecked(False)
+            return
+
+        csv_path = os.path.join(song_folder, "csv", f"{song_name}_Beat.csv")
+
+        if not os.path.exists(csv_path):
+            QMessageBox.warning(self, "错误", f"找不到Beat文件:\n{csv_path}")
+            self.btn_render_beat.setChecked(False)
+            return
+
+        try:
+            beat_data = []
+            with open(csv_path, "r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if "TIME" not in reader.fieldnames or "LABEL" not in reader.fieldnames:
+                    raise ValueError("CSV表头必须包含 TIME 和 LABEL")
+
+                for row in reader:
+                    t = float(row["TIME"])
+                    label = row["LABEL"]
+                    is_first = label.strip().endswith(".1")
+                    beat_data.append((t, is_first))
+
+            self.waveform_widget.set_beat_data(beat_data, True)
+            self.media_player.set_beat_data(beat_data)
+            self.media_player.set_metronome_active(True)
+            self.btn_render_beat.setText("取消渲染")
+
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"读取Beat文件失败:\n{e}")
+            self.btn_render_beat.setChecked(False)
+            self.waveform_widget.set_beat_data([], False)
+            self.media_player.set_metronome_active(False)
+
     def load_file(self, path):
         self.waveform_widget.load_file(path)
         self.media_player.load_file(path)
+
+        # Reset beat render state
+        self.btn_render_beat.setChecked(False)
+        self.btn_render_beat.setText("渲染节奏")
+        self.waveform_widget.set_beat_data([], False)
+        self.media_player.set_metronome_active(False)
 
     def stop(self):
         self.media_player.stop()
