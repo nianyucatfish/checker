@@ -16,6 +16,7 @@ from PyQt6.QtCore import (
     QRunnable,
     QThreadPool,
 )
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -46,7 +47,7 @@ class MixTrack:
 
 # --- MixTrackWidget 保持不变 ---
 class MixTrackWidget(QWidget):
-    """单轨道控件，含静音、独奏、移除按钮，波形右侧纵向排列。"""
+    """单轨道控件：左侧信息/控制，右侧波形时间线。"""
 
     def __init__(
         self,
@@ -55,6 +56,7 @@ class MixTrackWidget(QWidget):
         on_mute_change,
         on_solo_change,
         on_remove,
+        on_seek,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -62,23 +64,61 @@ class MixTrackWidget(QWidget):
         self._on_mute_change = on_mute_change
         self._on_solo_change = on_solo_change
         self._on_remove = on_remove
+        self._on_seek = on_seek
         self._solo_state = False
 
-        # ... (布局代码省略，与原版一致) ...
+        # 仿照 MIDI 播放器：左侧固定宽度信息栏，右侧为时间线(波形)
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(6, 6, 6, 6)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(6)
 
-        wave_area_layout = QVBoxLayout()
-        wave_area_layout.setContentsMargins(0, 0, 0, 0)
-        wave_area_layout.setSpacing(2)
+        sidebar_layout = QVBoxLayout()
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(4)
 
-        name_label = QLabel(track.name)
-        name_label.setToolTip(track.path)
-        name_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom
+        self.name_label = QLabel("")
+        # Tooltip：完整文件名（含后缀）+ 路径
+        self.name_label.setToolTip(f"{track.name}\n{track.path}")
+        self.name_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        wave_area_layout.addWidget(name_label)
+        # 信息栏稍窄一点
+        self.name_label.setMinimumWidth(140)
+        self.name_label.setMaximumWidth(160)
+        # self.name_label.setFixedWidth(100)
+        sidebar_layout.addWidget(self.name_label)
+
+        self._update_name_elide()
+
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(4)
+
+        self.mute_btn = QPushButton("M")
+        self.mute_btn.setCheckable(True)
+        self.mute_btn.setChecked(track.muted)
+        self.mute_btn.setFixedSize(34, 24)
+        self.mute_btn.clicked.connect(self._handle_mute)
+        controls_row.addWidget(self.mute_btn)
+
+        self.solo_btn = QPushButton("S")
+        self.solo_btn.setCheckable(True)
+        self.solo_btn.setFixedSize(34, 24)
+        self.solo_btn.clicked.connect(self._handle_solo)
+        controls_row.addWidget(self.solo_btn)
+
+        self.rm_btn = QPushButton("RM")
+        self.rm_btn.setFixedSize(38, 24)
+        self.rm_btn.clicked.connect(self._on_remove)
+        controls_row.addWidget(self.rm_btn)
+
+        sidebar_layout.addLayout(controls_row)
+        sidebar_layout.addStretch(1)
+        main_layout.addLayout(sidebar_layout)
+
+        timeline_layout = QVBoxLayout()
+        timeline_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_layout.setSpacing(0)
 
         self.plot = pg.PlotWidget()
         self.plot.setBackground("w")
@@ -87,49 +127,33 @@ class MixTrackWidget(QWidget):
         self.plot.hideAxis("left")
         self.plot.hideAxis("bottom")
 
-        try:
-            self.plot.setMouseEnabled(False, False)
-            self.plot.plotItem.hideButtons()
-            self.plot.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-            )
-        except Exception:
-            pass
+        self.plot.setMouseEnabled(False, False)
+        self.plot.plotItem.hideButtons()
+        # 允许点击事件
+        self.plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
+        # 忽略滚轮事件，让其冒泡到 QScrollArea
+        self.plot.wheelEvent = lambda event: event.ignore()
 
-        self.plot.setMinimumHeight(60)
+        self.plot.setMinimumHeight(70)
         self.plot.setMaximumHeight(70)
 
-        # 核心修改：直接使用传入的 visual_data，不再进行计算
+        # 核心逻辑不变：直接绘制预处理的 visual_data
         self._draw_precalculated_waveform(visual_data, track.duration_ms)
 
-        wave_area_layout.addWidget(self.plot)
-        main_layout.addLayout(wave_area_layout, stretch=1)
+        timeline_layout.addWidget(self.plot)
+        main_layout.addLayout(timeline_layout, stretch=1)
 
-        # ... (右侧按钮代码与原版一致) ...
-        btn_col = QVBoxLayout()
-        btn_col.setSpacing(4)
-        btn_col.setContentsMargins(0, 0, 0, 0)
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_name_elide()
 
-        self.mute_btn = QPushButton("M")
-        self.mute_btn.setCheckable(True)
-        self.mute_btn.setChecked(track.muted)
-        self.mute_btn.setFixedWidth(32)
-        self.mute_btn.clicked.connect(self._handle_mute)
-        btn_col.addWidget(self.mute_btn)
-
-        self.solo_btn = QPushButton("S")
-        self.solo_btn.setCheckable(True)
-        self.solo_btn.setFixedWidth(32)
-        self.solo_btn.clicked.connect(self._handle_solo)
-        btn_col.addWidget(self.solo_btn)
-
-        self.rm_btn = QPushButton("RM")
-        self.rm_btn.setFixedWidth(32)
-        self.rm_btn.clicked.connect(self._on_remove)
-        btn_col.addWidget(self.rm_btn)
-
-        btn_col.addStretch(1)
-        main_layout.addLayout(btn_col)
+    def _update_name_elide(self) -> None:
+        # 显示名：隐藏后缀（扩展名），超长时中间省略
+        base_name = os.path.splitext(self.track.name)[0]
+        metrics = QFontMetrics(self.name_label.font())
+        width = max(10, self.name_label.contentsRect().width())
+        elided = metrics.elidedText(base_name, Qt.TextElideMode.ElideMiddle, width)
+        self.name_label.setText(elided)
 
     def _draw_precalculated_waveform(
         self, visual_data: np.ndarray, duration_ms: float
@@ -154,6 +178,14 @@ class MixTrackWidget(QWidget):
             self.progress_line.setVisible(False)
         except Exception:
             self.progress_line = None
+
+    def _on_plot_clicked(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.scenePos()
+            mouse_point = self.plot.plotItem.vb.mapSceneToView(pos)
+            time_sec = mouse_point.x()
+            if self._on_seek:
+                self._on_seek(int(time_sec * 1000))
 
     # ... (其他方法：_handle_mute, _handle_solo, set_position_ms, reset_position 保持不变) ...
     def _handle_mute(self):
@@ -383,6 +415,7 @@ class MixConsoleWindow(QMainWindow):
         self.user_seeking = False
         self._was_playing_during_seek = False
         self.total_duration_ms = 0
+        self.current_position_ms = 0  # Track current position
         self._minimize_to_hide_pending = False
 
         self._pending_paths: set[str] = set()
@@ -402,53 +435,63 @@ class MixConsoleWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
-        control_row = QHBoxLayout()
-        control_row.setSpacing(10)
+        # 顶栏：左时间 / 中播放停止 / 右主音量+状态（仿照 MIDI 播放器）
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+
+        self.position_label = QLabel("00:00 / 00:00")
+        self.position_label.setMinimumWidth(110)
+        top_row.addWidget(self.position_label)
+
+        center_widget = QWidget()
+        center_layout = QHBoxLayout(center_widget)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(8)
+        center_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.btn_play = QPushButton("播放")
         self.btn_play.clicked.connect(self._toggle_play_pause)
-        control_row.addWidget(self.btn_play)
+        center_layout.addWidget(self.btn_play)
 
         self.btn_stop = QPushButton("停止")
         self.btn_stop.clicked.connect(lambda: self._stop_playback(reset_position=True))
-        control_row.addWidget(self.btn_stop)
+        center_layout.addWidget(self.btn_stop)
 
-        control_row.addSpacing(12)
+        top_row.addWidget(center_widget, 1)
+
+        right_widget = QWidget()
+        right_layout = QHBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
 
         self.master_label = QLabel("主音量: 100%")
         self.master_label.setFixedWidth(120)
-        control_row.addWidget(self.master_label)
+        right_layout.addWidget(self.master_label)
 
         self.master_slider = QSlider(Qt.Orientation.Horizontal)
         self.master_slider.setRange(0, 200)
         self.master_slider.setValue(100)
-        self.master_slider.setFixedWidth(180)
+        self.master_slider.setFixedWidth(160)
         self.master_slider.valueChanged.connect(self._on_master_volume_changed)
-        control_row.addWidget(self.master_slider)
+        right_layout.addWidget(self.master_slider)
 
-        control_row.addStretch(1)
-        layout.addLayout(control_row)
+        top_row.addWidget(right_widget)
+        layout.addLayout(top_row)
 
-        position_row = QHBoxLayout()
-        position_row.setSpacing(10)
-        self.position_slider = QSlider(Qt.Orientation.Horizontal)
-        self.position_slider.setEnabled(False)
-        self.position_slider.setRange(0, 0)
-        self.position_slider.sliderPressed.connect(self._on_seek_pressed)
-        self.position_slider.sliderMoved.connect(self._on_seek_moved)
-        self.position_slider.sliderReleased.connect(self._on_seek_released)
-        position_row.addWidget(self.position_slider)
+        # position_row removed
 
-        self.position_label = QLabel("00:00 / 00:00")
-        position_row.addWidget(self.position_label)
-        layout.addLayout(position_row)
-
-        # 加载提示：放在进度条下方、分轨之前；加载完成自动隐藏
+        # 加载提示：显示在播放条下、所有轨道之前；加载完成自动隐藏
         self.loading_label = QLabel("")
         self.loading_label.setVisible(False)
+        self.loading_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        # 稍稍明显一点：加粗 + 轻底色 + 内边距
+        self.loading_label.setStyleSheet(
+            "font-weight: 600; padding: 4px 6px; border-radius: 4px; "
+            "background: #f6f8fa; border: 1px solid #d0d7de; color: #0969da;"
+        )
         layout.addWidget(self.loading_label)
 
         self.scroll = QScrollArea()
@@ -459,7 +502,7 @@ class MixConsoleWindow(QMainWindow):
         self.scroll.setWidget(self.track_container)
         self.track_layout = QVBoxLayout(self.track_container)
         self.track_layout.setContentsMargins(0, 0, 0, 0)
-        self.track_layout.setSpacing(12)
+        self.track_layout.setSpacing(8)
         self.track_layout.addStretch(1)
 
         # 初始化一次加载提示
@@ -545,6 +588,7 @@ class MixConsoleWindow(QMainWindow):
             on_mute_change=lambda muted: self._on_track_muted(track, muted),
             on_solo_change=lambda solo: self._on_track_solo(track, solo),
             on_remove=lambda: self._remove_track(track),
+            on_seek=self._seek_to_position,
         )
 
         # 使用 insertWidget 替代原来的 insertWidget(count-1) 逻辑
@@ -586,8 +630,6 @@ class MixConsoleWindow(QMainWindow):
         self.track_widgets.clear()
         self.tracks.clear()
         self.total_duration_ms = 0
-        self.position_slider.setRange(0, 0)
-        self.position_slider.setValue(0)
         self._update_time_label(0)
         self._update_controls_state()
         # 记得取消 pending 状态
@@ -618,9 +660,7 @@ class MixConsoleWindow(QMainWindow):
             QMessageBox.information(self, "全部静音", "请取消至少一个轨道的静音。")
             return
         self._stop_playback(reset_position=False)
-        start_ms = (
-            self.position_slider.value() if self.position_slider.maximum() > 0 else 0
-        )
+        start_ms = self.current_position_ms
         start_frame = (
             int(start_ms * self.mix_samplerate / 1000) if self.mix_samplerate else 0
         )
@@ -638,8 +678,8 @@ class MixConsoleWindow(QMainWindow):
     def _on_position_update(self, position_ms: int) -> None:
         if self.user_seeking:
             return
-        self.position_slider.setValue(min(position_ms, self.total_duration_ms))
-        self._update_time_label(position_ms)
+        self.current_position_ms = min(position_ms, self.total_duration_ms)
+        self._update_time_label(self.current_position_ms)
         for widget in self.track_widgets.values():
             try:
                 widget.set_position_ms(position_ms)
@@ -659,7 +699,7 @@ class MixConsoleWindow(QMainWindow):
         self.btn_play.setText("播放")
         self._update_controls_state()
         if reset_position:
-            self.position_slider.setValue(0)
+            self.current_position_ms = 0
             self._update_time_label(0)
             for widget in self.track_widgets.values():
                 try:
@@ -678,8 +718,7 @@ class MixConsoleWindow(QMainWindow):
             if self.tracks
             else 0
         )
-        self.position_slider.setRange(0, self.total_duration_ms)
-        self._update_time_label(self.position_slider.value())
+        self._update_time_label(self.current_position_ms)
 
     def _update_time_label(self, current_ms: int) -> None:
         def fmt(ms: int) -> str:
@@ -694,7 +733,6 @@ class MixConsoleWindow(QMainWindow):
         has_tracks = bool(self.tracks)
         self.btn_play.setEnabled(has_tracks)
         self.btn_stop.setEnabled(has_tracks)
-        self.position_slider.setEnabled(has_tracks)
 
     def _update_playback_mute_solo(self):
         solo_paths = [
@@ -708,32 +746,23 @@ class MixConsoleWindow(QMainWindow):
             for path, widget in self.track_widgets.items():
                 widget.track.muted = widget.mute_btn.isChecked()
 
-    def _on_seek_pressed(self) -> None:
-        self.user_seeking = True
-        worker = self.playback_worker
-        if worker and worker.isRunning():
-            self._was_playing_during_seek = not self.is_paused
-            worker.pause_playback(True)
-            self.btn_play.setText("继续")
+    def _seek_to_position(self, pos_ms: int) -> None:
+        """Handle seek request from track widgets."""
+        pos_ms = max(0, min(pos_ms, self.total_duration_ms))
+        self.current_position_ms = pos_ms
+        self._update_time_label(pos_ms)
 
-    def _on_seek_moved(self, pos: int) -> None:
-        self._update_time_label(pos)
-
-    def _on_seek_released(self) -> None:
-        pos_ms = self.position_slider.value()
-        if self.mix_samplerate and self.playback_worker:
+        # Update playback worker if running
+        if self.playback_worker and self.playback_worker.isRunning():
             new_frame = int(pos_ms * self.mix_samplerate / 1000)
             self.playback_worker.set_current_frame(new_frame)
-        if (
-            self.playback_worker
-            and self.playback_worker.isRunning()
-            and self._was_playing_during_seek
-        ):
-            self.playback_worker.pause_playback(False)
-            self.is_paused = False
-            self.btn_play.setText("暂停")
-        self._was_playing_during_seek = False
-        self.user_seeking = False
+
+        # Update all track widgets
+        for widget in self.track_widgets.values():
+            try:
+                widget.set_position_ms(pos_ms)
+            except Exception:
+                pass
 
     # Window events
     def showEvent(self, event) -> None:

@@ -39,7 +39,7 @@ import resampy
 import soundfile as sf
 
 # --- 配置常量 ---
-CONFIG_FILE = "ide_config.json"
+CONFIG_FILE = "asset/ide_config.json"
 RECENT_WORKSPACE_KEY = "last_workspace"
 SPLITTER_SIZES_KEY = "splitter_sizes"
 SUPPRESS_TRIM_DURATION_PROMPT_KEY = "suppress_trim_duration_prompt"

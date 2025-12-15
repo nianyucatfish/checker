@@ -669,25 +669,35 @@ class AudioPlayerWithWaveform(QWidget):
 class MidiPreview(QWebEngineView):
     def __init__(self):
         super().__init__()
+        self.pending_midi_data = None
+        self.loadFinished.connect(self._on_load_finished)
+
         # Load HTML template
         try:
-            with open("midi_player.html", "r", encoding="utf-8") as f:
+            with open("asset/midi_player.html", "r", encoding="utf-8") as f:
                 self.html_template = f.read()
             self.setHtml(self.html_template)
         except Exception as e:
-            self.setHtml(
+            self.html_template = (
                 f"<html><body><h3>Error loading player template: {e}</h3></body></html>"
             )
+            self.setHtml(self.html_template)
 
     def load_file(self, path):
         try:
             with open(path, "rb") as f:
                 data = f.read()
-            b64_str = base64.b64encode(data).decode("ascii")
-            js = f"window.loadMidiContent('{b64_str}');"
-            self.page().runJavaScript(js)
+            self.pending_midi_data = base64.b64encode(data).decode("ascii")
+            # Reload the page to clear state
+            self.setHtml(self.html_template)
         except Exception as e:
             print(f"Error loading MIDI: {e}")
+
+    def _on_load_finished(self, ok):
+        if ok and self.pending_midi_data:
+            js = f"window.loadMidiContent('{self.pending_midi_data}');"
+            self.page().runJavaScript(js)
+            self.pending_midi_data = None
 
 
 # 已移除 PianoRollWidget（图形 MIDI 预览）。
