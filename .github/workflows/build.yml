@@ -78,6 +78,9 @@ jobs:
           # 移动可执行文件到目录中
           Move-Item -Path "dist\${{ env.APP_NAME }}.exe" -Destination $RELEASE_DIR\
           
+          # 复制 asset 文件夹
+          Copy-Item -Path "asset" -Destination $RELEASE_DIR\ -Recurse
+          
           # (可选) 如果你有 README 或 默认配置文件，也可以在这里复制进去
           # Copy-Item "README.md" -Destination $RELEASE_DIR\
           
@@ -100,6 +103,9 @@ jobs:
             # Linux 移动二进制文件
             mv "dist/${{ env.APP_NAME }}" "$RELEASE_DIR/"
           fi
+          
+          # 复制 asset 文件夹
+          cp -r asset "$RELEASE_DIR/"
           
           # (可选) 复制 README 等
           # cp README.md "$RELEASE_DIR/"

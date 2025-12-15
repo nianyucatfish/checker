@@ -3,6 +3,7 @@ import shutil
 import json
 import math
 from datetime import datetime
+import webbrowser
 from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -519,6 +520,32 @@ class MainWindow(QMainWindow):
         self.action_mix_console.toggled.connect(self.toggle_mix_console)
         toolbar.addAction(self.action_mix_console)
 
+        # --- 帮助菜单 ---
+        self.help_menu = QMenu(self)
+
+        act_data_requirements = QAction("数据要求", self)
+        act_data_requirements.triggered.connect(
+            lambda: webbrowser.open(
+                "https://ai.feishu.cn/docx/DbX8dJLcroIamLxRUi8cwarkn3c?from=from_copylink"
+            )
+        )
+        self.help_menu.addAction(act_data_requirements)
+
+        act_work_registration = QAction("分工登记表", self)
+        act_work_registration.triggered.connect(
+            lambda: webbrowser.open(
+                "https://ai.feishu.cn/sheets/NvY3skZ6EhY9BTt0snkcGuIznLf?from=from_copylink"
+            )
+        )
+        self.help_menu.addAction(act_work_registration)
+
+        # QAction "帮助" 触发菜单显示
+        action_help = QAction("帮助", self)
+        action_help.triggered.connect(
+            lambda: self._show_menu_under_action(action_help, toolbar)
+        )
+        toolbar.addAction(action_help)
+
         # --- Main Layout ---
         central = QWidget()
         self.setCentralWidget(central)
@@ -622,16 +649,27 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_lbl)
 
     def _show_menu_under_action(self, action, toolbar):
-        """显示文件菜单在指定的 QAction 对应的 ToolButton 下方"""
+        """显示菜单在指定的 QAction 对应的 ToolButton 下方"""
         widget = toolbar.widgetForAction(action)
+
+        # 根据 action 的文本确定显示哪个菜单
+        menu = None
+        if action.text() == "文件":
+            menu = self.file_menu
+        elif action.text() == "帮助":
+            menu = self.help_menu
+
+        if not menu:
+            return
+
         if widget:
             # 找到 ToolButton 的左下角位置，并转换为全局坐标
             point = widget.rect().bottomLeft()
             global_pos = widget.mapToGlobal(point)
-            self.file_menu.exec(global_pos)
+            menu.exec(global_pos)
         else:
             # 找不到 widget 时，在鼠标位置显示
-            self.file_menu.exec(self.cursor().pos())
+            menu.exec(self.cursor().pos())
 
     # ================= 文件系统监听 =================
 
@@ -871,17 +909,26 @@ class MainWindow(QMainWindow):
         act_del.triggered.connect(lambda: self.do_delete(path))
         menu.addAction(act_del)
 
+        menu.addSeparator()
+
+        act_reveal = QAction("在资源管理器中显示", self)
+        act_reveal.triggered.connect(lambda: self.reveal_in_explorer(path))
+        menu.addAction(act_reveal)
+
         if self._is_song_folder(path):
+            menu.addSeparator()
             act_trim = QAction("统一时长到最短音频(裁剪尾部)", self)
             act_trim.triggered.connect(lambda: self.trim_song_wavs_to_shortest(path))
             menu.addAction(act_trim)
 
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() == ".wav":
+            menu.addSeparator()
             act_add_mix = QAction("添加到混音台", self)
             act_add_mix.triggered.connect(lambda: self.add_file_to_mix_console(path))
             menu.addAction(act_add_mix)
 
         if os.path.isdir(path):
+            menu.addSeparator()
             act_add_mix_folder = QAction("添加文件夹到混音台", self)
             act_add_mix_folder.triggered.connect(
                 lambda: self.add_folder_to_mix_console(path)
@@ -979,6 +1026,30 @@ class MainWindow(QMainWindow):
         self.log(
             f"已向混音台添加 {added} 个文件（来自文件夹: {os.path.basename(path)})"
         )
+
+    def reveal_in_explorer(self, path):
+        """在资源管理器中显示文件或文件夹"""
+        if not os.path.exists(path):
+            QMessageBox.warning(self, "错误", f"路径不存在: {path}")
+            return
+
+        try:
+            if os.name == "nt":  # Windows
+                # 使用 explorer /select 命令来选中文件或文件夹
+                import subprocess
+
+                subprocess.run(["explorer", "/select,", os.path.normpath(path)])
+            else:  # macOS/Linux
+                import subprocess
+
+                if os.path.isfile(path):
+                    # 打开文件所在目录
+                    subprocess.run(["open", "-R", path])  # macOS
+                else:
+                    # 直接打开文件夹
+                    subprocess.run(["open", path])  # macOS
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"无法打开资源管理器: {str(e)}")
 
     def do_rename(self, path):
         old_name = os.path.basename(path)
