@@ -61,6 +61,21 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Version detected: $VERSION"
 
+      # 1.5 获取架构 (x64, arm64)
+      - name: Get Architecture
+        shell: bash
+        run: |
+          PYTHON_ARCH=$(python -c "import platform; print(platform.machine().lower())")
+          if [[ "$PYTHON_ARCH" == "amd64" ]] || [[ "$PYTHON_ARCH" == "x86_64" ]]; then
+            ARCH="x64"
+          elif [[ "$PYTHON_ARCH" == "arm64" ]] || [[ "$PYTHON_ARCH" == "aarch64" ]]; then
+            ARCH="arm64"
+          else
+            ARCH=$PYTHON_ARCH
+          fi
+          echo "ARCH=$ARCH" >> $GITHUB_ENV
+          echo "Architecture detected: $ARCH"
+
       # 2. PyInstaller 打包
       # 注意：这里使用 env.APP_NAME 统一命名
       - name: Build with PyInstaller
@@ -71,8 +86,8 @@ jobs:
       - name: Package for Windows
         if: matrix.os == 'windows-latest'
         run: |
-          # 定义最终包的目录名，如 AudioQC-1.0.0-windows
-          $RELEASE_DIR = "${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}"
+          # 定义最终包的目录名，如 AudioQC-1.0.0-windows-x64
+          $RELEASE_DIR = "${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}-${{ env.ARCH }}"
           New-Item -ItemType Directory -Force -Path $RELEASE_DIR
           
           # 移动可执行文件到目录中
@@ -92,7 +107,7 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           # 定义最终包的目录名
-          RELEASE_DIR="${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}"
+          RELEASE_DIR="${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}-${{ env.ARCH }}"
           mkdir -p "$RELEASE_DIR"
           
           # 移动构建产物
@@ -123,6 +138,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            ${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}.${{ matrix.ARCHIVE_EXT }}
+            ${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.TARGET }}-${{ env.ARCH }}.${{ matrix.ARCHIVE_EXT }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
