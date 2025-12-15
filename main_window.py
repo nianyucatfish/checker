@@ -24,6 +24,10 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate,
     QStyle,
     QApplication,
+    QStackedWidget,
+    QPushButton,
+    QHBoxLayout,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect
 from PyQt6.QtGui import QAction, QKeySequence, QColor
@@ -142,7 +146,7 @@ class MainWindow(QMainWindow):
         self.suppress_trim_duration_prompt = False
 
         # 1. 配置加载与工作区初始化
-        self.root_dir = os.path.abspath(r".")  # 默认值
+        self.root_dir = None
         self._load_config()
         self._update_window_title()
 
@@ -154,7 +158,7 @@ class MainWindow(QMainWindow):
         self._init_watcher()
         self._warmup_resampy()
         # 启动即进行一次全量扫描 (仅在加载到有效工作区时)
-        if os.path.isdir(self.root_dir):
+        if self.root_dir and os.path.isdir(self.root_dir):
             QTimer.singleShot(500, self.run_full_scan)
 
     # ================= 配置与工作区管理 =================
@@ -203,7 +207,12 @@ class MainWindow(QMainWindow):
 
     def _is_song_folder(self, path: str) -> bool:
         """判断是否为工作区下的歌曲文件夹（一级子目录）。"""
-        if not path or not os.path.isdir(path) or not os.path.isdir(self.root_dir):
+        if (
+            not path
+            or not os.path.isdir(path)
+            or not self.root_dir
+            or not os.path.isdir(self.root_dir)
+        ):
             return False
         parent = os.path.normpath(os.path.dirname(path))
         root = os.path.normpath(self.root_dir)
@@ -388,6 +397,11 @@ class MainWindow(QMainWindow):
 
         self.root_dir = new_root_dir
         self._update_window_title()
+
+        # 切换到主界面
+        if self.stack.currentWidget() != self.main_widget:
+            self.stack.setCurrentWidget(self.main_widget)
+
         self.editor_manager.close_all_tabs()  # 关闭所有编辑器
 
         # 刷新文件树
@@ -417,7 +431,7 @@ class MainWindow(QMainWindow):
     def open_new_workspace(self):
         """新建工作区：选择一个目录作为根目录"""
         new_dir = QFileDialog.getExistingDirectory(
-            self, "选择或创建新的工作区目录", self.root_dir
+            self, "选择或创建新的工作区目录", self.root_dir or ""
         )
         if new_dir:
             self._set_root_dir(new_dir)
@@ -425,14 +439,14 @@ class MainWindow(QMainWindow):
     def open_workspace_from_folder(self):
         """从文件夹打开工作区：选择一个包含工程的目录作为根目录"""
         open_dir = QFileDialog.getExistingDirectory(
-            self, "选择要打开的工作区目录", self.root_dir
+            self, "选择要打开的工作区目录", self.root_dir or ""
         )
         if open_dir:
             self._set_root_dir(open_dir)
 
     def add_project(self):
         """添加工程：将另一个目录下的内容拷贝到当前工作区根目录下"""
-        if not os.path.isdir(self.root_dir):
+        if not self.root_dir or not os.path.isdir(self.root_dir):
             QMessageBox.warning(
                 self, "警告", "当前工作区无效，请先新建或打开一个工作区。"
             )
@@ -483,10 +497,6 @@ class MainWindow(QMainWindow):
         self.file_menu = QMenu(self)
 
         # 文件菜单项
-        act_new_ws = QAction("新建工作区...", self)
-        act_new_ws.triggered.connect(self.open_new_workspace)
-        self.file_menu.addAction(act_new_ws)
-
         act_open_ws = QAction("从文件夹打开工作区...", self)
         act_open_ws.triggered.connect(self.open_workspace_from_folder)
         self.file_menu.addAction(act_open_ws)
@@ -494,9 +504,13 @@ class MainWindow(QMainWindow):
         self.file_menu.addSeparator()
 
         act_reveal = QAction("在资源管理器中显示根目录", self)
-        act_reveal.setToolTip(f"当前根目录: {self.root_dir}")
+        act_reveal.setToolTip(f"当前根目录: {self.root_dir or '未设置'}")
         act_reveal.triggered.connect(
-            lambda: os.startfile(self.root_dir) if os.name == "nt" else None
+            lambda: (
+                os.startfile(self.root_dir)
+                if os.name == "nt" and self.root_dir
+                else None
+            )
         )
         self.file_menu.addAction(act_reveal)
 
@@ -547,21 +561,45 @@ class MainWindow(QMainWindow):
         toolbar.addAction(action_help)
 
         # --- Main Layout ---
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        # Page 1: Main UI
+        self.main_widget = QWidget()
+        layout = QVBoxLayout(self.main_widget)
+
+        # Page 2: Empty State
+        self.empty_widget = QWidget()
+        empty_layout = QVBoxLayout(self.empty_widget)
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        btn_open = QPushButton("从文件夹中打开工作区")
+        btn_open.setFixedSize(200, 50)
+        font = btn_open.font()
+        font.setPointSize(12)
+        btn_open.setFont(font)
+        btn_open.clicked.connect(self.open_workspace_from_folder)
+        empty_layout.addWidget(btn_open)
+
+        self.stack.addWidget(self.main_widget)
+        self.stack.addWidget(self.empty_widget)
+
+        if self.root_dir and os.path.isdir(self.root_dir):
+            self.stack.setCurrentWidget(self.main_widget)
+        else:
+            self.stack.setCurrentWidget(self.empty_widget)
 
         splitter_v = QSplitter(Qt.Orientation.Vertical)
         splitter_h = QSplitter(Qt.Orientation.Horizontal)
 
         # 左侧：文件树
         self.model = ProjectModel()
-        self.model.setRootPath(self.root_dir)
+        self.model.setRootPath(self.root_dir or "")
 
         self.tree = QTreeView()
         self.tree.setModel(self.model)
         # 检查根目录是否有效
-        if os.path.isdir(self.root_dir):
+        if self.root_dir and os.path.isdir(self.root_dir):
             self.tree.setRootIndex(self.model.index(self.root_dir))
         else:
             self.tree.setRootIndex(self.model.index(""))
@@ -677,7 +715,7 @@ class MainWindow(QMainWindow):
         """初始化文件监听器"""
         self.watcher = QFileSystemWatcher()
 
-        if not os.path.isdir(self.root_dir):
+        if not self.root_dir or not os.path.isdir(self.root_dir):
             return
 
         # 始终监听根目录本身，用于捕获新的一级文件夹创建
@@ -712,7 +750,7 @@ class MainWindow(QMainWindow):
 
     def run_full_scan(self):
         """全量扫描"""
-        if not os.path.isdir(self.root_dir):
+        if not self.root_dir or not os.path.isdir(self.root_dir):
             self.log("错误：当前工作区无效，无法扫描。")
             return
 
