@@ -7,7 +7,9 @@ from PyQt6.QtCore import pyqtSignal, Qt, QThread
 import os
 import struct
 import csv
+import base64
 from io import StringIO
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -664,39 +666,28 @@ class AudioPlayerWithWaveform(QWidget):
         self.waveform_widget.update_play_position(0)
 
 
-class MidiPreview(QWidget):
+class MidiPreview(QWebEngineView):
     def __init__(self):
         super().__init__()
-        layout = QVBoxLayout(self)
-        self.text_view = QTextEdit()
-        self.text_view.setReadOnly(True)
-        self.text_view.setStyleSheet("font-family: Consolas; font-size: 12px;")
-        layout.addWidget(self.text_view)
+        # Load HTML template
+        try:
+            with open("midi_player.html", "r", encoding="utf-8") as f:
+                self.html_template = f.read()
+            self.setHtml(self.html_template)
+        except Exception as e:
+            self.setHtml(
+                f"<html><body><h3>Error loading player template: {e}</h3></body></html>"
+            )
 
     def load_file(self, path):
-        info = self._parse_midi_header(path)
-        self.text_view.setText(info)
-
-    def _parse_midi_header(self, path):
         try:
             with open(path, "rb") as f:
-                chunk_type = f.read(4)
-                if chunk_type != b"MThd":
-                    return "非标准 MIDI 文件"
-
-                length = struct.unpack(">I", f.read(4))[0]
-                data = f.read(length)
-                fmt, tracks, division = struct.unpack(">hhh", data[:6])
-
-                info = f"=== MIDI 文件信息 ===\n\n"
-                info += f"文件名: {os.path.basename(path)}\n"
-                info += f"格式类型 (Format): {fmt}\n"
-                info += f"音轨数量 (Tracks): {tracks}\n"
-                info += f"时间精度 (Division): {division} ticks/quarter note\n"
-                info += f"\n(注: 此预览仅显示文件头信息，暂不支持播放)"
-                return info
+                data = f.read()
+            b64_str = base64.b64encode(data).decode("ascii")
+            js = f"window.loadMidiContent('{b64_str}');"
+            self.page().runJavaScript(js)
         except Exception as e:
-            return f"解析失败: {e}"
+            print(f"Error loading MIDI: {e}")
 
 
 # 已移除 PianoRollWidget（图形 MIDI 预览）。
