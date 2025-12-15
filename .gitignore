@@ -31,3 +31,4 @@ Thumbs.db
 
 *.mid
 piano_roll_test.py
+asset/ide_config.json

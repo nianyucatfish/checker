@@ -5,7 +5,6 @@ soundfile
 sounddevice
 resampy
 pyqtgraph
-pypianoroll
 plotly
 pandas
 PyQt6-WebEngine
