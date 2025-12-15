@@ -525,6 +525,8 @@ class WaveformWidget(QWidget):
         self._is_playing = False
         self.beat_data = []
         self.render_beat = False
+        self.zoom_level = 1.0
+        self.view_start_ratio = 0.0
 
     def set_beat_data(self, beat_data, render=True):
         self.beat_data = beat_data
@@ -541,9 +543,11 @@ class WaveformWidget(QWidget):
         self.sr = 0
         self.current_time_ms = 0
         self._loading = True
+        self.zoom_level = 1.0
+        self.view_start_ratio = 0.0
         self.update()
 
-        target_points = 1500
+        target_points = 2000
         self._loader = WaveformLoader(path, target_points)
         self._loader.loaded.connect(self._on_loaded)
         self._loader.failed.connect(self._on_failed)
@@ -592,7 +596,7 @@ class WaveformWidget(QWidget):
             )
             return
 
-        if self.resampled_data is None or len(self.resampled_data) == 0:
+        if self.data is None or len(self.data) == 0:
             return
 
         painter = QPainter(self)
@@ -602,34 +606,65 @@ class WaveformWidget(QWidget):
 
         painter.fillRect(rect, QColor(255, 255, 255))
 
-        data_to_draw = self.resampled_data
-        max_amplitude = np.max(np.abs(self.data)) or 1.0
-
         center_y = height / 2
         painter.setPen(QPen(QColor(180, 180, 180), 1))
         painter.drawLine(0, int(center_y), width, int(center_y))
 
         painter.setPen(QPen(QColor(0, 120, 215), 1))
 
-        num_points = len(data_to_draw) // 2
-        for i in range(num_points):
-            x = int(i / num_points * width)
-            y_max_norm = data_to_draw[i * 2] / max_amplitude
-            y_min_norm = data_to_draw[i * 2 + 1] / max_amplitude
+        max_amplitude = np.max(np.abs(self.data)) or 1.0
 
-            y1 = center_y - (y_max_norm * center_y * 0.9)
-            y2 = center_y - (y_min_norm * center_y * 0.9)
+        if self.zoom_level == 1.0 and self.resampled_data is not None:
+            data_to_draw = self.resampled_data
+            num_points = len(data_to_draw) // 2
+            for i in range(num_points):
+                x = int(i / num_points * width)
+                y_max_norm = data_to_draw[i * 2] / max_amplitude
+                y_min_norm = data_to_draw[i * 2 + 1] / max_amplitude
 
-            painter.drawLine(x, int(y1), x, int(y2))
+                y1 = center_y - (y_max_norm * center_y * 0.9)
+                y2 = center_y - (y_min_norm * center_y * 0.9)
+
+                painter.drawLine(x, int(y1), x, int(y2))
+        else:
+            total_samples = len(self.data)
+            start_idx = int(self.view_start_ratio * total_samples)
+            view_width_ratio = 1.0 / self.zoom_level
+            end_idx = int((self.view_start_ratio + view_width_ratio) * total_samples)
+
+            start_idx = max(0, start_idx)
+            end_idx = min(total_samples, end_idx)
+
+            if end_idx > start_idx:
+                view_data = self.data[start_idx:end_idx]
+                if view_data.ndim > 1:
+                    view_data = np.mean(view_data, axis=1)
+
+                step = max(1, len(view_data) // width)
+                display_data = view_data[::step]
+
+                for i, val in enumerate(display_data):
+                    x = int(i / len(display_data) * width)
+                    y_norm = val / max_amplitude
+                    y = center_y - (y_norm * center_y * 0.9)
+                    painter.drawLine(x, int(center_y), x, int(y))
 
         total_duration_ms = self.get_duration_ms()
+        view_width_ratio = 1.0 / self.zoom_level
 
         if self.render_beat and self.beat_data and total_duration_ms > 0:
             for time_sec, is_first in self.beat_data:
                 time_ms = time_sec * 1000
                 ratio = time_ms / total_duration_ms
-                if 0 <= ratio <= 1:
-                    x = int(ratio * width)
+
+                if (
+                    self.view_start_ratio
+                    <= ratio
+                    <= (self.view_start_ratio + view_width_ratio)
+                ):
+                    view_ratio = (ratio - self.view_start_ratio) / view_width_ratio
+                    x = int(view_ratio * width)
+
                     if is_first:
                         painter.setPen(
                             QPen(QColor(0, 200, 0), 2, Qt.PenStyle.SolidLine)
@@ -640,9 +675,15 @@ class WaveformWidget(QWidget):
 
         if total_duration_ms > 0 and self._is_playing:
             progress_ratio = self.current_time_ms / total_duration_ms
-            x_pos = int(progress_ratio * width)
-            painter.setPen(QPen(QColor(255, 0, 0), 2))
-            painter.drawLine(x_pos, 0, x_pos, height)
+            if (
+                self.view_start_ratio
+                <= progress_ratio
+                <= (self.view_start_ratio + view_width_ratio)
+            ):
+                view_ratio = (progress_ratio - self.view_start_ratio) / view_width_ratio
+                x_pos = int(view_ratio * width)
+                painter.setPen(QPen(QColor(255, 0, 0), 2))
+                painter.drawLine(x_pos, 0, x_pos, height)
 
     def mousePressEvent(self, event):
         if self.data is None or self.sr == 0:
@@ -654,11 +695,74 @@ class WaveformWidget(QWidget):
 
         if event.button() == Qt.MouseButton.LeftButton and total_duration_ms > 0:
             x_click = event.position().x()
-            click_ratio = max(0, min(1, x_click / width))
-            target_time_ms = int(click_ratio * total_duration_ms)
+
+            view_width_ratio = 1.0 / self.zoom_level
+            click_ratio_in_view = x_click / width
+            global_ratio = self.view_start_ratio + (
+                click_ratio_in_view * view_width_ratio
+            )
+
+            target_time_ms = int(global_ratio * total_duration_ms)
+            target_time_ms = max(0, min(total_duration_ms, target_time_ms))
+
             self.on_seek_request.emit(target_time_ms)
 
         super().mousePressEvent(event)
+
+    def wheelEvent(self, event):
+        if self.data is None:
+            return
+
+        modifiers = event.modifiers()
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            # Zoom
+            angle = event.angleDelta().y()
+            if angle > 0:
+                factor = 1.25
+            else:
+                factor = 0.8
+
+            old_zoom = self.zoom_level
+            new_zoom = old_zoom * factor
+            if new_zoom < 1.0:
+                new_zoom = 1.0
+            if new_zoom > 200.0:
+                new_zoom = 200.0
+
+            if new_zoom != old_zoom:
+                mouse_x = event.position().x()
+                width = self.width()
+                mouse_ratio = mouse_x / width
+
+                view_width_old = 1.0 / old_zoom
+                view_width_new = 1.0 / new_zoom
+
+                self.view_start_ratio += mouse_ratio * (view_width_old - view_width_new)
+                self.zoom_level = new_zoom
+
+                max_start = 1.0 - view_width_new
+                if self.view_start_ratio < 0:
+                    self.view_start_ratio = 0
+                if self.view_start_ratio > max_start:
+                    self.view_start_ratio = max_start
+
+                self.update()
+        else:
+            # Horizontal Scroll
+            if self.zoom_level > 1.0:
+                angle = event.angleDelta().y()
+                view_width = 1.0 / self.zoom_level
+                scroll_amount = -(angle / 120.0) * (view_width * 0.1)
+
+                self.view_start_ratio += scroll_amount
+
+                max_start = 1.0 - view_width
+                if self.view_start_ratio < 0:
+                    self.view_start_ratio = 0
+                if self.view_start_ratio > max_start:
+                    self.view_start_ratio = max_start
+
+                self.update()
 
 
 class AudioPlayerWithWaveform(QWidget):
