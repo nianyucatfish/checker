@@ -28,3 +28,6 @@ Thumbs.db
 # 6. 忽略本地的敏感配置 (如果有)
 # 比如包含密码的 config.ini，如果不想公开就加上
 # config.ini
+
+*.mid
+piano_roll_test.py

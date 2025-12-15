@@ -29,6 +29,7 @@ from PyQt6.QtGui import (
     QTextCharFormat,
     QColor,
     QKeySequence,
+    QTextCursor,
     QPainter,
     QBrush,
     QPen,
@@ -96,20 +97,36 @@ class CsvTableEditor(QWidget):
         self.loading = False
         self._changed = False
 
+        # 简易撤销/重做栈（跨单元格/增删行列），避免切换视图时丢失
+        self._undo_stack = []
+        self._redo_stack = []
+
+        # 记录上一次已知的单元格内容，用于 itemChanged 计算 old/new
+        self._cell_cache = {}
+
     def load_file(self, path):
         """从文件加载"""
         self.current_path = path
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
                 content = f.read()
-            self.load_from_string(content)
+            self.load_from_string(content, reset_history=True, reset_changed=True)
         except Exception as e:
             raise RuntimeError(f"CSV文件读取失败: {e}")
 
-    def load_from_string(self, content):
-        """从字符串加载数据 (用于视图同步)"""
+    def load_from_string(self, content, *, reset_history=False, reset_changed=False):
+        """从字符串加载数据 (用于视图同步)
+
+        reset_history: 仅在首次打开文件/clear 时为 True，切换视图同步时不要清空撤销栈。
+        reset_changed: 仅在首次打开文件时为 True，切换视图同步时不要重置“已修改”状态。
+        """
         self.loading = True
-        self._changed = False
+        if reset_changed:
+            self._changed = False
+        if reset_history:
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+            self._cell_cache.clear()
         try:
             f = StringIO(content)
             reader = csv.reader(f)
@@ -127,6 +144,8 @@ class CsvTableEditor(QWidget):
                     item = QTableWidgetItem(val)
                     self.table.setItem(r, c, item)
 
+            self._rebuild_cell_cache()
+
             # 初次加载时按内容做一次基础自适应，后续可手动拖拽微调
             self.table.resizeColumnsToContents()
             self.table.resizeRowsToContents()
@@ -142,14 +161,37 @@ class CsvTableEditor(QWidget):
         self.table.clear()
         self.table.setRowCount(0)
         self.table.setColumnCount(0)
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._cell_cache.clear()
+        self._changed = False
         self.loading = False
 
     def _handle_item_changed(self, item):
-        if not self.loading and self.current_path:
-            self._changed = True
-            self.on_change.emit(self.current_path)
+        if self.loading or not self.current_path:
+            return
+
+        r = item.row()
+        c = item.column()
+        new_val = item.text()
+        old_val = self._cell_cache.get((r, c), "")
+        if new_val == old_val:
+            return
+
+        self._push_undo(
+            {"type": "cell", "row": r, "col": c, "old": old_val, "new": new_val}
+        )
+        self._cell_cache[(r, c)] = new_val
+        self._changed = True
+        self.on_change.emit(self.current_path)
 
     def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self.undo()
+            return
+        if event.matches(QKeySequence.StandardKey.Redo):
+            self.redo()
+            return
         if event.matches(QKeySequence.StandardKey.Save):
             if self.current_path:
                 self.on_save.emit(self.current_path, self._to_csv_string())
@@ -169,29 +211,174 @@ class CsvTableEditor(QWidget):
         return output.getvalue()
 
     def add_row(self):
-        self.table.insertRow(self.table.rowCount())
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self._push_undo({"type": "insertRow", "row": row})
+        self._rebuild_cell_cache()
         self._handle_manual_change()
 
     def add_column(self):
-        self.table.insertColumn(self.table.columnCount())
+        col = self.table.columnCount()
+        self.table.insertColumn(col)
+        self._push_undo({"type": "insertCol", "col": col})
+        self._rebuild_cell_cache()
         self._handle_manual_change()
 
     def remove_row(self):
         row = self.table.currentRow()
         if row >= 0:
+            snapshot = self._snapshot_row(row)
             self.table.removeRow(row)
+            self._push_undo({"type": "removeRow", "row": row, "data": snapshot})
+            self._rebuild_cell_cache()
             self._handle_manual_change()
 
     def remove_column(self):
         col = self.table.currentColumn()
         if col >= 0:
+            snapshot = self._snapshot_col(col)
             self.table.removeColumn(col)
+            self._push_undo({"type": "removeCol", "col": col, "data": snapshot})
+            self._rebuild_cell_cache()
             self._handle_manual_change()
 
     def _handle_manual_change(self):
         """处理增删行列等非itemChanged触发的修改"""
         if not self.loading and self.current_path:
+            self._changed = True
             self.on_change.emit(self.current_path)
+
+    def undo(self):
+        if not self._undo_stack:
+            return
+        cmd = self._undo_stack.pop()
+        self._apply_command(cmd, undo=True)
+        self._redo_stack.append(cmd)
+
+    def redo(self):
+        if not self._redo_stack:
+            return
+        cmd = self._redo_stack.pop()
+        self._apply_command(cmd, undo=False)
+        self._undo_stack.append(cmd)
+
+    def _push_undo(self, cmd: dict):
+        self._undo_stack.append(cmd)
+        self._redo_stack.clear()
+
+    def _apply_command(self, cmd: dict, *, undo: bool):
+        """应用撤销/重做命令。undo=True 表示回退到 old 状态。"""
+        cmd_type = cmd.get("type")
+
+        def _auto_resize():
+            # 仅在结构变更（增删行列/恢复）后做一次内容自适应
+            try:
+                self.table.resizeColumnsToContents()
+                self.table.resizeRowsToContents()
+            except Exception:
+                pass
+
+        self.loading = True
+        try:
+            if cmd_type == "cell":
+                r = cmd["row"]
+                c = cmd["col"]
+                text = cmd["old"] if undo else cmd["new"]
+                self._set_cell_text(r, c, text)
+
+            elif cmd_type == "insertRow":
+                row = cmd["row"]
+                if undo:
+                    if 0 <= row < self.table.rowCount():
+                        self.table.removeRow(row)
+                else:
+                    self.table.insertRow(row)
+                self._rebuild_cell_cache()
+                _auto_resize()
+
+            elif cmd_type == "removeRow":
+                row = cmd["row"]
+                if undo:
+                    self.table.insertRow(row)
+                    self._restore_row(row, cmd.get("data") or [])
+                else:
+                    if 0 <= row < self.table.rowCount():
+                        self.table.removeRow(row)
+                self._rebuild_cell_cache()
+                _auto_resize()
+
+            elif cmd_type == "insertCol":
+                col = cmd["col"]
+                if undo:
+                    if 0 <= col < self.table.columnCount():
+                        self.table.removeColumn(col)
+                else:
+                    self.table.insertColumn(col)
+                self._rebuild_cell_cache()
+                _auto_resize()
+
+            elif cmd_type == "removeCol":
+                col = cmd["col"]
+                if undo:
+                    self.table.insertColumn(col)
+                    self._restore_col(col, cmd.get("data") or [])
+                else:
+                    if 0 <= col < self.table.columnCount():
+                        self.table.removeColumn(col)
+                self._rebuild_cell_cache()
+                _auto_resize()
+
+        finally:
+            self.loading = False
+
+        if self.current_path:
+            self._changed = True
+            self.on_change.emit(self.current_path)
+
+    def _set_cell_text(self, row: int, col: int, text: str):
+        if row < 0 or col < 0:
+            return
+        if row >= self.table.rowCount() or col >= self.table.columnCount():
+            return
+        item = self.table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.table.setItem(row, col, item)
+        item.setText(text)
+        self._cell_cache[(row, col)] = text
+
+    def _rebuild_cell_cache(self):
+        self._cell_cache.clear()
+        for r in range(self.table.rowCount()):
+            for c in range(self.table.columnCount()):
+                item = self.table.item(r, c)
+                self._cell_cache[(r, c)] = item.text() if item else ""
+
+    def _snapshot_row(self, row: int):
+        data = []
+        for c in range(self.table.columnCount()):
+            item = self.table.item(row, c)
+            data.append(item.text() if item else "")
+        return data
+
+    def _snapshot_col(self, col: int):
+        data = []
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, col)
+            data.append(item.text() if item else "")
+        return data
+
+    def _restore_row(self, row: int, data):
+        for c, val in enumerate(data):
+            if c >= self.table.columnCount():
+                break
+            self._set_cell_text(row, c, val)
+
+    def _restore_col(self, col: int, data):
+        for r, val in enumerate(data):
+            if r >= self.table.rowCount():
+                break
+            self._set_cell_text(r, col, val)
 
 
 class CsvHighlighter(QSyntaxHighlighter):
@@ -245,7 +432,13 @@ class TextEditor(QWidget):
     def set_content(self, content):
         """用于同步视图内容的设置方法"""
         self.loading = True
-        self.editor.setPlainText(content)
+        # 不使用 setPlainText：它会清空撤销栈，导致视图切换后无法继续 Ctrl+Z
+        doc = self.editor.document()
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.insertText(content)
+        cursor.endEditBlock()
         self.loading = False
 
     def get_content(self):
@@ -576,7 +769,9 @@ class EditorManager(QWidget):
         if index == 0:
             # 切换到表格：从文本编辑器获取文本 -> 解析 -> 填入表格
             text_content = self.csv_text_editor.get_content()
-            self.csv_table_editor.load_from_string(text_content)
+            self.csv_table_editor.load_from_string(
+                text_content, reset_history=False, reset_changed=False
+            )
         elif index == 1:
             # 切换到文本：从表格获取内容 -> 转换为CSV字符串 -> 填入文本编辑器
             csv_string = self.csv_table_editor._to_csv_string()
@@ -595,11 +790,8 @@ class EditorManager(QWidget):
                 # 文本页会在用户点击 Tab 切换时自动同步
                 self.csv_table_editor.load_file(path)
 
-                # 同时静默加载文本编辑器，防止第一次切换闪烁或没数据
-                with open(path, "r", encoding="utf-8-sig") as f:
-                    self.csv_text_editor.set_content(f.read())
-                    # 更新当前路径，确保保存功能正常
-                    self.csv_text_editor.current_path = path
+                # 同时加载文本编辑器（用于纯文本视图）；使用 load_file 以清空其撤销栈
+                self.csv_text_editor.load_file(path)
 
                 self.csv_tab.setTabEnabled(0, True)
                 self.csv_tab.setTabEnabled(1, True)

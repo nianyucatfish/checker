@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>Multi-track MIDI Player</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f0f2f5;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+
+        #main-card {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background: white;
+        }
+
+        /* --- Top Controls --- */
+        .global-controls {
+            padding: 12px 20px;
+            border-bottom: 1px solid #e1e4e8;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #fff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            z-index: 20;
+            position: relative;
+        }
+
+        .center-controls {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 12px;
+        }
+
+        .time-display {
+            font-family: 'SF Mono', 'Roboto Mono', monospace;
+            font-size: 14px;
+            color: #666;
+            min-width: 100px;
+        }
+
+        button {
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        /* Icon Button (Play/Stop) */
+        .icon-btn {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: #f1f3f4;
+            color: #5f6368;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+
+        .icon-btn:hover {
+            background: #e8eaed;
+            color: #202124;
+        }
+
+        .icon-btn:disabled {
+            background: #f1f3f4;
+            color: #dadce0;
+            cursor: not-allowed;
+        }
+
+        .icon-btn svg {
+            width: 24px;
+            height: 24px;
+            fill: currentColor;
+        }
+
+        #status {
+            font-weight: 500;
+            color: #007bff;
+            margin-left: auto;
+            font-size: 13px;
+        }
+
+        .error {
+            color: #dc3545 !important;
+        }
+
+        /* --- Track List Area --- */
+        #tracks-scroll-area {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            /* Horizontal scroll handled by bottom bar */
+            background: #fafafa;
+            padding: 10px;
+            position: relative;
+        }
+
+        .track-row {
+            display: flex;
+            height: 80px;
+            background: white;
+            border: 1px solid #e1e4e8;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Left: Info & Controls (Fixed Width) */
+        .track-sidebar {
+            width: 200px;
+            padding: 10px;
+            border-right: 1px solid #eee;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            background: #f8f9fa;
+            flex-shrink: 0;
+            z-index: 2;
+        }
+
+        /* Vertical Scrollbar for Track */
+        .track-vscroll {
+            width: 12px;
+            background: #f8f9fa;
+            border-right: 1px solid #e1e4e8;
+            overflow-y: auto;
+            overflow-x: hidden;
+            flex-shrink: 0;
+            cursor: ns-resize;
+        }
+
+        /* Custom Scrollbar Styling */
+        .track-vscroll::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .track-vscroll::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+
+        .track-vscroll::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 4px;
+        }
+
+        .track-vscroll::-webkit-scrollbar-thumb:hover {
+            background: #a8a8a8;
+        }
+
+        .track-name {
+            font-weight: 600;
+            font-size: 13px;
+            color: #333;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .track-controls {
+            display: flex;
+            gap: 6px;
+        }
+
+        .btn-mini {
+            padding: 2px 0;
+            font-size: 12px;
+            border-radius: 4px;
+            border: 1px solid #ced4da;
+            background: white;
+            color: #495057;
+            cursor: pointer;
+            flex: 1;
+            text-align: center;
+        }
+
+        .btn-mini:hover {
+            background: #e9ecef;
+        }
+
+        .btn-mute.active {
+            background: #dc3545;
+            color: white;
+            border-color: #dc3545;
+        }
+
+        .btn-solo.active {
+            background: #ffc107;
+            color: black;
+            border-color: #ffc107;
+        }
+
+        /* Right: Timeline / Canvas */
+        .track-timeline {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            /* Viewport */
+            cursor: pointer;
+            background: #fff;
+        }
+
+        .canvas-content {
+            position: absolute;
+            top: 0;
+            left: 0;
+            /* width will be set by canvas */
+            will-change: transform;
+        }
+
+        canvas {
+            display: block;
+            /* height is determined by visualizer */
+        }
+
+        /* Playhead (in each track) */
+        .playhead {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background-color: #ff3b30;
+            z-index: 10;
+            pointer-events: none;
+            display: none;
+        }
+
+        /* --- Bottom Scrollbar --- */
+        #timeline-scrollbar-container {
+            height: 16px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            border-top: 1px solid #ddd;
+            background: #f1f1f1;
+        }
+
+        #timeline-scroll-content {
+            height: 1px;
+        }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/@magenta/music@1.23.1/dist/magentamusic.min.js"></script>
+</head>
+
+<body>
+
+    <div id="main-card">
+        <div class="global-controls">
+            <span class="time-display" id="timeLabel">00:00 / 00:00</span>
+
+            <div class="center-controls">
+                <button id="playBtn" class="icon-btn" disabled title="播放">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                    </svg>
+                </button>
+                <button id="stopBtn" class="icon-btn" disabled title="停止">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M6 6h12v12H6z" />
+                    </svg>
+                </button>
+            </div>
+
+            <div id="status">等待加载 MIDI...</div>
+        </div>
+
+        <div id="timeline-scrollbar-container">
+            <div id="timeline-scroll-content"></div>
+        </div>
+
+        <div id="tracks-scroll-area">
+            <div id="tracks-container">
+                <div style="padding: 40px; text-align: center; color: #999;">
+                    请点击左上角 "打开多轨 MIDI 文件" 加载...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Global Variables ---
+        let player = null;
+        let currentSequence = null; // The full original sequence
+        let tracks = []; // Array of track objects
+
+        let isPlaying = false;
+        let animationId = null;
+        let startTime = 0;
+        let pauseOffset = 0;
+        let totalDuration = 0;
+
+        const PIXELS_PER_STEP = 50;
+
+        // GM Instruments Map
+        const GM_INSTRUMENTS = {
+            0: "Acoustic Grand Piano", 19: "Church Organ", 24: "Acoustic Guitar (Nylon)",
+            40: "Violin", 48: "String Ensemble 1", 56: "Trumpet", 66: "Tenor Sax",
+            73: "Flute", 128: "Drums"
+        };
+
+        // --- Initialization ---
+        async function init() {
+            const status = document.getElementById('status');
+            try {
+                player = new mm.SoundFontPlayer('https://storage.googleapis.com/magentadata/js/soundfonts/sgm_plus');
+                console.log("Player initialized");
+            } catch (e) {
+                status.innerText = "初始化失败: " + e.message;
+                status.classList.add('error');
+            }
+
+            // Sync Scroll
+            const scrollBar = document.getElementById('timeline-scrollbar-container');
+            scrollBar.addEventListener('scroll', () => {
+                const left = scrollBar.scrollLeft;
+                document.querySelectorAll('.track-timeline').forEach(el => {
+                    el.scrollLeft = left;
+                });
+            });
+        }
+
+        // --- Core Logic ---
+
+        function processTracks(seq) {
+            const map = new Map();
+
+            seq.notes.forEach(n => {
+                const instId = n.instrument;
+                const program = n.program;
+                const isDrum = n.isDrum;
+
+                // Group by Instrument (Channel) AND Program to separate different sounds on same channel
+                // or same sound on different channels.
+                const key = `i${instId}_p${program}_d${isDrum}`;
+
+                if (!map.has(key)) {
+                    let baseName = isDrum ? "Drums" : (GM_INSTRUMENTS[program] || `Instrument #${program}`);
+                    let icon = isDrum ? "🥁" : "🎹";
+                    // Display Channel info
+                    let name = `${icon} ${baseName} (Ch.${instId})`;
+
+                    map.set(key, {
+                        id: key,
+                        name: name,
+                        notes: [],
+                        program: program,
+                        isDrum: isDrum,
+                        muted: false,
+                        soloed: false,
+                        instId: instId // for sorting
+                    });
+                }
+                map.get(key).notes.push(n);
+            });
+
+            // Sort by Channel then Program
+            return Array.from(map.values()).sort((a, b) => {
+                if (a.instId !== b.instId) return a.instId - b.instId;
+                return a.program - b.program;
+            });
+        }
+
+        function renderTracks() {
+            const container = document.getElementById('tracks-container');
+            container.innerHTML = '';
+
+            tracks.forEach(t => {
+                const row = document.createElement('div');
+                row.className = 'track-row';
+
+                row.innerHTML = `
+                    <div class="track-sidebar">
+                        <div class="track-name" title="${t.name}">${t.name}</div>
+                        <div class="track-controls">
+                            <button class="btn-mini btn-mute">M</button>
+                            <button class="btn-mini btn-solo">S</button>
+                        </div>
+                    </div>
+                    <div class="track-vscroll">
+                        <div class="vscroll-spacer"></div>
+                    </div>
+                    <div class="track-timeline">
+                        <div class="canvas-content">
+                            <canvas></canvas>
+                        </div>
+                        <div class="playhead"></div>
+                    </div>
+                `;
+
+                container.appendChild(row);
+
+                // Store DOM refs
+                t.dom = {
+                    row: row,
+                    canvas: row.querySelector('canvas'),
+                    canvasContent: row.querySelector('.canvas-content'),
+                    playhead: row.querySelector('.playhead'),
+                    muteBtn: row.querySelector('.btn-mute'),
+                    soloBtn: row.querySelector('.btn-solo'),
+                    timeline: row.querySelector('.track-timeline'),
+                    vscroll: row.querySelector('.track-vscroll'),
+                    vscrollSpacer: row.querySelector('.vscroll-spacer')
+                };
+
+                // Bind Events
+                t.dom.muteBtn.onclick = () => toggleMute(t);
+                t.dom.soloBtn.onclick = () => toggleSolo(t);
+                t.dom.timeline.onclick = (e) => handleSeek(e, t.dom.timeline);
+
+                // Vertical Scroll Sync
+                t.dom.vscroll.onscroll = () => {
+                    const top = t.dom.vscroll.scrollTop;
+                    t.dom.canvasContent.style.transform = `translateY(-${top}px)`;
+                };
+
+                // Visualize
+                const trackSeq = {
+                    notes: t.notes,
+                    totalTime: totalDuration
+                };
+
+                // Use PianoRollCanvasVisualizer
+                t.visualizer = new mm.PianoRollCanvasVisualizer(trackSeq, t.dom.canvas, {
+                    noteHeight: 6,
+                    pixelsPerTimeStep: PIXELS_PER_STEP,
+                    noteRGB: t.isDrum ? '156, 39, 176' : '33, 150, 243',
+                    activeNoteRGB: '255, 87, 34'
+                });
+
+                // After visualizer renders (it's synchronous usually), update scroll spacer
+                // We need to wait for the canvas to be sized.
+                // Magenta visualizer resizes canvas immediately in constructor.
+                const canvasHeight = t.dom.canvas.height;
+                t.dom.vscrollSpacer.style.height = canvasHeight + 'px';
+
+                // Center the view initially if it's too tall? 
+                // Or just start at top. Let's start at top.
+                // If we want to center on notes, we'd need to calculate average pitch.
+            });
+
+            // Update Scrollbar
+            const scrollContent = document.getElementById('timeline-scroll-content');
+            const width = totalDuration * PIXELS_PER_STEP;
+            scrollContent.style.width = width + 'px';
+        }
+
+        function toggleMute(track) {
+            track.muted = !track.muted;
+            track.dom.muteBtn.classList.toggle('active', track.muted);
+
+            // If solo is active on this track, mute overrides? 
+            // Usually Solo overrides Mute. 
+            // Logic: If any Solo, only Soloed play. Mute is ignored on Soloed tracks?
+            // Let's stick to simple logic:
+            // Playable = (AnySolo ? (t.solo) : (!t.mute))
+
+            if (isPlaying) restartPlayback();
+        }
+
+        function toggleSolo(track) {
+            track.soloed = !track.soloed;
+            track.dom.soloBtn.classList.toggle('active', track.soloed);
+
+            // Update UI for other tracks (optional visual feedback)
+            if (isPlaying) restartPlayback();
+        }
+
+        function getPlayableSequence() {
+            const anySolo = tracks.some(t => t.soloed);
+            let activeTracks = [];
+
+            if (anySolo) {
+                activeTracks = tracks.filter(t => t.soloed);
+            } else {
+                activeTracks = tracks.filter(t => !t.muted);
+            }
+
+            const notes = [];
+            activeTracks.forEach(t => notes.push(...t.notes));
+
+            // Return a new sequence object
+            return {
+                notes: notes,
+                totalTime: totalDuration,
+                tempos: currentSequence.tempos,
+                timeSignatures: currentSequence.timeSignatures
+            };
+        }
+
+        // --- Playback Control ---
+
+        const playBtn = document.getElementById('playBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const timeLabel = document.getElementById('timeLabel');
+        const statusLabel = document.getElementById('status');
+
+        playBtn.addEventListener('click', () => {
+            if (!currentSequence) return;
+            if (isPlaying) pausePlayback();
+            else startPlayback(pauseOffset);
+        });
+
+        stopBtn.addEventListener('click', () => {
+            stopPlayback();
+        });
+
+        function handleSeek(e, timelineEl) {
+            if (!currentSequence) return;
+
+            // Calculate time based on click position + scroll
+            const rect = timelineEl.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const scrollLeft = timelineEl.scrollLeft;
+            const absoluteX = clickX + scrollLeft;
+
+            const targetTime = absoluteX / PIXELS_PER_STEP;
+
+            if (targetTime >= 0 && targetTime <= totalDuration) {
+                seekTo(targetTime);
+            }
+        }
+
+        function seekTo(seconds) {
+            const wasPlaying = isPlaying;
+            if (wasPlaying) pausePlayback(); // Pause temporarily
+
+            pauseOffset = seconds;
+            updatePlayheads(seconds);
+            updateTimeLabel(seconds);
+
+            if (wasPlaying) startPlayback(seconds);
+        }
+
+        function restartPlayback() {
+            // Called when Mute/Solo changes
+            const current = mm.Player.tone.context.currentTime - startTime;
+            startPlayback(current);
+        }
+
+        async function startPlayback(offsetSeconds = 0) {
+            if (player.isPlaying()) player.stop();
+
+            const seq = getPlayableSequence();
+            // Trim for seek
+            const playSeq = trimSequence(seq, offsetSeconds);
+
+            isPlaying = true;
+            playBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
+            playBtn.title = "暂停";
+            statusLabel.innerText = "播放中...";
+
+            player.start(playSeq).then(() => {
+                if (isPlaying) {
+                    // Natural finish
+                    stopPlayback();
+                }
+            });
+
+            startTime = mm.Player.tone.context.currentTime - offsetSeconds;
+
+            // Show playheads
+            tracks.forEach(t => t.dom.playhead.style.display = 'block');
+
+            animate();
+        }
+
+        function pausePlayback() {
+            if (player.isPlaying()) player.stop();
+            isPlaying = false;
+            cancelAnimationFrame(animationId);
+            playBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+            playBtn.title = "播放";
+            statusLabel.innerText = "已暂停";
+
+            pauseOffset = mm.Player.tone.context.currentTime - startTime;
+        }
+
+        function stopPlayback() {
+            if (player.isPlaying()) player.stop();
+            isPlaying = false;
+            cancelAnimationFrame(animationId);
+            playBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+            playBtn.title = "播放";
+            statusLabel.innerText = "就绪";
+
+            pauseOffset = 0;
+            updatePlayheads(0);
+            updateTimeLabel(0);
+
+            // 保持播放头显示在起始位置
+            // tracks.forEach(t => t.dom.playhead.style.display = 'none');
+
+            // Reset scroll? No, keep it.
+        }
+
+        function animate() {
+            if (!isPlaying) return;
+
+            const now = mm.Player.tone.context.currentTime;
+            const currentSec = now - startTime;
+
+            if (currentSec > totalDuration) {
+                // Wait for player promise to resolve
+                return;
+            }
+
+            updatePlayheads(currentSec);
+            updateTimeLabel(currentSec);
+            autoScroll(currentSec);
+
+            animationId = requestAnimationFrame(animate);
+        }
+
+        function updatePlayheads(seconds) {
+            const x = seconds * PIXELS_PER_STEP;
+            tracks.forEach(t => {
+                t.dom.playhead.style.left = x + 'px';
+            });
+        }
+
+        function autoScroll(seconds) {
+            const x = seconds * PIXELS_PER_STEP;
+            const scrollBar = document.getElementById('timeline-scrollbar-container');
+            const width = scrollBar.clientWidth;
+            const scroll = scrollBar.scrollLeft;
+
+            // Auto scroll if playhead reaches right edge
+            if (x > scroll + width - 50) {
+                scrollBar.scrollLeft = x - 50;
+            }
+        }
+
+        function updateTimeLabel(current) {
+            const fmt = t => {
+                const m = Math.floor(t / 60);
+                const s = Math.floor(t % 60);
+                return `${m < 10 ? '0' + m : m}:${s < 10 ? '0' + s : s}`;
+            };
+            timeLabel.innerText = `${fmt(current)} / ${fmt(totalDuration)}`;
+        }
+
+        // --- Helpers ---
+        function trimSequence(seq, startTime) {
+            const newSeq = JSON.parse(JSON.stringify(seq));
+            newSeq.notes = newSeq.notes.filter(n => n.startTime >= startTime);
+            newSeq.notes.forEach(n => {
+                n.startTime -= startTime;
+                n.endTime -= startTime;
+            });
+            newSeq.totalTime -= startTime;
+            return newSeq;
+        }
+
+        function base64ToUint8Array(base64) {
+            const binary_string = window.atob(base64);
+            const len = binary_string.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes;
+        }
+
+        // --- Python 接口 ---
+        window.loadMidiContent = async function (base64Data) {
+            statusLabel.innerText = "正在解析 MIDI...";
+            playBtn.disabled = true;
+            stopBtn.disabled = true;
+
+            try {
+                const midiBytes = base64ToUint8Array(base64Data);
+                const seq = await mm.midiToSequenceProto(midiBytes);
+                currentSequence = seq;
+                totalDuration = seq.totalTime;
+
+                // Process Tracks
+                tracks = processTracks(seq);
+                renderTracks();
+
+                // Reset
+                stopPlayback();
+
+                statusLabel.innerText = "正在加载采样...";
+                await player.loadSamples(seq);
+
+                statusLabel.innerText = "准备就绪";
+                playBtn.disabled = false;
+                stopBtn.disabled = false; 7
+
+                // 显示播放头在起始位置
+                tracks.forEach(t => {
+                    t.dom.playhead.style.display = 'block';
+                    t.dom.playhead.style.left = '0px';
+                });
+                updateTimeLabel(0);
+
+                return "Success";
+            } catch (e) {
+                console.error(e);
+                statusLabel.innerText = "错误: " + e.message;
+                statusLabel.classList.add('error');
+            }
+        }
+
+        window.addEventListener('load', init);
+    </script>
+</body>
+
+</html>
