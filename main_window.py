@@ -1089,22 +1089,84 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "错误", f"无法打开资源管理器: {str(e)}")
 
+    def _check_and_stop_player_if_needed(self, target_path):
+        """
+        检查 target_path 是否被播放器占用（是当前播放文件或其父目录），
+        如果是，则停止播放以释放句柄。
+        """
+        player = self.editor_manager.media_player
+        if not player.path:
+            return
+
+        try:
+            abs_player = os.path.normpath(os.path.abspath(player.path))
+            abs_target = os.path.normpath(os.path.abspath(target_path))
+
+            # 1. 目标就是当前播放文件
+            if abs_player == abs_target:
+                player.stop()
+                return
+
+            # 2. 目标是当前播放文件的祖先目录
+            # 加上分隔符确保不是部分匹配 (e.g. /foo/bar vs /foo/bar_suffix)
+            if abs_player.startswith(abs_target + os.sep):
+                player.stop()
+                return
+        except Exception:
+            pass
+
     def do_rename(self, path):
         old_name = os.path.basename(path)
         new_name, ok = QInputDialog.getText(self, "重命名", "新名称:", text=old_name)
         if ok and new_name and new_name != old_name:
             new_path = os.path.join(os.path.dirname(path), new_name)
+
+            # 检查是否正在重命名当前打开的文件
+            was_open = False
+            if self.last_selected_path:
+                try:
+                    if os.path.normpath(self.last_selected_path) == os.path.normpath(
+                        path
+                    ):
+                        was_open = True
+                except Exception:
+                    pass
+
+            # 尝试释放句柄
+            self._check_and_stop_player_if_needed(path)
+
             try:
                 os.rename(path, new_path)
                 # 新增：重命名后触发扫描和刷新
                 self.trigger_partial_scan(new_path)
                 self.refresh_model()
-                # 可选：刷新文件树
-                self.model.setRootPath(self.root_dir)
-                self.tree.setRootIndex(self.model.index(self.root_dir))
+
+                # 移除会导致视图重置的代码
+                # self.model.setRootPath(self.root_dir)
+                # self.tree.setRootIndex(self.model.index(self.root_dir))
+
                 self.log(f"已重命名: {old_name} → {new_name}")
+
+                # 如果重命名的是当前文件，重新打开新路径以更新编辑器/播放器
+                if was_open:
+                    self.last_selected_path = new_path
+                    self.editor_manager.open_file(new_path)
+
+                # 尝试选中新文件 (延迟一点以等待模型更新)
+                QTimer.singleShot(
+                    100,
+                    lambda: self._select_path_in_tree(new_path),
+                )
+
             except Exception as e:
                 QMessageBox.critical(self, "错误", str(e))
+
+    def _select_path_in_tree(self, path):
+        """辅助方法：在树中选中指定路径"""
+        idx = self.model.index(path)
+        if idx.isValid():
+            self.tree.setCurrentIndex(idx)
+            self.tree.scrollTo(idx)
 
     def do_delete(self, path):
         if (
@@ -1112,7 +1174,20 @@ class MainWindow(QMainWindow):
             == QMessageBox.StandardButton.Yes
         ):
             try:
-                self.editor_manager.media_player.stop()
+                # 检查是否正在删除当前打开的文件
+                was_open = False
+                if self.last_selected_path:
+                    try:
+                        if os.path.normpath(
+                            self.last_selected_path
+                        ) == os.path.normpath(path):
+                            was_open = True
+                    except Exception:
+                        pass
+
+                # 尝试释放句柄
+                self._check_and_stop_player_if_needed(path)
+
                 if os.path.isdir(path):
                     shutil.rmtree(path)
                 else:
@@ -1120,9 +1195,18 @@ class MainWindow(QMainWindow):
                 # 删除后触发增量扫描和刷新
                 self.trigger_partial_scan(os.path.dirname(path))
                 self.refresh_model()
-                self.model.setRootPath(self.root_dir)
-                self.tree.setRootIndex(self.model.index(self.root_dir))
+
+                # 移除会导致视图重置的代码
+                # self.model.setRootPath(self.root_dir)
+                # self.tree.setRootIndex(self.model.index(self.root_dir))
+
                 self.log(f"已删除: {os.path.basename(path)}")
+
+                # 如果删除的是当前文件，清空编辑器
+                if was_open:
+                    self.last_selected_path = None
+                    self.editor_manager.close_all_tabs()
+
             except Exception as e:
                 QMessageBox.critical(self, "错误", str(e))
 

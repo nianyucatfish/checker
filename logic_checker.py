@@ -263,7 +263,7 @@ class LogicChecker:
             # 检查一级目录下的多余项
             for f in existing:
                 f_path = os.path.join(song_path, f)
-                if f not in expected_folders and not f.startswith("."):
+                if f not in expected_folders:
                     add_error(f_path, f"[多余项目] {f}")
         except FileNotFoundError:
             return error_map

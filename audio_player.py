@@ -69,7 +69,6 @@ class AudioPlaybackWorker(QThread):
         super().__init__()
         self.file_path = file_path
         self.stop_requested = False
-        self.pause_requested = False
         self.current_position = 0  # in frames
         self.seek_position = -1  # in frames, for seeking
 
@@ -105,12 +104,6 @@ class AudioPlaybackWorker(QThread):
                     audio_file.seek(self.current_position)
 
                     while not self.stop_requested:
-                        # 处理暂停
-                        while self.pause_requested:
-                            self.msleep(100)
-                            if self.stop_requested:
-                                break
-
                         if self.stop_requested:
                             break
 
@@ -182,9 +175,6 @@ class AudioPlaybackWorker(QThread):
     def stop_playback(self):
         self.stop_requested = True
         self.wait()
-
-    def pause_playback(self, state):
-        self.pause_requested = state
 
     def seek_to(self, ms_pos, samplerate):
         """线程内部的跳转方法 (接收 ms 转换为 frames)"""
@@ -314,42 +304,31 @@ class MediaPlayer(QWidget):
 
         if self.is_playing:
             # 当前正在播放 -> 暂停
-            if self.playback_worker and self.playback_worker.isRunning():
-                self.playback_worker.pause_playback(True)
-            self.is_playing = False
-            self.btn_play.setIcon(
-                self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
-            )
-            # 暂停时保持竖线可见（仅在停止/结束时隐藏）
-            self.play_state_changed.emit(True)
+            self.pause()
         else:
             # 当前未播放 -> 播放/恢复
-            if self.playback_worker and self.playback_worker.isRunning():
-                # 从暂停恢复
-                self.playback_worker.pause_playback(False)
-            else:
-                # 启动新的播放线程
-                self.playback_worker = AudioPlaybackWorker(self.path)
-                self.playback_worker.set_beat_data(self.beat_data)
-                self.playback_worker.set_metronome_active(self.metronome_active)
+            # 总是启动新的播放线程，确保文件句柄被重新获取
+            self.playback_worker = AudioPlaybackWorker(self.path)
+            self.playback_worker.set_beat_data(self.beat_data)
+            self.playback_worker.set_metronome_active(self.metronome_active)
 
-                # 如果用户在首次播放前已通过滑块/波形设定了起始位置，
-                # 则从该位置开始播放（ms -> frames）
-                if self.current_samplerate > 0:
-                    start_ms = self.slider.value()
-                    self.playback_worker.current_position = int(
-                        start_ms * self.current_samplerate / 1000
-                    )
+            # 如果用户在首次播放前已通过滑块/波形设定了起始位置，
+            # 则从该位置开始播放（ms -> frames）
+            if self.current_samplerate > 0:
+                start_ms = self.slider.value()
+                self.playback_worker.current_position = int(
+                    start_ms * self.current_samplerate / 1000
+                )
 
-                # --- 新增/修改的连接逻辑 ---
-                # 1. 连接 worker 的 position_update 到内部滑块更新
-                self.playback_worker.position_update.connect(self._update_slider)
-                # 2. 连接 worker 的 position_update 到外部公共信号 (新增)
-                self.playback_worker.position_update.connect(self.position_changed)
+            # --- 新增/修改的连接逻辑 ---
+            # 1. 连接 worker 的 position_update 到内部滑块更新
+            self.playback_worker.position_update.connect(self._update_slider)
+            # 2. 连接 worker 的 position_update 到外部公共信号 (新增)
+            self.playback_worker.position_update.connect(self.position_changed)
 
-                self.playback_worker.duration_update.connect(self._update_duration)
-                self.playback_worker.finished.connect(self._playback_finished)
-                self.playback_worker.start()
+            self.playback_worker.duration_update.connect(self._update_duration)
+            self.playback_worker.finished.connect(self._playback_finished)
+            self.playback_worker.start()
 
             self.is_playing = True
             self.btn_play.setIcon(
@@ -400,8 +379,28 @@ class MediaPlayer(QWidget):
         # 广播状态：播放结束
         self.play_state_changed.emit(False)
 
+    def pause(self):
+        """暂停播放并释放文件句柄"""
+        if self.playback_worker and self.playback_worker.isRunning():
+            try:
+                self.playback_worker.finished.disconnect(self._playback_finished)
+            except TypeError:
+                pass
+            self.playback_worker.stop_playback()
+
+        self.is_playing = False
+        self.btn_play.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        )
+        # 暂停时保持竖线可见
+        self.play_state_changed.emit(True)
+
     def stop(self):
         if self.playback_worker and self.playback_worker.isRunning():
+            try:
+                self.playback_worker.finished.disconnect(self._playback_finished)
+            except TypeError:
+                pass
             self.playback_worker.stop_playback()
         self.is_playing = False
         self.is_seeking = False

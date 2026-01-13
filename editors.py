@@ -525,12 +525,19 @@ class WaveformWidget(QWidget):
         self._is_playing = False
         self.beat_data = []
         self.render_beat = False
+        self.structure_data = []
+        self.render_structure = False
         self.zoom_level = 1.0
         self.view_start_ratio = 0.0
 
     def set_beat_data(self, beat_data, render=True):
         self.beat_data = beat_data
         self.render_beat = render
+        self.update()
+
+    def set_structure_data(self, structure_data, render=True):
+        self.structure_data = structure_data
+        self.render_structure = render
         self.update()
 
     def load_file(self, path):
@@ -651,6 +658,30 @@ class WaveformWidget(QWidget):
 
         total_duration_ms = self.get_duration_ms()
         view_width_ratio = 1.0 / self.zoom_level
+
+        if self.render_structure and self.structure_data and total_duration_ms > 0:
+            for time_sec, label in self.structure_data:
+                time_ms = time_sec * 1000
+                ratio = time_ms / total_duration_ms
+
+                if (
+                    self.view_start_ratio
+                    <= ratio
+                    <= (self.view_start_ratio + view_width_ratio)
+                ):
+                    view_ratio = (ratio - self.view_start_ratio) / view_width_ratio
+                    x = int(view_ratio * width)
+
+                    # Draw Line
+                    painter.setPen(
+                        QPen(QColor(255, 140, 0), 2, Qt.PenStyle.DashDotLine)
+                    )  # Orange
+                    painter.drawLine(x, 0, x, height)
+
+                    # Draw Label
+                    painter.setPen(QPen(QColor(255, 100, 0), 1))
+                    painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+                    painter.drawText(x + 4, 20, label)
 
         if self.render_beat and self.beat_data and total_duration_ms > 0:
             for time_sec, is_first in self.beat_data:
@@ -776,6 +807,12 @@ class AudioPlayerWithWaveform(QWidget):
         self.btn_render_beat.setCheckable(True)
         self.btn_render_beat.clicked.connect(self._toggle_beat_render)
         top_controls.addWidget(self.btn_render_beat)
+
+        self.btn_render_structure = QPushButton("渲染结构")
+        self.btn_render_structure.setCheckable(True)
+        self.btn_render_structure.clicked.connect(self._toggle_structure_render)
+        top_controls.addWidget(self.btn_render_structure)
+
         top_controls.addStretch()
         layout.addLayout(top_controls)
 
@@ -850,6 +887,67 @@ class AudioPlayerWithWaveform(QWidget):
             self.waveform_widget.set_beat_data([], False)
             self.media_player.set_metronome_active(False)
 
+    def _toggle_structure_render(self, checked):
+        if not checked:
+            self.waveform_widget.set_structure_data([], False)
+            self.btn_render_structure.setText("渲染结构")
+            return
+
+        if not self.media_player.path:
+            QMessageBox.warning(self, "提示", "请先加载音频文件")
+            self.btn_render_structure.setChecked(False)
+            return
+
+        wav_path = self.media_player.path
+        song_folder = os.path.dirname(os.path.dirname(wav_path))
+        song_folder_name = os.path.basename(song_folder)
+
+        match = re.match(r"^(.+?)_(.+?)_(.+?)$", song_folder_name)
+        if match:
+            song_name = match.group(2)
+        else:
+            QMessageBox.warning(
+                self,
+                "错误",
+                f"无法从文件夹名 '{song_folder_name}' 提取歌曲名。\n请确保文件夹命名格式为 '歌曲名_BPM_调号'",
+            )
+            self.btn_render_structure.setChecked(False)
+            return
+
+        csv_path = os.path.join(song_folder, "csv", f"{song_name}_Structure.csv")
+
+        if not os.path.exists(csv_path):
+            QMessageBox.warning(self, "错误", f"找不到Structure文件:\n{csv_path}")
+            self.btn_render_structure.setChecked(False)
+            return
+
+        try:
+            structure_data = []
+            with open(csv_path, "r", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                headers = next(reader, [])  # Labels
+                times = next(reader, [])  # Timestamps
+
+                if len(headers) != len(times):
+                    raise ValueError("Structure CSV 格式错误: 标题行与时间行长度不一致")
+
+                for i in range(len(headers)):
+                    label = headers[i]
+                    time_str = times[i]
+                    # Parse MM:SS
+                    parts = time_str.split(":")
+                    if len(parts) == 2:
+                        seconds = int(parts[0]) * 60 + float(parts[1])
+                        structure_data.append((seconds, label))
+
+            self.waveform_widget.set_structure_data(structure_data, True)
+            self.btn_render_structure.setText("取消结构")
+
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"读取Structure文件失败:\n{e}")
+            self.btn_render_structure.setChecked(False)
+            self.waveform_widget.set_structure_data([], False)
+
     def load_file(self, path):
         self.waveform_widget.load_file(path)
         self.media_player.load_file(path)
@@ -859,6 +957,11 @@ class AudioPlayerWithWaveform(QWidget):
         self.btn_render_beat.setText("渲染节奏")
         self.waveform_widget.set_beat_data([], False)
         self.media_player.set_metronome_active(False)
+
+        # Reset structure render state
+        self.btn_render_structure.setChecked(False)
+        self.btn_render_structure.setText("渲染结构")
+        self.waveform_widget.set_structure_data([], False)
 
     def stop(self):
         self.media_player.stop()
