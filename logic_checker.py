@@ -46,6 +46,37 @@ class LogicChecker:
             return None
 
     @staticmethod
+    def check_wav_min_duration(wav_path, min_seconds=180.0):
+        """检查 WAV 时长是否小于指定阈值；不足则返回错误字符串，否则返回 None。"""
+        dur = LogicChecker.get_wav_duration_seconds(wav_path)
+        if dur is None:
+            return None
+        if dur < float(min_seconds):
+            return f"[音频时长过短] {dur:.3f}s < {float(min_seconds):.0f}s"
+        return None
+
+    @staticmethod
+    def check_wav_min_duration_in_folder(
+        folder_path, add_error_func, min_seconds=180.0
+    ):
+        """检查文件夹下所有 WAV 是否满足最小时长；不足则按文件路径报错。"""
+        if not os.path.isdir(folder_path):
+            return
+        try:
+            names = os.listdir(folder_path)
+        except Exception:
+            return
+        for name in names:
+            if not name.lower().endswith(".wav"):
+                continue
+            p = os.path.join(folder_path, name)
+            if not os.path.isfile(p):
+                continue
+            err = LogicChecker.check_wav_min_duration(p, min_seconds=min_seconds)
+            if err:
+                add_error_func(p, err)
+
+    @staticmethod
     def get_wav_duration_inconsistency_summary(
         folder_path,
         tolerance_seconds=0.02,
@@ -293,6 +324,13 @@ class LogicChecker:
             file_check_callback=LogicChecker.check_wav_format,
         )
 
+        # 分轨 WAV 最小时长检查：少于 3 分钟报错
+        LogicChecker.check_wav_min_duration_in_folder(
+            folder_path=wav_root,
+            add_error_func=add_error,
+            min_seconds=180.0,
+        )
+
         # =========================================================
         #  4. 总轨检查 (WAV)
         # =========================================================
@@ -306,6 +344,13 @@ class LogicChecker:
             allowed_files=[],  # 不允许其他文件
             add_error_func=add_error,
             file_check_callback=LogicChecker.check_wav_format,
+        )
+
+        # 总轨 WAV 最小时长检查：少于 3 分钟报错
+        LogicChecker.check_wav_min_duration_in_folder(
+            folder_path=mix_root,
+            add_error_func=add_error,
+            min_seconds=180.0,
         )
 
         # =========================================================
@@ -427,18 +472,15 @@ class LogicChecker:
         # =========================================================
         mix_proj_root = os.path.join(song_path, "混音工程原文件")
 
-        # 定义允许的 DAW 工程后缀
-        allowed_daw_exts = (".flp", ".logicx", ".cpr")
-
         if os.path.exists(mix_proj_root):
             # 获取该目录下所有项目（包括隐藏文件）
             all_items = list(os.listdir(mix_proj_root))
 
             found_wavs = []
-            found_daw_files = []
             found_csv = False
 
-            # --- 第一步：分类扫描所有文件，检查多余项 ---
+            # --- 第一步：分类扫描所有文件 ---
+            # 放宽规则：仅对 wav 和 乐器音源对照表.csv 做检查；其他文件/文件夹一律视作工程文件，留给人工检查
             for item in all_items:
                 item_path = os.path.join(mix_proj_root, item)
                 item_lower = item.lower()
@@ -450,10 +492,6 @@ class LogicChecker:
                     else:
                         found_wavs.append(item)
 
-                elif item_lower.endswith(allowed_daw_exts):
-                    # DAW 文件可能是文件夹 (如 .logicx)，所以不限制 isfile
-                    found_daw_files.append(item)
-
                 elif item == "乐器音源对照表.csv":
                     if os.path.isdir(item_path):
                         add_error(item_path, f"[类型错误] {item} 不应是文件夹")
@@ -461,18 +499,10 @@ class LogicChecker:
                         found_csv = True
 
                 else:
-                    # 既不是wav，不是daw，也不是指定的csv -> 多余项
-                    type_str = "文件夹" if os.path.isdir(item_path) else "文件"
-                    add_error(item_path, f"[多余{type_str}] {item}")
+                    # 其他文件/文件夹：不报错
+                    continue
 
-            # --- 第二步：检查 DAW 工程文件是否存在 ---
-            if not found_daw_files:
-                add_error(
-                    mix_proj_root,
-                    "[缺失文件] 缺少 DAW 工程文件 (需包含 .flp / .logicx / .cpr 任一)",
-                )
-
-            # --- 第三步：检查 CSV 内容 (原有逻辑) ---
+            # --- 第二步：检查 CSV 内容 (原有逻辑) ---
             instr_map_path = os.path.join(mix_proj_root, "乐器音源对照表.csv")
             if not found_csv:
                 # 只有在确实没找到时才报缺失，避免与上面的多余项逻辑冲突（虽然这里通常 expected list 更好，但在混合逻辑下这样写清晰）
@@ -501,7 +531,7 @@ class LogicChecker:
                 except Exception as e:
                     add_error(instr_map_path, f"[读取错误] {e}")
 
-            # --- 第四步：检查 WAV 文件 (格式 + 命名逻辑) ---
+            # --- 第三步：检查 WAV 文件 (格式 + 命名逻辑) ---
 
             # 用于统计每个乐器的文件信息 { "乐器名": [ {"file": "文件名", "has_num": True/False}, ... ] }
             instrument_groups = {}

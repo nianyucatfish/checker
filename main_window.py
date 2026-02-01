@@ -537,6 +537,15 @@ class MainWindow(QMainWindow):
         # --- 帮助菜单 ---
         self.help_menu = QMenu(self)
 
+        # TODO: 加一个数据检查流程链接
+        act_workflow = QAction("数据检查流程", self)
+        act_workflow.triggered.connect(
+            lambda: webbrowser.open(
+                "https://wcntr9kdkawk.feishu.cn/wiki/QGILwl3gPiGrhGkIka6cIi4Qncc"
+            )
+        )
+        self.help_menu.addAction(act_workflow)
+
         act_data_requirements = QAction("数据要求", self)
         act_data_requirements.triggered.connect(
             lambda: webbrowser.open(
@@ -548,7 +557,7 @@ class MainWindow(QMainWindow):
         act_work_registration = QAction("分工登记表", self)
         act_work_registration.triggered.connect(
             lambda: webbrowser.open(
-                "https://ai.feishu.cn/sheets/NvY3skZ6EhY9BTt0snkcGuIznLf?from=from_copylink"
+                "https://docs.qq.com/sheet/DSUpxbWpOVFZrb3Rx?tab=BB08J2 "
             )
         )
         self.help_menu.addAction(act_work_registration)
