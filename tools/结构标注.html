@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>歌曲结构标注工具 (DAW Zoom版)</title>
+    <style>
+        :root {
+            --bg-color: #1e1e1e;
+            --text-color: #e0e0e0;
+            --accent-color: #4a90e2;
+            --wave-color: #777;
+            --border-color: #333;
+            --row-hover: #2a2a2a;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            box-sizing: border-box;
+            user-select: none;
+            overflow: hidden;
+            /* 防止拖拽时选中文字 */
+        }
+
+        h1 {
+            font-size: 1.25rem;
+            margin: 6px 0 12px;
+            font-weight: 600;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            background: #252526;
+            padding: 16px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        /* Controls */
+        .controls-top {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        /* DAW-like transport */
+        .transport-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: #1b1b1c;
+        }
+
+        .transport-left,
+        .transport-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .transport-center {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            min-width: 160px;
+        }
+
+        .btn-icon {
+            min-width: 40px;
+            padding: 6px 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            background-color: #333;
+            color: white;
+            padding: 6px 12px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.2s;
+        }
+
+        .btn:hover {
+            background-color: #444;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background-color: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        .btn-primary:hover {
+            background-color: #357abd;
+        }
+
+        .btn-danger {
+            background-color: #d9534f;
+            border-color: #d32f2f;
+        }
+
+        .btn-danger:hover {
+            background-color: #c9302c;
+        }
+
+        /* Timeline/Player */
+        .player-wrapper {
+            position: relative;
+            border: 1px solid var(--border-color);
+            background: #111;
+            height: 260px;
+            border-radius: 4px;
+            overflow: hidden;
+            cursor: text;
+            /* 指示可以选择/点击位置 */
+        }
+
+        #timeline-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Scrollbar indicator (Custom simple overlay) */
+        .scrollbar-track {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            pointer-events: auto;
+            cursor: grab;
+        }
+
+        .scrollbar-thumb {
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.3);
+            width: 100%;
+            /* Dynamic */
+            transform: translateX(0);
+            /* Dynamic */
+            cursor: grab;
+        }
+
+        #loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+            display: none;
+        }
+
+        .time-display {
+            font-family: monospace;
+            font-size: 1.1rem;
+            color: #aaa;
+            margin-left: 0;
+        }
+
+        /* Markers List */
+        .markers-list {
+            /* max-height: 260px; */
+            min-height: 150px;
+            max-height: 260px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: #1e1e1e;
+        }
+
+        .marker-row {
+            display: flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-bottom: 1px solid var(--border-color);
+            background: #252526;
+        }
+
+        .marker-row:hover {
+            background: var(--row-hover);
+        }
+
+        .marker-time {
+            width: 70px;
+            font-family: monospace;
+            color: #888;
+        }
+
+        .marker-select {
+            flex-grow: 1;
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+            padding: 4px;
+            border-radius: 3px;
+            margin-right: 10px;
+        }
+
+        .hints {
+            font-size: 0.8rem;
+            color: #666;
+            text-align: center;
+            margin-top: 5px;
+            border-top: 1px solid #333;
+            padding-top: 10px;
+        }
+
+        .shortcut-key {
+            background: #444;
+            padding: 1px 4px;
+            border-radius: 3px;
+            color: #fff;
+            font-family: monospace;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>歌曲结构标注</h1>
+
+    <div class="container">
+
+        <div class="controls-top">
+            <label class="btn">
+                📂 加载音频
+                <input type="file" id="audioInput" accept=".wav,.mp3,.ogg,.m4a">
+            </label>
+            <label class="btn">
+                📄 导入 CSV
+                <input type="file" id="csvInput" accept=".csv">
+            </label>
+            <span id="audioFileName" style="color:#888; font-size:0.9rem;"></span>
+        </div>
+
+        <div class="player-wrapper" id="timelineContainer">
+            <div id="loading-overlay">正在分析波形...</div>
+            <canvas id="timelineCanvas"></canvas>
+            <div class="scrollbar-track" id="scrollTrack">
+                <div class="scrollbar-thumb" id="scrollThumb"></div>
+            </div>
+        </div>
+
+        <div class="transport-bar">
+            <div class="transport-left">
+                <button class="btn btn-primary btn-icon" id="playBtn" disabled>⏵</button>
+                <button class="btn btn-icon" id="stopBtn" disabled>⏹</button>
+                <button class="btn" id="addMarkerBtn" disabled>📍 打点 (M)</button>
+            </div>
+            <div class="transport-center">
+                <div class="time-display">
+                    <span id="currentTime">00:00.00</span> / <span id="duration">00:00</span>
+                </div>
+            </div>
+            <div class="transport-right">
+                <button class="btn btn-primary" id="exportBtn" disabled>💾 导出 CSV</button>
+            </div>
+        </div>
+
+        <div class="markers-list" id="markersList"></div>
+
+        <div class="hints">
+            快捷键: <span class="shortcut-key">Space</span> 播放 |
+            <span class="shortcut-key">M</span> 打点 |
+            <span class="shortcut-key">Ctrl / ⌘ + 滚轮</span> 缩放 |
+            <span class="shortcut-key">+/-</span> 缩放 |
+            <span class="shortcut-key">拖拽</span> 移动视图
+        </div>
+    </div>
+
+    <script>
+        // --- State ---
+        let markers = [];
+        let duration = 0;
+        let audioFileName = "song";
+        let waveformPeaks = []; // High res peaks
+
+        // Viewport State
+        let zoom = 1.0; // 1.0 = fit to screen
+        let offsetTime = 0; // The starting time (seconds) of the current view
+        let isDragging = false;
+        let lastMouseX = 0;
+
+        // Constants
+        const LABELS = ["Intro", "Verse", "Chorus", "Bridge", "Outro"];
+        const COLOR_MARKER = '#4a90e2';
+        const COLOR_PLAYHEAD = '#e74c3c';
+        const COLOR_WAVE = '#666';
+        const PEAKS_RESOLUTION = 20000; // Generate roughly 20k points for the whole song for smooth zoom
+
+        // --- DOM ---
+        const audioInput = document.getElementById('audioInput');
+        const csvInput = document.getElementById('csvInput');
+        const audioPlayer = document.getElementById('audioPlayer') || new Audio();
+        const playBtn = document.getElementById('playBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const addMarkerBtn = document.getElementById('addMarkerBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const markersList = document.getElementById('markersList');
+        const canvas = document.getElementById('timelineCanvas');
+        const ctx = canvas.getContext('2d');
+        const timelineContainer = document.getElementById('timelineContainer');
+        const timeDisplayCurrent = document.getElementById('currentTime');
+        const timeDisplayDuration = document.getElementById('duration');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const scrollTrack = document.getElementById('scrollTrack');
+        const scrollThumb = document.getElementById('scrollThumb');
+
+        // --- Core Audio Logic ---
+
+        // Generate High-Res Waveform
+        async function processWaveform(arrayBuffer) {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            try {
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                const rawData = audioBuffer.getChannelData(0);
+                const samples = rawData.length;
+                const blockSize = Math.floor(samples / PEAKS_RESOLUTION);
+                const peaks = [];
+
+                // Simple Max/Min decimation for performance
+                for (let i = 0; i < PEAKS_RESOLUTION; i++) {
+                    const start = i * blockSize;
+                    let max = 0;
+                    for (let j = 0; j < blockSize; j++) {
+                        const val = Math.abs(rawData[start + j]);
+                        if (val > max) max = val;
+                    }
+                    peaks.push(max);
+                }
+
+                // Normalize
+                const peakMax = Math.max(...peaks) || 1;
+                waveformPeaks = peaks.map(p => p / peakMax);
+
+                return audioBuffer.duration;
+            } finally {
+                audioContext.close();
+            }
+        }
+
+        // --- Viewport Logic ---
+
+        function getVisibleDuration() {
+            return duration / zoom;
+        }
+
+        function clampOffset() {
+            const visibleDur = getVisibleDuration();
+            if (offsetTime < 0) offsetTime = 0;
+            if (offsetTime + visibleDur > duration) offsetTime = Math.max(0, duration - visibleDur);
+            updateScrollThumb();
+        }
+
+        function updateScrollThumb() {
+            if (duration === 0) return;
+            const visibleDur = getVisibleDuration();
+            const widthPct = (visibleDur / duration) * 100;
+            const leftPct = (offsetTime / duration) * 100;
+
+            scrollThumb.style.width = `${widthPct}%`;
+            scrollThumb.style.transform = `translateX(0)`;
+            scrollThumb.style.left = `${leftPct}%`;
+        }
+
+        function setOffsetByThumbLeftPct(leftPct) {
+            if (duration === 0) return;
+            const visibleDur = getVisibleDuration();
+            const maxLeftPct = Math.max(0, 100 - (visibleDur / duration) * 100);
+            const clampedLeftPct = Math.max(0, Math.min(leftPct, maxLeftPct));
+            offsetTime = (clampedLeftPct / 100) * duration;
+            clampOffset();
+            drawTimeline();
+        }
+
+        function zoomAtPoint(zoomDelta, mouseRatio = 0.5) {
+            if (duration === 0) return;
+
+            const oldVisibleDur = getVisibleDuration();
+            const timeAtMouse = offsetTime + (oldVisibleDur * mouseRatio);
+
+            // Apply Zoom
+            zoom *= zoomDelta;
+            if (zoom < 1) zoom = 1;
+            if (zoom > 50) zoom = 50; // Max zoom
+
+            // Re-center around mouse
+            const newVisibleDur = getVisibleDuration();
+            offsetTime = timeAtMouse - (newVisibleDur * mouseRatio);
+
+            clampOffset();
+            drawTimeline();
+        }
+
+        function scrollHorizontal(deltaPixels) {
+            if (duration === 0) return;
+            const visibleDur = getVisibleDuration();
+            // Calculate how many seconds one pixel represents
+            const secPerPx = visibleDur / canvas.width;
+            offsetTime += deltaPixels * secPerPx;
+            clampOffset();
+            drawTimeline();
+        }
+
+        // --- Rendering ---
+
+        function resizeCanvas() {
+            canvas.width = timelineContainer.clientWidth;
+            canvas.height = timelineContainer.clientHeight;
+            drawTimeline();
+        }
+        window.addEventListener('resize', resizeCanvas);
+
+        function drawTimeline() {
+            const w = canvas.width;
+            const h = canvas.height;
+            const midH = h / 2;
+            const visibleDur = getVisibleDuration();
+
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, w, h);
+
+            if (duration === 0) return;
+
+            // 1. Draw Waveform (Optimized for viewport)
+            if (waveformPeaks.length > 0) {
+                ctx.fillStyle = COLOR_WAVE;
+                ctx.beginPath();
+
+                // Map Viewport time to Array Indices
+                const startIndex = Math.floor((offsetTime / duration) * waveformPeaks.length);
+                const endIndex = Math.min(waveformPeaks.length, Math.ceil(((offsetTime + visibleDur) / duration) * waveformPeaks.length));
+
+                // Map array slice to canvas X
+                // We iterate pixels on canvas for drawing to avoid drawing off-screen
+                const count = endIndex - startIndex;
+                if (count > 0) {
+                    const barW = w / count;
+                    // Optimization: if barW is tiny, skip pixels? No, canvas handles it.
+                    // Better: Loop through the visible peaks
+                    for (let i = 0; i < count; i++) {
+                        const val = waveformPeaks[startIndex + i];
+                        const x = (i / count) * w;
+                        const barH = val * h * 0.85;
+                        ctx.rect(x, midH - barH / 2, Math.max(1, barW), barH);
+                    }
+                }
+                ctx.fill();
+            }
+
+            // 2. Draw Markers
+            ctx.font = '12px Arial';
+            ctx.lineWidth = 1;
+            markers.forEach(marker => {
+                if (marker.time >= offsetTime && marker.time <= offsetTime + visibleDur) {
+                    const x = ((marker.time - offsetTime) / visibleDur) * w;
+
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, h);
+                    ctx.strokeStyle = COLOR_MARKER;
+                    ctx.stroke();
+
+                    // Flag
+                    const text = marker.label;
+                    const textW = ctx.measureText(text).width;
+                    ctx.fillStyle = COLOR_MARKER;
+                    ctx.fillRect(x, 0, textW + 6, 18);
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(text, x + 3, 13);
+                }
+            });
+
+            // 3. Draw Playhead
+            const curT = audioPlayer.currentTime;
+            if (curT >= offsetTime && curT <= offsetTime + visibleDur) {
+                const x = ((curT - offsetTime) / visibleDur) * w;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h);
+                ctx.strokeStyle = COLOR_PLAYHEAD;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        // --- Interaction ---
+
+        // Mouse Controls
+        timelineContainer.addEventListener('wheel', (e) => {
+            e.preventDefault();
+
+            // Check for Zoom (Ctrl + Wheel)
+            if (e.ctrlKey || e.metaKey) {
+                const rect = timelineContainer.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const ratio = mouseX / rect.width;
+                const delta = e.deltaY < 0 ? 1.2 : 0.8;
+                zoomAtPoint(delta, ratio);
+            }
+            // Check for Horizontal Scroll (Shift + Wheel or just Wheel)
+            else {
+                scrollHorizontal(e.deltaY + e.deltaX);
+            }
+        }, { passive: false });
+
+        // Scrollbar drag/click
+        let isScrollDragging = false;
+        let scrollDragStartX = 0;
+        let scrollDragStartLeftPct = 0;
+
+        function getThumbLeftPct() {
+            const left = parseFloat(scrollThumb.style.left || '0');
+            return isNaN(left) ? 0 : left;
+        }
+
+        scrollThumb.addEventListener('mousedown', (e) => {
+            if (duration === 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            isScrollDragging = true;
+            scrollDragStartX = e.clientX;
+            scrollDragStartLeftPct = getThumbLeftPct();
+            scrollThumb.style.cursor = 'grabbing';
+            scrollTrack.style.cursor = 'grabbing';
+        });
+
+        scrollTrack.addEventListener('mousedown', (e) => {
+            if (duration === 0) return;
+            // Clicking on the track jumps the view (center thumb at click)
+            if (e.target === scrollThumb) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const rect = scrollTrack.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const ratio = x / rect.width;
+            const visibleDur = getVisibleDuration();
+            offsetTime = (ratio * duration) - visibleDur / 2;
+            clampOffset();
+            drawTimeline();
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isScrollDragging) return;
+            const rect = scrollTrack.getBoundingClientRect();
+            const deltaX = e.clientX - scrollDragStartX;
+            const deltaPct = (deltaX / rect.width) * 100;
+            setOffsetByThumbLeftPct(scrollDragStartLeftPct + deltaPct);
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!isScrollDragging) return;
+            isScrollDragging = false;
+            scrollThumb.style.cursor = 'grab';
+            scrollTrack.style.cursor = 'grab';
+        });
+
+        timelineContainer.addEventListener('mousedown', (e) => {
+            if (duration === 0) return;
+            isDragging = true;
+            lastMouseX = e.clientX;
+
+            // If simple click (not dragging yet), we might want to seek
+            // We'll handle seek on mouseup if movement was small
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const deltaX = e.clientX - lastMouseX;
+            lastMouseX = e.clientX;
+            scrollHorizontal(-deltaX); // Drag left moves view right
+        });
+
+        window.addEventListener('mouseup', (e) => {
+            if (isDragging) {
+                isDragging = false;
+                // Determine if it was a click or a drag
+                // Simple logic: if specific check needed, add flags. 
+                // For now, let's allow click-to-seek logic on the container specifically
+            }
+        });
+
+        // Click to seek (Use click event to distinguish from drag)
+        timelineContainer.addEventListener('click', (e) => {
+            // Need a threshold to distinguish drag vs click, strictly speaking.
+            // But simple click usually has 0 movement.
+            // Let's rely on standard logic: calculate time at X
+            if (duration === 0) return;
+            const rect = timelineContainer.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const visibleDur = getVisibleDuration();
+            const clickTime = offsetTime + (x / rect.width) * visibleDur;
+
+            audioPlayer.currentTime = Math.max(0, Math.min(clickTime, duration));
+        });
+
+
+        // Keyboard Controls
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+            switch (e.code) {
+                case 'Space': e.preventDefault(); togglePlay(); break;
+                case 'KeyM': e.preventDefault(); addMarker(); break;
+                case 'Equal': // + key
+                    zoomAtPoint(1.2); break;
+                case 'Minus': // - key
+                    zoomAtPoint(0.8); break;
+            }
+        });
+
+        // Loop Update
+        function updateLoop() {
+            if (!audioPlayer.paused) {
+                const curT = audioPlayer.currentTime;
+                timeDisplayCurrent.innerText = formatTime(curT, true);
+
+                // Auto Follow Playhead
+                const visibleDur = getVisibleDuration();
+                if (curT > offsetTime + visibleDur) {
+                    offsetTime = curT - visibleDur * 0.1; // Jump to keep playhead at 10% from left
+                    clampOffset();
+                } else if (curT < offsetTime) {
+                    offsetTime = curT - visibleDur * 0.1;
+                    clampOffset();
+                }
+
+                drawTimeline();
+                requestAnimationFrame(updateLoop);
+            }
+        }
+
+        audioPlayer.addEventListener('play', updateLoop);
+        audioPlayer.addEventListener('timeupdate', () => {
+            if (audioPlayer.paused) {
+                timeDisplayCurrent.innerText = formatTime(audioPlayer.currentTime, true);
+                drawTimeline();
+            }
+        });
+
+        // --- Standard Logic (Copied/Adapted from previous) ---
+
+        function togglePlay() {
+            if (duration === 0) return;
+            if (audioPlayer.paused) audioPlayer.play();
+            else audioPlayer.pause();
+        }
+
+        function stopPlayback() {
+            if (duration === 0) return;
+            audioPlayer.pause();
+            audioPlayer.currentTime = 0;
+            timeDisplayCurrent.innerText = formatTime(0, true);
+            drawTimeline();
+        }
+
+        function addMarker() {
+            if (duration === 0) return;
+            const time = audioPlayer.currentTime;
+            // Debounce 0.5s
+            if (!markers.find(m => Math.abs(m.time - time) < 0.5)) {
+                markers.push({ label: "Verse", time: time });
+                renderMarkerList();
+                drawTimeline();
+            }
+        }
+
+        function renderMarkerList() {
+            markers.sort((a, b) => a.time - b.time);
+            markersList.innerHTML = '';
+            markers.forEach((marker, index) => {
+                const row = document.createElement('div');
+                row.className = 'marker-row';
+
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'marker-time';
+                timeSpan.innerText = formatTime(marker.time);
+                timeSpan.style.cursor = 'pointer';
+                timeSpan.onclick = () => audioPlayer.currentTime = marker.time;
+
+                const select = document.createElement('select');
+                select.className = 'marker-select';
+                LABELS.forEach(lbl => {
+                    const opt = document.createElement('option');
+                    opt.value = lbl;
+                    opt.text = lbl;
+                    if (lbl === marker.label) opt.selected = true;
+                    select.appendChild(opt);
+                });
+                select.addEventListener('change', (e) => {
+                    marker.label = e.target.value;
+                    drawTimeline();
+                });
+
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn btn-danger';
+                delBtn.innerText = '×';
+                delBtn.style.padding = "2px 8px";
+                delBtn.onclick = () => {
+                    markers.splice(index, 1);
+                    renderMarkerList();
+                    drawTimeline();
+                };
+
+                row.appendChild(timeSpan);
+                row.appendChild(select);
+                row.appendChild(delBtn);
+                markersList.appendChild(row);
+            });
+        }
+
+        // File Loading
+        audioInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            loadingOverlay.style.display = 'flex';
+            audioFileName = file.name.replace(/\.[^/.]+$/, "");
+            document.getElementById('audioFileName').innerText = file.name;
+
+            const url = URL.createObjectURL(file);
+            audioPlayer.src = url;
+
+            const reader = new FileReader();
+            reader.onload = async (evt) => {
+                const dur = await processWaveform(evt.target.result);
+                duration = dur;
+                timeDisplayDuration.innerText = formatTime(dur);
+
+                // Reset View
+                zoom = 1;
+                offsetTime = 0;
+                markers = [];
+                renderMarkerList();
+
+                loadingOverlay.style.display = 'none';
+                [playBtn, stopBtn, addMarkerBtn, exportBtn].forEach(b => b.disabled = false);
+                resizeCanvas();
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // CSV Loading
+        csvInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                const lines = evt.target.result.trim().split(/\r?\n/);
+                if (lines.length < 2) return alert("无效 CSV");
+                const headers = lines[0].split(',');
+                const times = lines[1].split(',');
+                markers = [];
+                for (let i = 0; i < headers.length; i++) {
+                    let lbl = headers[i].trim();
+                    if (!LABELS.includes(lbl)) lbl = "Verse";
+                    const t = parseTime(times[i].trim());
+                    markers.push({ label: lbl, time: t });
+                }
+                renderMarkerList();
+                drawTimeline();
+            };
+            reader.readAsText(file);
+        });
+
+        // Export
+        exportBtn.addEventListener('click', () => {
+            markers.sort((a, b) => a.time - b.time);
+            const h = markers.map(m => m.label).join(',');
+            const t = markers.map(m => formatTime(m.time)).join(',');
+            const blob = new Blob([h + "\n" + t], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+
+            let name = audioFileName;
+            if (name.includes('_')) {
+                name = name.split('_')[0];
+            }
+            link.download = `${name}_Structure.csv`;
+
+            link.click();
+        });
+
+        // Utils
+        function formatTime(s, showMillis = false) {
+            if (isNaN(s)) return "00:00";
+            const m = Math.floor(s / 60);
+            const sec = Math.floor(s % 60);
+            const ms = Math.floor((s % 1) * 100);
+            let str = `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+            if (showMillis) str += `.${String(ms).padStart(2, '0')}`;
+            return str;
+        }
+
+        function parseTime(str) {
+            const p = str.split(':');
+            return parseInt(p[0]) * 60 + parseFloat(p[1]);
+        }
+
+        // Button Listeners
+        playBtn.onclick = togglePlay;
+        addMarkerBtn.onclick = addMarker;
+        stopBtn.onclick = stopPlayback;
+
+        // Keep play button in sync with audio state
+        audioPlayer.addEventListener('play', () => {
+            playBtn.innerText = '⏸';
+        });
+        audioPlayer.addEventListener('pause', () => {
+            playBtn.innerText = '⏵';
+        });
+
+    </script>
+</body>
+
+</html>

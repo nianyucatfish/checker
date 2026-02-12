@@ -1,0 +1,1218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>节拍标注</title>
+    <style>
+        :root {
+            /* ====== 整体放大界面：推荐调整 font-size、max-width、padding 等 ====== */
+            /* 推荐：font-size: 20px; 例如如下（默认浏览器一般16px）*/
+            font-size: 20px;
+            --bg: #1e1e1e;
+            --panel: #252526;
+            --text: #e0e0e0;
+            --muted: #9aa0a6;
+            --border: #333;
+            --btn: #333;
+            --btnHover: #444;
+            --primary: #2196F3;
+            --primaryHover: #1e88e5;
+            --accent: #4caf50;
+            --accentHover: #3fa445;
+            --warn: #FF9800;
+            --warnHover: #f59f1a;
+            /* 你也可以在这里增加其它全局变量，比如 --btn-size、--input-size 等 */
+        }
+
+        body {
+            margin: 0;
+            padding: 14px;
+            height: 100vh;
+            box-sizing: border-box;
+            background: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        h1 {
+            font-size: 1.2rem;
+            margin: 6px 0 2px;
+            font-weight: 600;
+        }
+
+        .container {
+            width: 100%;
+            /* ====== 放大容器宽度和内边距 ====== */
+            max-width: 1200px;
+            /* 原1000px，可根据需要调整 */
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            /* 原14px，适当加大 */
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            /* 原10px，适当加大 */
+        }
+
+        .controls {
+            display: flex;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 10px 14px;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            background: var(--btn);
+            border: 1px solid #555;
+            color: white;
+            /* ====== 按钮适中尺寸，避免过大 ====== */
+            padding: 7px 14px;
+            /* 适中，原6px 12px */
+            border-radius: 7px;
+            /* 适中 */
+            cursor: pointer;
+            font-size: 1rem;
+            /* 稍大于原0.9rem，整体协调 */
+            transition: background 0.15s;
+        }
+
+        .btn:hover {
+            background: var(--btnHover);
+        }
+
+        .btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--primaryHover);
+        }
+
+        .btn-accent {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .btn-accent:hover {
+            background: var(--accentHover);
+        }
+
+        .btn-warn {
+            background: var(--warn);
+            border-color: var(--warn);
+            color: #111;
+        }
+
+        .btn-warn:hover {
+            background: var(--warnHover);
+        }
+
+        .form {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .form label {
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
+
+        input[type="number"] {
+            width: 120px;
+            /* 原92px */
+            background: #333;
+            border: 1px solid #555;
+            border-radius: 8px;
+            /* 原6px */
+            padding: 10px 12px;
+            /* 原6px 8px */
+            color: white;
+            outline: none;
+            font-size: 1.1rem;
+            /* 放大字体 */
+        }
+
+        .hint {
+            font-size: 0.82rem;
+            color: #777;
+        }
+
+        .hints {
+            font-size: 1.05rem;
+            /* 原0.82rem */
+            color: #6f6f6f;
+            text-align: center;
+            border-top: 1px solid var(--border);
+            padding-top: 18px;
+            /* 原10px */
+            margin-top: 8px;
+            /* 原2px */
+            line-height: 2.0;
+            /* ====== 放大底部提示区 ====== */
+        }
+
+        .player {
+            position: relative;
+            background: #111;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            height: 270px;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #loading {
+            position: absolute;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.78);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            color: white;
+        }
+
+        .scroll-track {
+            position: absolute;
+            left: 0;
+            bottom: 0;
+            height: 8px;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.10);
+            cursor: grab;
+            z-index: 3;
+        }
+
+        .scroll-thumb {
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.30);
+            border-radius: 0;
+            width: 100px;
+            transform: translateX(0);
+        }
+
+        .transport {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            padding: 10px;
+            background: #1b1b1c;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+
+        .transport .left,
+        .transport .right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .transport .center {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            min-width: 150px;
+        }
+
+        .time {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 1.05rem;
+            color: #b6b6b6;
+        }
+
+        input[type="range"] {
+            width: 260px;
+        }
+
+        .status {
+            margin-left: auto;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .kbd {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            background: #3a3a3a;
+            color: #fff;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>节拍标注</h1>
+
+    <div class="container">
+        <div class="controls">
+            <label class="btn">
+                📂 加载音频
+                <input type="file" id="audioInput" accept="audio/*" />
+            </label>
+
+            <div class="form">
+                <label>BPM</label>
+                <input type="number" id="bpm" value="120" min="1" step="0.01" />
+            </div>
+
+            <div class="form">
+                <label>拍号 (每小节拍数)</label>
+                <input type="number" id="beatsPerBar" value="4" min="1" step="1" />
+            </div>
+
+            <div class="hint" id="audioName"></div>
+        </div>
+
+        <div class="player" id="player">
+            <div id="loading">正在分析波形...</div>
+            <canvas id="timeline"></canvas>
+            <div class="scroll-track" id="scrollTrack">
+                <div class="scroll-thumb" id="scrollThumb"></div>
+            </div>
+        </div>
+
+        <div class="transport">
+            <div class="left">
+                <button class="btn btn-primary" id="btnPlay" disabled title="Space 播放/暂停">⏵</button>
+                <button class="btn" id="btnStop" disabled>⏹</button>
+                <button class="btn btn-accent" id="btnSetStart" disabled>设定起始点</button>
+                <button class="btn btn-accent" id="btnSetEnd" disabled>设定终止点(吸附)</button>
+                <button class="btn btn-warn" id="btnExport" disabled>导出 CSV</button>
+                <button class="btn" id="btnReset" disabled title="R 重置">重置</button>
+            </div>
+
+            <div class="center">
+                <div class="time"><span id="tNow">0:00.000</span> / <span id="tDur">0:00.000</span></div>
+            </div>
+
+            <div class="right">
+                <label style="color:var(--muted); font-size:0.85rem;">缩放</label>
+                <input type="range" id="zoom" min="1" max="32" value="1" step="0.1" />
+                <span class="hint" id="zoomLabel">x1.0</span>
+                <div class="status" id="status">准备就绪</div>
+            </div>
+        </div>
+
+        <div class="hints">
+            快捷键: <span class="kbd">Space</span> 播放/暂停 |
+            <span class="kbd">S</span> 设起点 |
+            <span class="kbd">E</span> 设/确认终点 |
+            <span class="kbd">R</span> 重置 |
+            <span class="kbd">Esc</span> 取消设终点 |
+            <span class="kbd">Ctrl/⌘</span> + 滚轮 缩放 |
+            <span class="kbd">+/-</span> 缩放 |
+            <span class="kbd">拖拽</span> 平移 |
+            <span class="kbd">滚轮</span> 横向滚动
+        </div>
+
+        <audio id="audio" preload="auto" style="display:none"></audio>
+    </div>
+
+    <script>
+        // @ts-nocheck
+        const PEAKS_RESOLUTION = 20000;
+
+        const audioInput = document.getElementById('audioInput');
+        const audioNameEl = document.getElementById('audioName');
+        const loadingEl = document.getElementById('loading');
+
+        const canvas = document.getElementById('timeline');
+        const ctx = canvas.getContext('2d');
+        const scrollTrack = document.getElementById('scrollTrack');
+        const scrollThumb = document.getElementById('scrollThumb');
+
+        const bpmInput = document.getElementById('bpm');
+        const bpbInput = document.getElementById('beatsPerBar');
+        const zoomSlider = document.getElementById('zoom');
+        const zoomLabel = document.getElementById('zoomLabel');
+
+        const btnPlay = document.getElementById('btnPlay');
+        const btnStop = document.getElementById('btnStop');
+        const btnSetStart = document.getElementById('btnSetStart');
+        const btnSetEnd = document.getElementById('btnSetEnd');
+        const btnExport = document.getElementById('btnExport');
+        const btnReset = document.getElementById('btnReset');
+
+        const statusEl = document.getElementById('status');
+        const tNowEl = document.getElementById('tNow');
+        const tDurEl = document.getElementById('tDur');
+
+        const audio = document.getElementById('audio');
+
+        let audioContext = null;
+
+        /** peaks[i] = max abs amplitude in bucket */
+        let peaks = null;
+        let duration = 0;
+
+        let zoom = 1;
+        let offsetTime = 0;
+
+        let startTime = null;
+        let endTime = null;
+        let mode = 'normal'; // normal | setEnd
+
+        let endPreviewRawTime = null;
+        let endPreviewSnappedTime = null;
+
+        let isPanning = false;
+        let panStartX = 0;
+        let panStartOffset = 0;
+
+        let isDraggingThumb = false;
+        let thumbDragStartX = 0;
+        let thumbDragStartOffset = 0;
+
+        let rafId = 0;
+        let lastPlayedBeatIndex = -1;
+
+        function isTypingTarget(el) {
+            if (!el) return false;
+            const tag = String(el.tagName || '').toLowerCase();
+            return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
+        }
+
+        function formatTime(sec) {
+            if (!isFinite(sec) || sec < 0) sec = 0;
+            const m = Math.floor(sec / 60);
+            const s = sec - m * 60;
+            const sInt = Math.floor(s);
+            const ms = Math.floor((s - sInt) * 1000);
+            return `${m}:${String(sInt).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+        }
+
+        function ensureAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            return audioContext;
+        }
+
+        async function decodeAudio(arrayBuffer) {
+            const ac = ensureAudioContext();
+            return await ac.decodeAudioData(arrayBuffer.slice(0));
+        }
+
+        function computePeaks(audioBuffer) {
+            const channels = audioBuffer.numberOfChannels;
+            const length = audioBuffer.length;
+            const bucketSize = Math.max(1, Math.floor(length / PEAKS_RESOLUTION));
+            const out = new Float32Array(PEAKS_RESOLUTION);
+
+            const channelData = [];
+            for (let c = 0; c < channels; c++) channelData.push(audioBuffer.getChannelData(c));
+
+            for (let i = 0; i < PEAKS_RESOLUTION; i++) {
+                const start = i * bucketSize;
+                let end = start + bucketSize;
+                if (end > length) end = length;
+                let peak = 0;
+
+                for (let c = 0; c < channels; c++) {
+                    const data = channelData[c];
+                    for (let j = start; j < end; j++) {
+                        const v = Math.abs(data[j]);
+                        if (v > peak) peak = v;
+                    }
+                }
+
+                out[i] = peak;
+            }
+            return out;
+        }
+
+        function visibleDuration() {
+            if (duration <= 0) return 0;
+            return duration / Math.max(1e-6, zoom);
+        }
+
+        function clampOffset() {
+            if (duration <= 0) {
+                offsetTime = 0;
+                return;
+            }
+            const vis = visibleDuration();
+            const maxOffset = Math.max(0, duration - vis);
+            offsetTime = Math.min(Math.max(0, offsetTime), maxOffset);
+        }
+
+        function timeToX(t) {
+            const vis = visibleDuration();
+            if (vis <= 0) return 0;
+            return ((t - offsetTime) / vis) * canvas.width;
+        }
+
+        function xToTime(x) {
+            const vis = visibleDuration();
+            if (vis <= 0) return 0;
+            return offsetTime + (x / canvas.width) * vis;
+        }
+
+        function getGridParams() {
+            const bpm = Math.max(1, Number.parseFloat(bpmInput.value || '120'));
+            const beatsPerBar = Math.max(1, Number.parseInt(bpbInput.value || '4', 10));
+            const interval = 60 / bpm;
+            return { bpm, beatsPerBar, interval };
+        }
+
+        function snapToClosestBeat(t) {
+            if (startTime == null) return t;
+            const { interval } = getGridParams();
+            const diff = t - startTime;
+            const steps = Math.round(diff / interval);
+            const clampedSteps = Math.max(1, steps);
+            return startTime + clampedSteps * interval;
+        }
+
+        function resetAnnotation() {
+            startTime = null;
+            endTime = null;
+            mode = 'normal';
+            btnSetEnd.disabled = true;
+            btnExport.disabled = true;
+            endPreviewRawTime = null;
+            endPreviewSnappedTime = null;
+            canvas.style.cursor = '';
+            statusEl.textContent = '已重置标注';
+        }
+
+        function updateThumb() {
+            if (duration <= 0) {
+                scrollThumb.style.width = '100%';
+                scrollThumb.style.transform = 'translateX(0)';
+                return;
+            }
+            const trackW = scrollTrack.clientWidth;
+            const vis = visibleDuration();
+            const ratio = Math.min(1, vis / duration);
+            const thumbW = Math.max(16, Math.floor(trackW * ratio));
+            const maxOffset = Math.max(0, duration - vis);
+            const xRatio = maxOffset > 0 ? (offsetTime / maxOffset) : 0;
+            const maxX = Math.max(0, trackW - thumbW);
+            const thumbX = Math.floor(maxX * xRatio);
+
+            scrollThumb.style.width = `${thumbW}px`;
+            scrollThumb.style.transform = `translateX(${thumbX}px)`;
+        }
+
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            const w = Math.max(1, Math.floor(rect.width * dpr));
+            const h = Math.max(1, Math.floor(rect.height * dpr));
+            if (canvas.width !== w || canvas.height !== h) {
+                canvas.width = w;
+                canvas.height = h;
+            }
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            drawTimeline();
+        }
+
+        function drawWaveform() {
+            if (!peaks || duration <= 0) return;
+
+            const w = canvas.width;
+            const h = canvas.height;
+            const midY = Math.floor(h * 0.55);
+            const amp = Math.floor(h * 0.35);
+
+            ctx.strokeStyle = 'rgba(180,180,180,0.75)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+
+            const vis = visibleDuration();
+            const t0 = offsetTime;
+            const t1 = offsetTime + vis;
+
+            // Map visible time range to peaks indices
+            const i0 = Math.max(0, Math.floor((t0 / duration) * PEAKS_RESOLUTION));
+            const i1 = Math.min(PEAKS_RESOLUTION - 1, Math.ceil((t1 / duration) * PEAKS_RESOLUTION));
+            const count = Math.max(1, i1 - i0);
+
+            for (let x = 0; x < w; x++) {
+                const u = x / (w - 1);
+                const idx = i0 + Math.floor(u * count);
+                const p = peaks[Math.min(PEAKS_RESOLUTION - 1, Math.max(0, idx))] || 0;
+                const yTop = midY - p * amp;
+                const yBot = midY + p * amp;
+                ctx.moveTo(x + 0.5, yTop);
+                ctx.lineTo(x + 0.5, yBot);
+            }
+            ctx.stroke();
+
+            // baseline
+            ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+            ctx.beginPath();
+            ctx.moveTo(0, midY + 0.5);
+            ctx.lineTo(w, midY + 0.5);
+            ctx.stroke();
+        }
+
+        function drawGridAndMarkers() {
+            if (duration <= 0) return;
+
+            const w = canvas.width;
+            const h = canvas.height;
+            const vis = visibleDuration();
+            const { interval, beatsPerBar } = getGridParams();
+
+            // Draw start/end markers
+            if (startTime != null) {
+                const x = timeToX(startTime);
+                ctx.strokeStyle = 'rgba(0,255,0,0.9)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x + 0.5, 0);
+                ctx.lineTo(x + 0.5, h);
+                ctx.stroke();
+            }
+
+            if (endTime != null) {
+                const x = timeToX(endTime);
+                ctx.strokeStyle = 'rgba(255,0,0,0.9)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x + 0.5, 0);
+                ctx.lineTo(x + 0.5, h);
+                ctx.stroke();
+            }
+
+            // End snap preview (when setting end point)
+            if (mode === 'setEnd' && endPreviewSnappedTime != null) {
+                const x = timeToX(endPreviewSnappedTime);
+                if (x >= -20 && x <= w + 20) {
+                    ctx.save();
+                    ctx.setLineDash([4, 4]);
+                    ctx.lineWidth = 4;
+                    ctx.strokeStyle = 'rgba(255, 193, 7, 0.95)';
+                    ctx.shadowColor = 'rgba(255, 193, 7, 0.55)';
+                    ctx.shadowBlur = 10;
+                    ctx.beginPath();
+                    ctx.moveTo(x + 0.5, 0);
+                    ctx.lineTo(x + 0.5, h);
+                    ctx.stroke();
+
+                    // label box
+                    const label = `吸附预览: ${formatTime(endPreviewSnappedTime)}`;
+                    ctx.setLineDash([]);
+                    ctx.shadowBlur = 0;
+                    ctx.font = `${Math.max(11, Math.floor(canvas.height * 0.05))}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
+                    const padX = 6;
+                    const padY = 4;
+                    const metrics = ctx.measureText(label);
+                    const boxW = Math.ceil(metrics.width + padX * 2);
+                    const boxH = Math.ceil(parseInt(ctx.font, 10) + padY * 2);
+                    const bx = Math.min(Math.max(8, Math.floor(x + 10)), Math.max(8, w - boxW - 8));
+                    const by = 10;
+                    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+                    ctx.fillRect(bx, by, boxW, boxH);
+                    ctx.strokeStyle = 'rgba(255, 193, 7, 0.9)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(bx + 0.5, by + 0.5, boxW - 1, boxH - 1);
+                    ctx.fillStyle = 'rgba(255, 193, 7, 0.95)';
+                    ctx.textBaseline = 'top';
+                    ctx.fillText(label, bx + padX, by + padY);
+                    ctx.restore();
+                }
+            }
+
+            // Draw beat grid only when start exists
+            if (startTime == null) return;
+
+            const viewStart = offsetTime;
+            const viewEnd = offsetTime + vis;
+            const endLimit = (endTime != null) ? Math.min(endTime, viewEnd + interval) : (viewEnd + interval);
+
+            // find first beat in view
+            let beatIndex = Math.floor((Math.max(viewStart, startTime) - startTime) / interval);
+            if (beatIndex < 0) beatIndex = 0;
+            let t = startTime + beatIndex * interval;
+            while (t < viewStart - 1e-6) {
+                t += interval;
+                beatIndex += 1;
+            }
+
+            ctx.font = `${Math.max(10, Math.floor(canvas.height * 0.045))}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = 'rgba(220,220,220,0.75)';
+
+            const pxPerSec = w / vis;
+            const showMinorLabels = pxPerSec > 110;
+
+            for (; t <= endLimit + 1e-6; t += interval, beatIndex += 1) {
+                const x = timeToX(t);
+                if (x < -50) continue;
+                if (x > w + 50) break;
+
+                const beatInBar = (beatIndex % beatsPerBar) + 1;
+                const bar = Math.floor(beatIndex / beatsPerBar) + 1;
+                const isDownBeat = beatInBar === 1;
+
+                ctx.lineWidth = 1;
+                ctx.setLineDash(isDownBeat ? [] : [6, 6]);
+                ctx.strokeStyle = isDownBeat ? 'rgba(0,255,255,0.85)' : 'rgba(0,255,255,0.30)';
+                ctx.beginPath();
+                ctx.moveTo(x + 0.5, 0);
+                ctx.lineTo(x + 0.5, h);
+                ctx.stroke();
+
+                if (isDownBeat || showMinorLabels) {
+                    ctx.setLineDash([]);
+                    ctx.fillText(`${bar}.${beatInBar}`, x + 4, 6);
+                }
+            }
+
+            ctx.setLineDash([]);
+        }
+
+        function drawPlayhead() {
+            if (duration <= 0) return;
+            const t = audio.currentTime || 0;
+            if (t < offsetTime || t > offsetTime + visibleDuration()) return;
+
+            const x = timeToX(t);
+            ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x + 0.5, 0);
+            ctx.lineTo(x + 0.5, canvas.height);
+            ctx.stroke();
+        }
+
+        function drawTimeline() {
+            // background
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            clampOffset();
+            drawWaveform();
+            drawGridAndMarkers();
+            drawPlayhead();
+            updateThumb();
+        }
+
+        function setZoom(newZoom, anchorX = null) {
+            if (duration <= 0) return;
+
+            const oldVis = visibleDuration();
+            const clamped = Math.min(32, Math.max(1, newZoom));
+            if (!isFinite(clamped)) return;
+
+            if (anchorX == null) {
+                zoom = clamped;
+                clampOffset();
+                return;
+            }
+
+            const anchorTime = xToTime(anchorX);
+            zoom = clamped;
+            const newVis = visibleDuration();
+
+            // keep anchorTime under cursor
+            const u = anchorX / canvas.width;
+            offsetTime = anchorTime - u * newVis;
+            clampOffset();
+        }
+
+        function scrollBy(deltaSeconds) {
+            offsetTime += deltaSeconds;
+            clampOffset();
+        }
+
+        function playClick(isStrong) {
+            const ac = ensureAudioContext();
+            const osc = ac.createOscillator();
+            const gain = ac.createGain();
+            osc.connect(gain);
+            gain.connect(ac.destination);
+            const t0 = ac.currentTime;
+            osc.type = 'square';
+            osc.frequency.value = isStrong ? 1800 : 1100;
+            gain.gain.setValueAtTime(isStrong ? 0.28 : 0.18, t0);
+            gain.gain.exponentialRampToValueAtTime(0.001, t0 + (isStrong ? 0.06 : 0.05));
+            osc.start();
+            osc.stop(t0 + (isStrong ? 0.065 : 0.055));
+        }
+
+        function updateTimeUI() {
+            tNowEl.textContent = formatTime(audio.currentTime || 0);
+        }
+
+        function tick() {
+            updateTimeUI();
+            // metronome
+            if (!audio.paused && startTime != null) {
+                const { interval, beatsPerBar } = getGridParams();
+                const t = audio.currentTime || 0;
+                if (t >= startTime) {
+                    const beatIndex = Math.floor((t - startTime) / interval);
+                    if (beatIndex > lastPlayedBeatIndex) {
+                        const beatInBar = (beatIndex % beatsPerBar) + 1;
+                        playClick(beatInBar === 1);
+                        lastPlayedBeatIndex = beatIndex;
+                    }
+                }
+            }
+
+            drawTimeline();
+            if (!audio.paused) rafId = requestAnimationFrame(tick);
+        }
+
+        function startRaf() {
+            if (rafId) cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(tick);
+        }
+
+        function stopRaf() {
+            if (rafId) cancelAnimationFrame(rafId);
+            rafId = 0;
+            drawTimeline();
+        }
+
+        // --- Events ---
+
+        window.addEventListener('resize', resizeCanvas);
+
+        zoomSlider.addEventListener('input', () => {
+            setZoom(Number.parseFloat(zoomSlider.value), null);
+            zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+            drawTimeline();
+        });
+
+        bpmInput.addEventListener('change', drawTimeline);
+        bpbInput.addEventListener('change', drawTimeline);
+
+        btnPlay.addEventListener('click', async () => {
+            // iOS/Chrome policy: resume audio context on gesture
+            try { ensureAudioContext().resume?.(); } catch { }
+            if (audio.paused) {
+                await audio.play();
+            } else {
+                audio.pause();
+            }
+        });
+
+        btnStop.addEventListener('click', () => {
+            audio.pause();
+            audio.currentTime = 0;
+            lastPlayedBeatIndex = -1;
+            updateTimeUI();
+            drawTimeline();
+        });
+
+        btnReset.addEventListener('click', () => {
+            resetAnnotation();
+            drawTimeline();
+        });
+
+        btnSetStart.addEventListener('click', () => {
+            if (duration <= 0) return;
+            startTime = Math.min(Math.max(0, audio.currentTime || 0), duration);
+            endTime = null;
+            mode = 'normal';
+            endPreviewRawTime = null;
+            endPreviewSnappedTime = null;
+            canvas.style.cursor = '';
+            btnSetEnd.disabled = false;
+            btnExport.disabled = true;
+            statusEl.textContent = `起始点: ${formatTime(startTime)}（按 E 设置终点）`;
+            drawTimeline();
+        });
+
+        btnSetEnd.addEventListener('click', () => {
+            if (startTime == null) return;
+            mode = 'setEnd';
+            endPreviewRawTime = null;
+            endPreviewSnappedTime = null;
+            canvas.style.cursor = 'crosshair';
+            statusEl.textContent = '设置终止点：鼠标移动预览，点击确认；或按 E/Enter 以播放头确认（自动吸附）';
+        });
+
+        btnExport.addEventListener('click', () => {
+            if (startTime == null || endTime == null) return;
+            const { interval, beatsPerBar } = getGridParams();
+            const start = startTime;
+            const end = endTime;
+
+            let csv = 'TIME,LABEL\n';
+            let t = start;
+            let beatIndex = 0;
+            while (t <= end + 0.001) {
+                const bar = Math.floor(beatIndex / beatsPerBar) + 1;
+                const beat = (beatIndex % beatsPerBar) + 1;
+                csv += `${Number(t.toFixed(4))},${bar}.${beat}\n`;
+                t += interval;
+                beatIndex += 1;
+            }
+
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+
+            let fileName = audioNameEl.textContent || 'audio';
+            fileName = fileName.replace(/\.[^/.]+$/, "");
+            if (fileName.includes('_')) {
+                fileName = fileName.split('_')[0];
+            }
+            a.download = `${fileName}_Beat.csv`;
+
+            a.click();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (isTypingTarget(e.target)) {
+                if (e.code === 'Escape' && mode === 'setEnd') {
+                    mode = 'normal';
+                    endPreviewRawTime = null;
+                    endPreviewSnappedTime = null;
+                    canvas.style.cursor = '';
+                    statusEl.textContent = '已取消设置终止点';
+                    drawTimeline();
+                }
+                return;
+            }
+
+            if (e.code === 'Space') {
+                e.preventDefault();
+                btnPlay.click();
+                return;
+            }
+
+            if (e.code === 'KeyS') {
+                e.preventDefault();
+                if (!btnSetStart.disabled) btnSetStart.click();
+                return;
+            }
+
+            if (e.code === 'KeyR') {
+                e.preventDefault();
+                if (!btnReset.disabled) btnReset.click();
+                return;
+            }
+
+            if (e.code === 'Escape') {
+                if (mode === 'setEnd') {
+                    e.preventDefault();
+                    mode = 'normal';
+                    endPreviewRawTime = null;
+                    endPreviewSnappedTime = null;
+                    canvas.style.cursor = '';
+                    statusEl.textContent = '已取消设置终止点';
+                    drawTimeline();
+                }
+                return;
+            }
+
+            const zoomCenterX = canvas.width ? canvas.width * 0.5 : null;
+            if (e.code === 'Equal' || e.key === '+') {
+                e.preventDefault();
+                setZoom(zoom * 1.12, zoomCenterX);
+                zoomSlider.value = String(zoom.toFixed(2));
+                zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+                drawTimeline();
+                return;
+            }
+            if (e.code === 'Minus' || e.key === '-') {
+                e.preventDefault();
+                setZoom(zoom / 1.12, zoomCenterX);
+                zoomSlider.value = String(zoom.toFixed(2));
+                zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+                drawTimeline();
+                return;
+            }
+
+            if (e.code === 'KeyE' || e.code === 'Enter') {
+                if (startTime == null) return;
+                e.preventDefault();
+                if (mode !== 'setEnd') {
+                    btnSetEnd.click();
+                    return;
+                }
+                // Confirm end by playhead (snapped)
+                const raw = Math.min(Math.max(0, audio.currentTime || 0), duration);
+                const snapped = Math.min(Math.max(0, snapToClosestBeat(raw)), duration);
+                endTime = snapped;
+                mode = 'normal';
+                endPreviewRawTime = null;
+                endPreviewSnappedTime = null;
+                canvas.style.cursor = '';
+                btnExport.disabled = false;
+                const deltaMs = Math.round((snapped - raw) * 1000);
+                const sign = deltaMs > 0 ? '+' : '';
+                statusEl.textContent = `结束点(吸附): ${formatTime(endTime)}（原始: ${formatTime(raw)}，偏差: ${sign}${deltaMs}ms）`;
+                drawTimeline();
+                return;
+            }
+        });
+
+        audio.addEventListener('play', () => {
+            btnPlay.textContent = '⏸';
+            if (startTime != null) {
+                const { interval } = getGridParams();
+                const t = audio.currentTime || 0;
+                lastPlayedBeatIndex = Math.floor((t - startTime) / interval);
+            } else {
+                lastPlayedBeatIndex = -1;
+            }
+            startRaf();
+        });
+
+        audio.addEventListener('pause', () => {
+            btnPlay.textContent = '⏵';
+            stopRaf();
+        });
+
+        audio.addEventListener('seeking', () => {
+            if (startTime != null) {
+                const { interval } = getGridParams();
+                const t = audio.currentTime || 0;
+                lastPlayedBeatIndex = Math.floor((t - startTime) / interval);
+            }
+            drawTimeline();
+        });
+
+        // Canvas interactions
+        canvas.addEventListener('mousedown', (e) => {
+            if (duration <= 0) return;
+            isPanning = true;
+            panStartX = e.clientX;
+            panStartOffset = offsetTime;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isPanning) return;
+            const rect = canvas.getBoundingClientRect();
+            const dxCss = e.clientX - panStartX;
+            const dx = dxCss * (canvas.width / rect.width);
+            const vis = visibleDuration();
+            const dt = -(dx / canvas.width) * vis;
+            offsetTime = panStartOffset + dt;
+            clampOffset();
+            drawTimeline();
+        });
+
+        window.addEventListener('mouseup', () => {
+            isPanning = false;
+        });
+
+        canvas.addEventListener('click', (e) => {
+            if (duration <= 0) return;
+            const rect = canvas.getBoundingClientRect();
+            const xCss = e.clientX - rect.left;
+            const x = xCss * (canvas.width / rect.width);
+            const t = xToTime(x);
+
+            if (mode === 'setEnd') {
+                const raw = Math.min(Math.max(0, t), duration);
+                const snapped = Math.min(Math.max(0, snapToClosestBeat(raw)), duration);
+                endTime = snapped;
+                mode = 'normal';
+                endPreviewRawTime = null;
+                endPreviewSnappedTime = null;
+                canvas.style.cursor = '';
+                btnExport.disabled = false;
+                const deltaMs = Math.round((snapped - raw) * 1000);
+                const sign = deltaMs > 0 ? '+' : '';
+                statusEl.textContent = `结束点(吸附): ${formatTime(endTime)}  (原始: ${formatTime(raw)}，偏差: ${sign}${deltaMs}ms)`;
+                drawTimeline();
+                return;
+            }
+
+            // normal seek
+            audio.currentTime = Math.min(Math.max(0, t), duration);
+            updateTimeUI();
+            drawTimeline();
+        });
+
+        // Mouse move preview for end snapping
+        canvas.addEventListener('mousemove', (e) => {
+            if (duration <= 0) return;
+            if (mode !== 'setEnd') return;
+            if (startTime == null) return;
+            if (isPanning) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const xCss = e.clientX - rect.left;
+            const x = xCss * (canvas.width / rect.width);
+            const t = xToTime(x);
+            const raw = Math.min(Math.max(0, t), duration);
+            const snapped = Math.min(Math.max(0, snapToClosestBeat(raw)), duration);
+
+            endPreviewRawTime = raw;
+            endPreviewSnappedTime = snapped;
+            drawTimeline();
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            if (mode !== 'setEnd') return;
+            endPreviewRawTime = null;
+            endPreviewSnappedTime = null;
+            drawTimeline();
+        });
+
+        // Wheel: Ctrl/Alt zoom at mouse, otherwise horizontal scroll
+        canvas.addEventListener('wheel', (e) => {
+            if (duration <= 0) return;
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const xCss = e.clientX - rect.left;
+            const x = xCss * (canvas.width / rect.width);
+
+            const zoomMode = e.ctrlKey || e.altKey || e.metaKey;
+            if (zoomMode) {
+                const direction = Math.sign(e.deltaY);
+                const factor = direction > 0 ? 1 / 1.12 : 1.12;
+                setZoom(zoom * factor, x);
+                zoomSlider.value = String(zoom.toFixed(2));
+                zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+                drawTimeline();
+                return;
+            }
+
+            // horizontal scroll
+            const vis = visibleDuration();
+            const delta = (e.shiftKey ? e.deltaY : e.deltaX) || e.deltaY;
+            const dt = (delta / 800) * vis;
+            scrollBy(dt);
+            drawTimeline();
+        }, { passive: false });
+
+        // Scrollbar thumb drag
+        scrollThumb.addEventListener('mousedown', (e) => {
+            if (duration <= 0) return;
+            e.preventDefault();
+            isDraggingThumb = true;
+            thumbDragStartX = e.clientX;
+            thumbDragStartOffset = offsetTime;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDraggingThumb) return;
+            const trackW = scrollTrack.clientWidth;
+            const thumbW = scrollThumb.getBoundingClientRect().width;
+            const maxX = Math.max(1, trackW - thumbW);
+            const dx = e.clientX - thumbDragStartX;
+            const ratio = dx / maxX;
+
+            const vis = visibleDuration();
+            const maxOffset = Math.max(0, duration - vis);
+            offsetTime = thumbDragStartOffset + ratio * maxOffset;
+            clampOffset();
+            drawTimeline();
+        });
+
+        window.addEventListener('mouseup', () => {
+            isDraggingThumb = false;
+        });
+
+        // Click on track to jump
+        scrollTrack.addEventListener('mousedown', (e) => {
+            if (duration <= 0) return;
+            if (e.target === scrollThumb) return;
+            const trackRect = scrollTrack.getBoundingClientRect();
+            const trackW = trackRect.width;
+            const thumbW = scrollThumb.getBoundingClientRect().width;
+            const maxX = Math.max(1, trackW - thumbW);
+            const x = e.clientX - trackRect.left - thumbW / 2;
+            const clampedX = Math.min(Math.max(0, x), maxX);
+            const ratio = clampedX / maxX;
+
+            const vis = visibleDuration();
+            const maxOffset = Math.max(0, duration - vis);
+            offsetTime = ratio * maxOffset;
+            clampOffset();
+            drawTimeline();
+        });
+
+        // File loading
+        audioInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            loadingEl.style.display = 'flex';
+            statusEl.textContent = '正在加载...';
+
+            try {
+                audioNameEl.textContent = file.name;
+                audio.src = URL.createObjectURL(file);
+                audio.currentTime = 0;
+
+                const ab = await file.arrayBuffer();
+                const buf = await decodeAudio(ab);
+                duration = buf.duration;
+                tDurEl.textContent = formatTime(duration);
+
+                peaks = computePeaks(buf);
+
+                zoom = 1;
+                offsetTime = 0;
+                zoomSlider.value = '1';
+                zoomLabel.textContent = 'x1.0';
+
+                resetAnnotation();
+                clampOffset();
+                updateThumb();
+
+                btnPlay.disabled = false;
+                btnStop.disabled = false;
+                btnSetStart.disabled = false;
+                btnSetEnd.disabled = true;
+                btnExport.disabled = true;
+                btnReset.disabled = false;
+                statusEl.textContent = '音频已加载（按 S 设置起点）';
+
+                updateTimeUI();
+                resizeCanvas();
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = '加载失败';
+                alert('音频解析失败');
+            } finally {
+                loadingEl.style.display = 'none';
+            }
+        });
+
+        // init
+        zoomLabel.textContent = 'x1.0';
+        tNowEl.textContent = formatTime(0);
+        tDurEl.textContent = formatTime(0);
+        resizeCanvas();
+        drawTimeline();
+    </script>
+</body>
+
+</html>

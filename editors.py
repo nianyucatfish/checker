@@ -3,14 +3,17 @@
 包含文本编辑器、音频播放器、MIDI预览器和编辑器管理器
 """
 
-from PyQt6.QtCore import pyqtSignal, Qt, QThread
+from PyQt6.QtCore import pyqtSignal, Qt, QThread, QObject, pyqtSlot
 import os
 import struct
 import csv
 import re
 import base64
+import json
+import tempfile
 from io import StringIO
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -25,6 +28,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QHBoxLayout,
     QHeaderView,
+    QFileDialog,
 )
 from PyQt6.QtGui import (
     QFont,
@@ -973,6 +977,17 @@ class MidiPreview(QWebEngineView):
     def __init__(self):
         super().__init__()
         self.pending_midi_data = None
+        self.current_midi_path = None
+        self.default_export_filename = "export_修改.mid"
+        self.compare_wav_dir = None
+        self.compare_wav_files = []
+        self.default_compare_wav = None
+
+        self.export_bridge = MidiExportBridge(self)
+        self.web_channel = QWebChannel(self.page())
+        self.web_channel.registerObject("midiExportBridge", self.export_bridge)
+        self.page().setWebChannel(self.web_channel)
+
         self.loadFinished.connect(self._on_load_finished)
 
         # Load HTML template
@@ -990,17 +1005,168 @@ class MidiPreview(QWebEngineView):
         try:
             with open(path, "rb") as f:
                 data = f.read()
+            self.current_midi_path = path
+            base_name = os.path.splitext(os.path.basename(path))[0]
+            self.default_export_filename = f"{base_name}_修改.mid"
+            self._prepare_compare_wavs(path)
             self.pending_midi_data = base64.b64encode(data).decode("ascii")
             # Reload the page to clear state
             self.setHtml(self.html_template)
         except Exception as e:
             print(f"Error loading MIDI: {e}")
 
+    def _prepare_compare_wavs(self, midi_path: str):
+        midi_dir = os.path.dirname(midi_path)
+        parent_dir = os.path.dirname(midi_dir)
+        wav_dir = os.path.join(parent_dir, "分轨wav")
+
+        self.compare_wav_dir = wav_dir if os.path.isdir(wav_dir) else None
+        self.compare_wav_files = []
+        self.default_compare_wav = None
+
+        if not self.compare_wav_dir:
+            return
+
+        wav_files = [
+            name
+            for name in os.listdir(self.compare_wav_dir)
+            if os.path.isfile(os.path.join(self.compare_wav_dir, name))
+            and name.lower().endswith(".wav")
+        ]
+        wav_files.sort()
+        self.compare_wav_files = wav_files
+
+        vocal_candidate = next(
+            (name for name in wav_files if name.lower().endswith("_vocal_a.wav")),
+            None,
+        )
+        self.default_compare_wav = vocal_candidate or (
+            wav_files[0] if wav_files else None
+        )
+
     def _on_load_finished(self, ok):
         if ok and self.pending_midi_data:
             js = f"window.loadMidiContent('{self.pending_midi_data}');"
             self.page().runJavaScript(js)
+            default_name_js = json.dumps(self.default_export_filename)
+            self.page().runJavaScript(
+                f"window.setExportDefaultFilename && window.setExportDefaultFilename({default_name_js});"
+            )
             self.pending_midi_data = None
+
+
+class MidiExportBridge(QObject):
+    def __init__(self, preview: "MidiPreview"):
+        super().__init__()
+        self.preview = preview
+
+    @pyqtSlot(str, str, result=str)
+    def saveMidiBase64(self, midi_base64: str, suggested_name: str) -> str:
+        if not midi_base64:
+            return "ERROR: Empty MIDI data"
+
+        default_name = (
+            suggested_name.strip()
+            if suggested_name and suggested_name.strip()
+            else self.preview.default_export_filename
+        )
+        if not default_name.lower().endswith((".mid", ".midi")):
+            default_name = f"{default_name}.mid"
+
+        if self.preview.current_midi_path:
+            default_dir = os.path.dirname(self.preview.current_midi_path)
+        else:
+            default_dir = os.getcwd()
+
+        default_path = os.path.join(default_dir, default_name)
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self.preview,
+            "导出 MIDI",
+            default_path,
+            "MIDI Files (*.mid *.midi)",
+        )
+        if not save_path:
+            return "CANCELLED"
+
+        try:
+            midi_bytes = base64.b64decode(midi_base64)
+            with open(save_path, "wb") as f:
+                f.write(midi_bytes)
+            return save_path
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    @pyqtSlot(str, result=str)
+    def saveMidiToCurrentPath(self, midi_base64: str) -> str:
+        if not midi_base64:
+            return "ERROR: Empty MIDI data"
+
+        target_path = self.preview.current_midi_path
+        if not target_path:
+            return "ERROR: 当前未打开MIDI文件"
+
+        target_dir = os.path.dirname(target_path) or os.getcwd()
+        try:
+            midi_bytes = base64.b64decode(midi_base64)
+
+            with tempfile.NamedTemporaryFile(
+                mode="wb", delete=False, dir=target_dir, suffix=".mid"
+            ) as tmp:
+                tmp.write(midi_bytes)
+                tmp_path = tmp.name
+
+            os.replace(tmp_path, target_path)
+            return target_path
+        except Exception as e:
+            try:
+                if "tmp_path" in locals() and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return f"ERROR: {e}"
+
+    @pyqtSlot(result=str)
+    def getCompareWavList(self) -> str:
+        payload = {
+            "files": self.preview.compare_wav_files,
+            "default": self.preview.default_compare_wav,
+            "dir": self.preview.compare_wav_dir,
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    @pyqtSlot(str, result=str)
+    def getCompareWavBase64(self, filename: str) -> str:
+        if not filename:
+            return json.dumps(
+                {"ok": False, "error": "empty filename"}, ensure_ascii=False
+            )
+
+        if not self.preview.compare_wav_dir:
+            return json.dumps(
+                {"ok": False, "error": "分轨wav目录不存在"}, ensure_ascii=False
+            )
+
+        if filename not in self.preview.compare_wav_files:
+            return json.dumps(
+                {"ok": False, "error": "文件不在可选列表中"}, ensure_ascii=False
+            )
+
+        file_path = os.path.join(self.preview.compare_wav_dir, filename)
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+            return json.dumps(
+                {
+                    "ok": True,
+                    "name": filename,
+                    "mime": "audio/wav",
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
 
 # 已移除 PianoRollWidget（图形 MIDI 预览）。

@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>节拍标注</title>
+    <style>
+        :root {
+            --bg: #1e1e1e;
+            --panel: #252526;
+            --text: #e0e0e0;
+            --muted: #9aa0a6;
+            --border: #333;
+            --btn: #333;
+            --btnHover: #444;
+            --primary: #2196F3;
+            --primaryHover: #1e88e5;
+            --accent: #4caf50;
+            --accentHover: #3fa445;
+            --warn: #FF9800;
+            --warnHover: #f59f1a;
+        }
+
+        body {
+            margin: 0;
+            padding: 14px;
+            height: 100vh;
+            box-sizing: border-box;
+            background: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        h1 {
+            font-size: 1.2rem;
+            margin: 6px 0 2px;
+            font-weight: 600;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .controls {
+            display: flex;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 10px 14px;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            background: var(--btn);
+            border: 1px solid #555;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.15s;
+        }
+
+        .btn:hover {
+            background: var(--btnHover);
+        }
+
+        .btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--primaryHover);
+        }
+
+        .btn-accent {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .btn-accent:hover {
+            background: var(--accentHover);
+        }
+
+        .btn-warn {
+            background: var(--warn);
+            border-color: var(--warn);
+            color: #111;
+        }
+
+        .btn-warn:hover {
+            background: var(--warnHover);
+        }
+
+        .form {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .form label {
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
+
+        input[type="number"] {
+            width: 92px;
+            background: #333;
+            border: 1px solid #555;
+            border-radius: 6px;
+            padding: 6px 8px;
+            color: white;
+            outline: none;
+        }
+
+        .hint {
+            font-size: 0.82rem;
+            color: #777;
+        }
+
+        .hints {
+            font-size: 0.82rem;
+            color: #6f6f6f;
+            text-align: center;
+            border-top: 1px solid var(--border);
+            padding-top: 10px;
+            margin-top: 2px;
+            line-height: 1.7;
+        }
+
+        .player {
+            position: relative;
+            background: #111;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            height: 270px;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #loading {
+            position: absolute;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.78);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            color: white;
+        }
+
+        .scroll-track {
+            position: absolute;
+            left: 0;
+            bottom: 0;
+            height: 8px;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.10);
+            cursor: grab;
+            z-index: 3;
+        }
+
+        .scroll-thumb {
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.30);
+            border-radius: 0;
+            width: 100px;
+            transform: translateX(0);
+        }
+
+        .transport {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            padding: 10px;
+            background: #1b1b1c;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+
+        .transport .left,
+        .transport .right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .transport .center {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            min-width: 150px;
+        }
+
+        .time {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 1.05rem;
+            color: #b6b6b6;
+        }
+
+        input[type="range"] {
+            width: 260px;
+        }
+
+        .status {
+            margin-left: auto;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .kbd {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            background: #3a3a3a;
+            color: #fff;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>节拍检查</h1>
+
+    <div class="container">
+        <div class="controls">
+            <label class="btn">
+                📂 加载音频
+                <input type="file" id="audioInput" accept="audio/*" />
+            </label>
+            <label class="btn">
+                📂 加载 Beat
+                <input type="file" id="beatInput" accept=".csv" />
+            </label>
+
+            <div class="hint" id="audioName"></div>
+        </div>
+
+        <div class="player" id="player">
+            <div id="loading">正在分析波形...</div>
+            <canvas id="timeline"></canvas>
+            <div class="scroll-track" id="scrollTrack">
+                <div class="scroll-thumb" id="scrollThumb"></div>
+            </div>
+        </div>
+
+        <div class="transport">
+            <div class="left">
+                <button class="btn btn-primary" id="btnPlay" disabled title="Space 播放/暂停">⏵</button>
+                <button class="btn" id="btnStop" disabled>⏹</button>
+            </div>
+
+            <div class="center">
+                <div class="time"><span id="tNow">0:00.000</span> / <span id="tDur">0:00.000</span></div>
+            </div>
+
+            <div class="right">
+                <label style="color:var(--muted); font-size:0.85rem;">缩放</label>
+                <input type="range" id="zoom" min="1" max="32" value="1" step="0.1" />
+                <span class="hint" id="zoomLabel">x1.0</span>
+                <div class="status" id="status">准备就绪</div>
+            </div>
+        </div>
+
+        <div class="hints">
+            快捷键: <span class="kbd">Space</span> 播放/暂停 |
+            <span class="kbd">Ctrl/Alt</span> + 滚轮 缩放 |
+            <span class="kbd">+/-</span> 缩放 |
+            <span class="kbd">拖拽</span> 平移 |
+            <span class="kbd">滚轮</span> 横向滚动
+        </div>
+
+        <audio id="audio" preload="auto" style="display:none"></audio>
+    </div>
+
+    <script>
+        // @ts-nocheck
+        const PEAKS_RESOLUTION = 20000;
+
+        const audioInput = document.getElementById('audioInput');
+        const beatInput = document.getElementById('beatInput');
+        const audioNameEl = document.getElementById('audioName');
+        const loadingEl = document.getElementById('loading');
+
+        const canvas = document.getElementById('timeline');
+        const ctx = canvas.getContext('2d');
+        const scrollTrack = document.getElementById('scrollTrack');
+        const scrollThumb = document.getElementById('scrollThumb');
+
+        const zoomSlider = document.getElementById('zoom');
+        const zoomLabel = document.getElementById('zoomLabel');
+
+        const btnPlay = document.getElementById('btnPlay');
+        const btnStop = document.getElementById('btnStop');
+
+        const statusEl = document.getElementById('status');
+        const tNowEl = document.getElementById('tNow');
+        const tDurEl = document.getElementById('tDur');
+
+        const audio = document.getElementById('audio');
+
+        let audioContext = null;
+
+        /** peaks[i] = max abs amplitude in bucket */
+        let peaks = null;
+        let duration = 0;
+
+        let zoom = 1;
+        let offsetTime = 0;
+
+        let beats = [];
+
+        let isPanning = false;
+        let panStartX = 0;
+        let panStartOffset = 0;
+
+        let isDraggingThumb = false;
+        let thumbDragStartX = 0;
+        let thumbDragStartOffset = 0;
+
+        let rafId = 0;
+        let lastPlayedBeatIndex = -1;
+
+        function isTypingTarget(el) {
+            if (!el) return false;
+            const tag = String(el.tagName || '').toLowerCase();
+            return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
+        }
+
+        function formatTime(sec) {
+            if (!isFinite(sec) || sec < 0) sec = 0;
+            const m = Math.floor(sec / 60);
+            const s = sec - m * 60;
+            const sInt = Math.floor(s);
+            const ms = Math.floor((s - sInt) * 1000);
+            return `${m}:${String(sInt).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+        }
+
+        function ensureAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            return audioContext;
+        }
+
+        async function decodeAudio(arrayBuffer) {
+            const ac = ensureAudioContext();
+            return await ac.decodeAudioData(arrayBuffer.slice(0));
+        }
+
+        function computePeaks(audioBuffer) {
+            const channels = audioBuffer.numberOfChannels;
+            const length = audioBuffer.length;
+            const bucketSize = Math.max(1, Math.floor(length / PEAKS_RESOLUTION));
+            const out = new Float32Array(PEAKS_RESOLUTION);
+
+            const channelData = [];
+            for (let c = 0; c < channels; c++) channelData.push(audioBuffer.getChannelData(c));
+
+            for (let i = 0; i < PEAKS_RESOLUTION; i++) {
+                const start = i * bucketSize;
+                let end = start + bucketSize;
+                if (end > length) end = length;
+                let peak = 0;
+
+                for (let c = 0; c < channels; c++) {
+                    const data = channelData[c];
+                    for (let j = start; j < end; j++) {
+                        const v = Math.abs(data[j]);
+                        if (v > peak) peak = v;
+                    }
+                }
+
+                out[i] = peak;
+            }
+            return out;
+        }
+
+        function visibleDuration() {
+            if (duration <= 0) return 0;
+            return duration / Math.max(1e-6, zoom);
+        }
+
+        function clampOffset() {
+            if (duration <= 0) {
+                offsetTime = 0;
+                return;
+            }
+            const vis = visibleDuration();
+            const maxOffset = Math.max(0, duration - vis);
+            offsetTime = Math.min(Math.max(0, offsetTime), maxOffset);
+        }
+
+        function timeToX(t) {
+            const vis = visibleDuration();
+            if (vis <= 0) return 0;
+            return ((t - offsetTime) / vis) * canvas.width;
+        }
+
+        function xToTime(x) {
+            const vis = visibleDuration();
+            if (vis <= 0) return 0;
+            return offsetTime + (x / canvas.width) * vis;
+        }
+
+        function parseBeatCSV(text) {
+            const lines = text.split(/\r?\n/);
+            const newBeats = [];
+            for (let line of lines) {
+                line = line.trim();
+                if (!line) continue;
+                if (/^[a-zA-Z]/.test(line)) continue;
+                const parts = line.split(',');
+                if (parts.length < 2) continue;
+                const t = parseFloat(parts[0]);
+                const label = parts[1].trim();
+                if (isNaN(t)) continue;
+
+                let isDownBeat = false;
+                if (label.endsWith('.1') || label.endsWith('.0')) isDownBeat = true;
+
+                newBeats.push({
+                    time: t,
+                    label: label,
+                    isDownBeat: isDownBeat
+                });
+            }
+            newBeats.sort((a, b) => a.time - b.time);
+            return newBeats;
+        }
+
+        function clearBeats() {
+            beats = [];
+            lastPlayedBeatIndex = -1;
+        }
+
+        function updateThumb() {
+            if (duration <= 0) {
+                scrollThumb.style.width = '100%';
+                scrollThumb.style.transform = 'translateX(0)';
+                return;
+            }
+            const trackW = scrollTrack.clientWidth;
+            const vis = visibleDuration();
+            const ratio = Math.min(1, vis / duration);
+            const thumbW = Math.max(16, Math.floor(trackW * ratio));
+            const maxOffset = Math.max(0, duration - vis);
+            const xRatio = maxOffset > 0 ? (offsetTime / maxOffset) : 0;
+            const maxX = Math.max(0, trackW - thumbW);
+            const thumbX = Math.floor(maxX * xRatio);
+
+            scrollThumb.style.width = `${thumbW}px`;
+            scrollThumb.style.transform = `translateX(${thumbX}px)`;
+        }
+
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            const w = Math.max(1, Math.floor(rect.width * dpr));
+            const h = Math.max(1, Math.floor(rect.height * dpr));
+            if (canvas.width !== w || canvas.height !== h) {
+                canvas.width = w;
+                canvas.height = h;
+            }
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            drawTimeline();
+        }
+
+        function drawWaveform() {
+            if (!peaks || duration <= 0) return;
+
+            const w = canvas.width;
+            const h = canvas.height;
+            const midY = Math.floor(h * 0.55);
+            const amp = Math.floor(h * 0.35);
+
+            ctx.strokeStyle = 'rgba(180,180,180,0.75)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+
+            const vis = visibleDuration();
+            const t0 = offsetTime;
+            const t1 = offsetTime + vis;
+
+            // Map visible time range to peaks indices
+            const i0 = Math.max(0, Math.floor((t0 / duration) * PEAKS_RESOLUTION));
+            const i1 = Math.min(PEAKS_RESOLUTION - 1, Math.ceil((t1 / duration) * PEAKS_RESOLUTION));
+            const count = Math.max(1, i1 - i0);
+
+            for (let x = 0; x < w; x++) {
+                const u = x / (w - 1);
+                const idx = i0 + Math.floor(u * count);
+                const p = peaks[Math.min(PEAKS_RESOLUTION - 1, Math.max(0, idx))] || 0;
+                const yTop = midY - p * amp;
+                const yBot = midY + p * amp;
+                ctx.moveTo(x + 0.5, yTop);
+                ctx.lineTo(x + 0.5, yBot);
+            }
+            ctx.stroke();
+
+            // baseline
+            ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+            ctx.beginPath();
+            ctx.moveTo(0, midY + 0.5);
+            ctx.lineTo(w, midY + 0.5);
+            ctx.stroke();
+        }
+
+        function drawGridAndMarkers() {
+            if (duration <= 0) return;
+
+            const w = canvas.width;
+            const h = canvas.height;
+            const vis = visibleDuration();
+
+            const viewStart = offsetTime;
+            const viewEnd = offsetTime + vis;
+
+            ctx.font = `${Math.max(10, Math.floor(canvas.height * 0.045))}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = 'rgba(220,220,220,0.75)';
+
+            const pxPerSec = w / vis;
+            const showMinorLabels = pxPerSec > 60;
+
+            // Find start index
+            let startIndex = 0;
+            let low = 0, high = beats.length - 1;
+            while (low <= high) {
+                const mid = (low + high) >>> 1;
+                if (beats[mid].time < viewStart) {
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            startIndex = Math.max(0, high);
+
+            for (let i = startIndex; i < beats.length; i++) {
+                const beat = beats[i];
+                if (beat.time > viewEnd) break;
+                if (beat.time < viewStart - 1) continue;
+
+                const x = timeToX(beat.time);
+
+                ctx.lineWidth = 1;
+                ctx.setLineDash(beat.isDownBeat ? [] : [6, 6]);
+                ctx.strokeStyle = beat.isDownBeat ? 'rgba(0,255,255,0.85)' : 'rgba(0,255,255,0.30)';
+                ctx.beginPath();
+                ctx.moveTo(x + 0.5, 0);
+                ctx.lineTo(x + 0.5, h);
+                ctx.stroke();
+
+                if (beat.isDownBeat || showMinorLabels) {
+                    ctx.setLineDash([]);
+                    ctx.fillText(beat.label, x + 4, 6);
+                }
+            }
+            ctx.setLineDash([]);
+        }
+
+        function drawPlayhead() {
+            if (duration <= 0) return;
+            const t = audio.currentTime || 0;
+            if (t < offsetTime || t > offsetTime + visibleDuration()) return;
+
+            const x = timeToX(t);
+            ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x + 0.5, 0);
+            ctx.lineTo(x + 0.5, canvas.height);
+            ctx.stroke();
+        }
+
+        function drawTimeline() {
+            // background
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            clampOffset();
+            drawWaveform();
+            drawGridAndMarkers();
+            drawPlayhead();
+            updateThumb();
+        }
+
+        function setZoom(newZoom, anchorX = null) {
+            if (duration <= 0) return;
+
+            const oldVis = visibleDuration();
+            const clamped = Math.min(32, Math.max(1, newZoom));
+            if (!isFinite(clamped)) return;
+
+            if (anchorX == null) {
+                zoom = clamped;
+                clampOffset();
+                return;
+            }
+
+            const anchorTime = xToTime(anchorX);
+            zoom = clamped;
+            const newVis = visibleDuration();
+
+            // keep anchorTime under cursor
+            const u = anchorX / canvas.width;
+            offsetTime = anchorTime - u * newVis;
+            clampOffset();
+        }
+
+        function scrollBy(deltaSeconds) {
+            offsetTime += deltaSeconds;
+            clampOffset();
+        }
+
+        function playClick(isStrong) {
+            const ac = ensureAudioContext();
+            const osc = ac.createOscillator();
+            const gain = ac.createGain();
+            osc.connect(gain);
+            gain.connect(ac.destination);
+            const t0 = ac.currentTime;
+            osc.type = 'square';
+            osc.frequency.value = isStrong ? 1800 : 1100;
+            gain.gain.setValueAtTime(isStrong ? 0.28 : 0.18, t0);
+            gain.gain.exponentialRampToValueAtTime(0.001, t0 + (isStrong ? 0.06 : 0.05));
+            osc.start();
+            osc.stop(t0 + (isStrong ? 0.065 : 0.055));
+        }
+
+        function updateTimeUI() {
+            tNowEl.textContent = formatTime(audio.currentTime || 0);
+        }
+
+        function tick() {
+            updateTimeUI();
+
+            if (!audio.paused && beats.length > 0) {
+                const t = audio.currentTime || 0;
+                let startSearch = (lastPlayedBeatIndex < 0) ? 0 : lastPlayedBeatIndex;
+
+                // If we seeked backwards
+                if (beats.length > 0 && startSearch < beats.length && beats[startSearch].time > t) {
+                    startSearch = 0;
+                }
+
+                for (let i = startSearch; i < beats.length; i++) {
+                    const b = beats[i];
+                    if (b.time > t) break;
+
+                    if (i > lastPlayedBeatIndex) {
+                        playClick(b.isDownBeat);
+                        lastPlayedBeatIndex = i;
+                    }
+                }
+            }
+
+            drawTimeline();
+            if (!audio.paused) rafId = requestAnimationFrame(tick);
+        }
+
+        function startRaf() {
+            if (rafId) cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(tick);
+        }
+
+        function stopRaf() {
+            if (rafId) cancelAnimationFrame(rafId);
+            rafId = 0;
+            drawTimeline();
+        }
+
+        // --- Events ---
+
+        window.addEventListener('resize', resizeCanvas);
+
+        zoomSlider.addEventListener('input', () => {
+            setZoom(Number.parseFloat(zoomSlider.value), null);
+            zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+            drawTimeline();
+        });
+
+        btnPlay.addEventListener('click', async () => {
+            try { ensureAudioContext().resume?.(); } catch { }
+            if (audio.paused) {
+                await audio.play();
+            } else {
+                audio.pause();
+            }
+        });
+
+        btnStop.addEventListener('click', () => {
+            audio.pause();
+            audio.currentTime = 0;
+            lastPlayedBeatIndex = -1;
+            updateTimeUI();
+            drawTimeline();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (isTypingTarget(e.target)) return;
+
+            if (e.code === 'Space') {
+                e.preventDefault();
+                btnPlay.click();
+                return;
+            }
+
+            const zoomCenterX = canvas.width ? canvas.width * 0.5 : null;
+            if (e.code === 'Equal' || e.key === '+') {
+                e.preventDefault();
+                setZoom(zoom * 1.12, zoomCenterX);
+                zoomSlider.value = String(zoom.toFixed(2));
+                zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+                drawTimeline();
+                return;
+            }
+            if (e.code === 'Minus' || e.key === '-') {
+                e.preventDefault();
+                setZoom(zoom / 1.12, zoomCenterX);
+                zoomSlider.value = String(zoom.toFixed(2));
+                zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+                drawTimeline();
+                return;
+            }
+        });
+
+        audio.addEventListener('play', () => {
+            btnPlay.textContent = '⏸';
+            const t = audio.currentTime || 0;
+            lastPlayedBeatIndex = -1;
+            for (let i = 0; i < beats.length; i++) {
+                if (beats[i].time <= t) lastPlayedBeatIndex = i;
+                else break;
+            }
+            startRaf();
+        });
+
+        audio.addEventListener('pause', () => {
+            btnPlay.textContent = '⏵';
+            stopRaf();
+        });
+
+        audio.addEventListener('seeking', () => {
+            const t = audio.currentTime || 0;
+            lastPlayedBeatIndex = -1;
+            for (let i = 0; i < beats.length; i++) {
+                if (beats[i].time <= t) lastPlayedBeatIndex = i;
+                else break;
+            }
+            drawTimeline();
+        });
+
+        // Canvas interactions
+        canvas.addEventListener('mousedown', (e) => {
+            if (duration <= 0) return;
+            isPanning = true;
+            panStartX = e.clientX;
+            panStartOffset = offsetTime;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isPanning) return;
+            const rect = canvas.getBoundingClientRect();
+            const dxCss = e.clientX - panStartX;
+            const dx = dxCss * (canvas.width / rect.width);
+            const vis = visibleDuration();
+            const dt = -(dx / canvas.width) * vis;
+            offsetTime = panStartOffset + dt;
+            clampOffset();
+            drawTimeline();
+        });
+
+        window.addEventListener('mouseup', () => {
+            isPanning = false;
+        });
+
+        canvas.addEventListener('click', (e) => {
+            if (duration <= 0) return;
+            const rect = canvas.getBoundingClientRect();
+            const xCss = e.clientX - rect.left;
+            const x = xCss * (canvas.width / rect.width);
+            const t = xToTime(x);
+
+            // normal seek
+            audio.currentTime = Math.min(Math.max(0, t), duration);
+            updateTimeUI();
+            drawTimeline();
+        });
+
+        // Wheel: Ctrl/Alt zoom at mouse, otherwise horizontal scroll
+        canvas.addEventListener('wheel', (e) => {
+            if (duration <= 0) return;
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const xCss = e.clientX - rect.left;
+            const x = xCss * (canvas.width / rect.width);
+
+            const zoomMode = e.ctrlKey || e.altKey;
+            if (zoomMode) {
+                const direction = Math.sign(e.deltaY);
+                const factor = direction > 0 ? 1 / 1.12 : 1.12;
+                setZoom(zoom * factor, x);
+                zoomSlider.value = String(zoom.toFixed(2));
+                zoomLabel.textContent = `x${zoom.toFixed(1)}`;
+                drawTimeline();
+                return;
+            }
+
+            // horizontal scroll
+            const vis = visibleDuration();
+            const delta = (e.shiftKey ? e.deltaY : e.deltaX) || e.deltaY;
+            const dt = (delta / 800) * vis;
+            scrollBy(dt);
+            drawTimeline();
+        }, { passive: false });
+
+        // Scrollbar thumb drag
+        scrollThumb.addEventListener('mousedown', (e) => {
+            if (duration <= 0) return;
+            e.preventDefault();
+            isDraggingThumb = true;
+            thumbDragStartX = e.clientX;
+            thumbDragStartOffset = offsetTime;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDraggingThumb) return;
+            const trackW = scrollTrack.clientWidth;
+            const thumbW = scrollThumb.getBoundingClientRect().width;
+            const maxX = Math.max(1, trackW - thumbW);
+            const dx = e.clientX - thumbDragStartX;
+            const ratio = dx / maxX;
+
+            const vis = visibleDuration();
+            const maxOffset = Math.max(0, duration - vis);
+            offsetTime = thumbDragStartOffset + ratio * maxOffset;
+            clampOffset();
+            drawTimeline();
+        });
+
+        window.addEventListener('mouseup', () => {
+            isDraggingThumb = false;
+        });
+
+        // Click on track to jump
+        scrollTrack.addEventListener('mousedown', (e) => {
+            if (duration <= 0) return;
+            if (e.target === scrollThumb) return;
+            const trackRect = scrollTrack.getBoundingClientRect();
+            const trackW = trackRect.width;
+            const thumbW = scrollThumb.getBoundingClientRect().width;
+            const maxX = Math.max(1, trackW - thumbW);
+            const x = e.clientX - trackRect.left - thumbW / 2;
+            const clampedX = Math.min(Math.max(0, x), maxX);
+            const ratio = clampedX / maxX;
+
+            const vis = visibleDuration();
+            const maxOffset = Math.max(0, duration - vis);
+            offsetTime = ratio * maxOffset;
+            clampOffset();
+            drawTimeline();
+        });
+
+        // File loading
+        audioInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            loadingEl.style.display = 'flex';
+            statusEl.textContent = '正在加载音频...';
+
+            try {
+                audioNameEl.textContent = file.name;
+                audio.src = URL.createObjectURL(file);
+                audio.currentTime = 0;
+
+                const ab = await file.arrayBuffer();
+                const buf = await decodeAudio(ab);
+                duration = buf.duration;
+                tDurEl.textContent = formatTime(duration);
+
+                peaks = computePeaks(buf);
+
+                zoom = 1;
+                offsetTime = 0;
+                zoomSlider.value = '1';
+                zoomLabel.textContent = 'x1.0';
+
+                clampOffset();
+                updateThumb();
+
+                btnPlay.disabled = false;
+                btnStop.disabled = false;
+
+                statusEl.textContent = '音频已加载';
+
+                updateTimeUI();
+                resizeCanvas();
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = '加载失败';
+                alert('音频解析失败');
+            } finally {
+                loadingEl.style.display = 'none';
+            }
+        });
+
+        beatInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            statusEl.textContent = '正在加载 Beat...';
+            try {
+                const text = await file.text();
+                beats = parseBeatCSV(text);
+                statusEl.textContent = `已加载 Beat: ${beats.length} 个`;
+                drawTimeline();
+            } catch (e) {
+                alert('Beat 文件解析失败');
+                console.error(e);
+            }
+        });
+
+        // init
+        zoomLabel.textContent = 'x1.0';
+        tNowEl.textContent = formatTime(0);
+        tDurEl.textContent = formatTime(0);
+        resizeCanvas();
+        drawTimeline();
+    </script>
+</body>
+
+</html>

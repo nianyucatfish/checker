@@ -52,6 +52,13 @@
             min-width: 100px;
         }
 
+        .right-controls {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
         button {
             font-size: 14px;
             font-weight: 600;
@@ -208,6 +215,59 @@
             border-color: #ffc107;
         }
 
+        .btn-move-mode.active {
+            background: #0d6efd;
+            color: #fff;
+            border-color: #0d6efd;
+        }
+
+        .track-offset {
+            font-size: 11px;
+            color: #6c757d;
+            line-height: 1.2;
+            margin-top: 4px;
+        }
+
+        .btn-reset-offset {
+            padding: 2px 0;
+            font-size: 11px;
+            border-radius: 4px;
+            border: 1px solid #ced4da;
+            background: #fff;
+            color: #495057;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 4px;
+        }
+
+        .btn-reset-offset:hover {
+            background: #e9ecef;
+        }
+
+        .compare-track-row {
+            display: flex;
+            margin-bottom: 10px;
+        }
+
+        .compare-track-row.show {
+            display: flex;
+        }
+
+        .compare-select {
+            width: 100%;
+            font-size: 11px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            background: #fff;
+            color: #495057;
+            padding: 2px 4px;
+        }
+
+        .compare-wave {
+            display: block;
+            background: #fff;
+        }
+
         /* Right: Timeline / Canvas */
         .track-timeline {
             flex: 1;
@@ -224,6 +284,32 @@
             left: 0;
             /* width will be set by canvas */
             will-change: transform;
+        }
+
+        .clip-box {
+            position: absolute;
+            top: 0;
+            border: 1px solid rgba(33, 150, 243, 0.7);
+            background: rgba(33, 150, 243, 0.08);
+            border-radius: 4px;
+            cursor: grab;
+            box-sizing: border-box;
+        }
+
+        .clip-box.dragging {
+            cursor: grabbing;
+            background: rgba(33, 150, 243, 0.15);
+            border-color: rgba(33, 150, 243, 0.9);
+        }
+
+        .clip-box.drum {
+            border-color: rgba(156, 39, 176, 0.7);
+            background: rgba(156, 39, 176, 0.08);
+        }
+
+        .clip-box.drum.dragging {
+            border-color: rgba(156, 39, 176, 0.9);
+            background: rgba(156, 39, 176, 0.15);
         }
 
         canvas {
@@ -258,6 +344,7 @@
     </style>
 
     <script src="https://cdn.jsdelivr.net/npm/@magenta/music@1.23.1/dist/magentamusic.min.js"></script>
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
 
 <body>
@@ -279,7 +366,11 @@
                 </button>
             </div>
 
-            <div id="status">等待加载 MIDI...</div>
+            <div class="right-controls">
+                <button id="moveModeBtn" class="btn-mini btn-move-mode" style="width: 96px;" disabled>移动模式:关</button>
+                <button id="exportBtn" class="btn-mini" style="width: 92px;" disabled>保存MIDI</button>
+                <div id="status">等待加载 MIDI...</div>
+            </div>
         </div>
 
         <div id="timeline-scrollbar-container">
@@ -287,6 +378,26 @@
         </div>
 
         <div id="tracks-scroll-area">
+            <div id="compare-track-row" class="track-row compare-track-row">
+                <div class="track-sidebar">
+                    <div class="track-name">🎧 WAV 对照</div>
+                    <div class="track-controls">
+                        <button id="compareMuteBtn" class="btn-mini btn-mute">M</button>
+                        <button id="compareSoloBtn" class="btn-mini btn-solo">S</button>
+                    </div>
+                    <select id="compareWavSelect" class="compare-select"></select>
+                </div>
+                <div class="track-vscroll" style="cursor: default;">
+                    <div class="vscroll-spacer" style="height: 56px;"></div>
+                </div>
+                <div id="compareTimeline" class="track-timeline">
+                    <div id="compareCanvasContent" class="canvas-content">
+                        <canvas id="compareWaveCanvas" class="compare-wave" height="56"></canvas>
+                    </div>
+                    <div id="comparePlayhead" class="playhead"></div>
+                </div>
+            </div>
+
             <div id="tracks-container">
                 <div style="padding: 40px; text-align: center; color: #999;">
                     请从左侧文件树选择 MIDI 文件...
@@ -306,8 +417,29 @@
         let startTime = 0;
         let pauseOffset = 0;
         let totalDuration = 0;
+        let totalDurationForDisplay = 0;
+        let exportBridge = null;
+        let defaultExportFilename = "export_修改.mid";
+        let isMoveMode = false;
+        let compareAudioEl = null;
+        let compareAudioUrl = null;
+        let compareAudioDuration = 0;
+        let compareWaveReady = false;
+        let compareTrackLoaded = false;
+        let compareMuted = false;
+        let compareSoloed = false;
 
         const PIXELS_PER_STEP = 50;
+        const DRAG_PIXEL_THRESHOLD = 3;
+
+        const compareTrackRow = document.getElementById('compare-track-row');
+        const compareWavSelect = document.getElementById('compareWavSelect');
+        const compareMuteBtn = document.getElementById('compareMuteBtn');
+        const compareSoloBtn = document.getElementById('compareSoloBtn');
+        const compareTimeline = document.getElementById('compareTimeline');
+        const compareCanvasContent = document.getElementById('compareCanvasContent');
+        const compareWaveCanvas = document.getElementById('compareWaveCanvas');
+        const comparePlayhead = document.getElementById('comparePlayhead');
 
         // GM Instruments Map
         const GM_INSTRUMENTS = {
@@ -322,6 +454,12 @@
             try {
                 player = new mm.SoundFontPlayer('https://storage.googleapis.com/magentadata/js/soundfonts/sgm_plus');
                 console.log("Player initialized");
+
+                if (window.qt && window.QWebChannel) {
+                    new QWebChannel(qt.webChannelTransport, (channel) => {
+                        exportBridge = channel.objects.midiExportBridge || null;
+                    });
+                }
             } catch (e) {
                 status.innerText = "初始化失败: " + e.message;
                 status.classList.add('error');
@@ -330,12 +468,58 @@
             // Sync Scroll
             const scrollBar = document.getElementById('timeline-scrollbar-container');
             scrollBar.addEventListener('scroll', () => {
-                const left = scrollBar.scrollLeft;
-                document.querySelectorAll('.track-timeline').forEach(el => {
-                    el.scrollLeft = left;
-                });
+                updateTrackViewportTransforms();
+                const currentShown = isPlaying
+                    ? Math.min(mm.Player.tone.context.currentTime - startTime, totalDurationForDisplay)
+                    : Math.min(pauseOffset, totalDurationForDisplay);
+                updatePlayheads(currentShown);
+            });
+
+            compareWavSelect.addEventListener('change', async () => {
+                const name = compareWavSelect.value;
+                if (!name) return;
+                await loadCompareWavByName(name);
+            });
+
+            compareMuteBtn.addEventListener('click', () => {
+                compareMuted = !compareMuted;
+                compareMuteBtn.classList.toggle('active', compareMuted);
+                if (compareMuted) {
+                    pauseCompareAudio();
+                } else if (isPlaying) {
+                    const current = Math.min(mm.Player.tone.context.currentTime - startTime, totalDurationForDisplay);
+                    startCompareAudio(current);
+                }
+            });
+
+            compareSoloBtn.addEventListener('click', () => {
+                compareSoloed = !compareSoloed;
+                compareSoloBtn.classList.toggle('active', compareSoloed);
+                if (isPlaying) {
+                    const current = Math.min(mm.Player.tone.context.currentTime - startTime, totalDurationForDisplay);
+                    startPlayback(current);
+                }
+            });
+
+            compareTimeline.addEventListener('click', (e) => {
+                if (!currentSequence) return;
+
+                const rect = compareTimeline.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const scrollLeft = getTimelineScrollLeft();
+                const absoluteX = clickX + scrollLeft;
+                const targetTime = absoluteX / PIXELS_PER_STEP;
+
+                if (targetTime >= 0 && targetTime <= totalDurationForDisplay) {
+                    seekTo(targetTime);
+                }
             });
         }
+
+        window.setExportDefaultFilename = function (filename) {
+            if (!filename || typeof filename !== 'string') return;
+            defaultExportFilename = filename;
+        };
 
         // --- Core Logic ---
 
@@ -365,17 +549,35 @@
                         isDrum: isDrum,
                         muted: false,
                         soloed: false,
-                        instId: instId // for sorting
+                        instId: instId,
+                        offsetSeconds: 0,
+                        minStart: Number.POSITIVE_INFINITY,
+                        maxEnd: 0,
+                        dom: null
                     });
                 }
-                map.get(key).notes.push(n);
+                const track = map.get(key);
+                track.notes.push(n);
+                if (n.startTime < track.minStart) track.minStart = n.startTime;
+                if (n.endTime > track.maxEnd) track.maxEnd = n.endTime;
             });
 
             // Sort by Channel then Program
-            return Array.from(map.values()).sort((a, b) => {
+            const trackList = Array.from(map.values()).sort((a, b) => {
                 if (a.instId !== b.instId) return a.instId - b.instId;
                 return a.program - b.program;
             });
+
+            trackList.forEach(track => {
+                if (!Number.isFinite(track.minStart)) {
+                    track.minStart = 0;
+                    track.maxEnd = 0;
+                }
+                track.clipDuration = Math.max(track.maxEnd - track.minStart, 0.001);
+                track.notes = track.notes.map(n => ({ ...n }));
+            });
+
+            return trackList;
         }
 
         function renderTracks() {
@@ -393,13 +595,17 @@
                             <button class="btn-mini btn-mute">M</button>
                             <button class="btn-mini btn-solo">S</button>
                         </div>
+                        <div class="track-offset">偏移: +0.00s</div>
+                        <button class="btn-reset-offset">重置偏移</button>
                     </div>
                     <div class="track-vscroll">
                         <div class="vscroll-spacer"></div>
                     </div>
                     <div class="track-timeline">
                         <div class="canvas-content">
-                            <canvas></canvas>
+                            <div class="clip-box ${t.isDrum ? 'drum' : ''}">
+                                <canvas></canvas>
+                            </div>
                         </div>
                         <div class="playhead"></div>
                     </div>
@@ -411,10 +617,13 @@
                 t.dom = {
                     row: row,
                     canvas: row.querySelector('canvas'),
+                    clipBox: row.querySelector('.clip-box'),
                     canvasContent: row.querySelector('.canvas-content'),
                     playhead: row.querySelector('.playhead'),
                     muteBtn: row.querySelector('.btn-mute'),
                     soloBtn: row.querySelector('.btn-solo'),
+                    resetOffsetBtn: row.querySelector('.btn-reset-offset'),
+                    offsetLabel: row.querySelector('.track-offset'),
                     timeline: row.querySelector('.track-timeline'),
                     vscroll: row.querySelector('.track-vscroll'),
                     vscrollSpacer: row.querySelector('.vscroll-spacer')
@@ -423,18 +632,25 @@
                 // Bind Events
                 t.dom.muteBtn.onclick = () => toggleMute(t);
                 t.dom.soloBtn.onclick = () => toggleSolo(t);
-                t.dom.timeline.onclick = (e) => handleSeek(e, t.dom.timeline);
+                t.dom.resetOffsetBtn.onclick = () => resetTrackOffset(t);
+                t.dom.timeline.onclick = (e) => handleSeek(e, t);
+                bindTrackDrag(t);
+                t.dom.muteBtn.classList.toggle('active', !!t.muted);
+                t.dom.soloBtn.classList.toggle('active', !!t.soloed);
 
                 // Vertical Scroll Sync
                 t.dom.vscroll.onscroll = () => {
-                    const top = t.dom.vscroll.scrollTop;
-                    t.dom.canvasContent.style.transform = `translateY(-${top}px)`;
+                    applyTrackViewportTransform(t);
                 };
 
                 // Visualize
                 const trackSeq = {
-                    notes: t.notes,
-                    totalTime: totalDuration
+                    notes: t.notes.map(n => ({
+                        ...n,
+                        startTime: n.startTime - t.minStart,
+                        endTime: n.endTime - t.minStart
+                    })),
+                    totalTime: t.clipDuration
                 };
 
                 // Use PianoRollCanvasVisualizer
@@ -449,17 +665,373 @@
                 // We need to wait for the canvas to be sized.
                 // Magenta visualizer resizes canvas immediately in constructor.
                 const canvasHeight = t.dom.canvas.height;
+                t.dom.clipBox.style.height = canvasHeight + 'px';
                 t.dom.vscrollSpacer.style.height = canvasHeight + 'px';
+                t.dom.clipBox.style.width = (t.clipDuration * PIXELS_PER_STEP) + 'px';
+                updateTrackOffsetUI(t);
+                updateTrackClipPosition(t);
+                applyTrackViewportTransform(t);
 
                 // Center the view initially if it's too tall? 
                 // Or just start at top. Let's start at top.
                 // If we want to center on notes, we'd need to calculate average pitch.
             });
 
-            // Update Scrollbar
+            updateTimelineMetrics();
+        }
+
+        function getTimelineScrollLeft() {
+            const scrollBar = document.getElementById('timeline-scrollbar-container');
+            return scrollBar.scrollLeft;
+        }
+
+        function applyTrackViewportTransform(track) {
+            const left = getTimelineScrollLeft();
+            const top = track.dom.vscroll.scrollTop;
+            track.dom.canvasContent.style.transform = `translate(${-left}px, -${top}px)`;
+        }
+
+        function updateTrackViewportTransforms() {
+            tracks.forEach(t => applyTrackViewportTransform(t));
+            applyCompareViewportTransform();
+        }
+
+        function applyCompareViewportTransform() {
+            const left = getTimelineScrollLeft();
+            compareCanvasContent.style.transform = `translate(${-left}px, 0px)`;
+        }
+
+        async function ensureCompareTrackLoaded() {
+            if (compareTrackLoaded) return;
+            if (!exportBridge || typeof exportBridge.getCompareWavList !== 'function') {
+                statusLabel.innerText = '未连接到分轨WAV桥接';
+                return;
+            }
+
+            const payloadText = await new Promise((resolve) => {
+                exportBridge.getCompareWavList(resolve);
+            });
+
+            let payload = {};
+            try {
+                payload = JSON.parse(payloadText || '{}');
+            } catch {
+                payload = {};
+            }
+
+            const files = Array.isArray(payload.files) ? payload.files : [];
+            compareWavSelect.innerHTML = '';
+
+            if (!files.length) {
+                statusLabel.innerText = '未找到分轨WAV文件';
+                compareTrackLoaded = true;
+                return;
+            }
+
+            files.forEach(name => {
+                const option = document.createElement('option');
+                option.value = name;
+                option.innerText = name;
+                compareWavSelect.appendChild(option);
+            });
+
+            const defaultName = payload.default && files.includes(payload.default)
+                ? payload.default
+                : files[0];
+            compareWavSelect.value = defaultName;
+            compareTrackLoaded = true;
+            await loadCompareWavByName(defaultName);
+        }
+
+        async function loadCompareWavByName(filename) {
+            if (!exportBridge || typeof exportBridge.getCompareWavBase64 !== 'function') return;
+
+            statusLabel.innerText = `加载对照WAV: ${filename}`;
+            const payloadText = await new Promise((resolve) => {
+                exportBridge.getCompareWavBase64(filename, resolve);
+            });
+
+            let payload = {};
+            try {
+                payload = JSON.parse(payloadText || '{}');
+            } catch {
+                payload = {};
+            }
+
+            if (!payload.ok || !payload.data) {
+                statusLabel.innerText = `对照WAV加载失败: ${payload.error || '未知错误'}`;
+                return;
+            }
+
+            const wavBytes = base64ToUint8Array(payload.data);
+            const wavBlob = new Blob([wavBytes], { type: payload.mime || 'audio/wav' });
+            const url = URL.createObjectURL(wavBlob);
+
+            if (compareAudioUrl) {
+                URL.revokeObjectURL(compareAudioUrl);
+            }
+            compareAudioUrl = url;
+
+            if (!compareAudioEl) {
+                compareAudioEl = new Audio();
+                compareAudioEl.preload = 'auto';
+            }
+
+            compareAudioEl.src = compareAudioUrl;
+            compareAudioEl.currentTime = Math.min(pauseOffset, compareAudioEl.duration || pauseOffset || 0);
+
+            await decodeAndRenderCompareWave(wavBytes);
+
+            if (isMoveMode && isPlaying) {
+                startCompareAudio(mm.Player.tone.context.currentTime - startTime);
+            }
+        }
+
+        async function decodeAndRenderCompareWave(wavBytes) {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) {
+                compareWaveReady = false;
+                compareAudioDuration = 0;
+                statusLabel.innerText = '当前环境不支持波形解码';
+                return;
+            }
+
+            const ctx = new AudioCtx();
+            const arr = wavBytes.buffer.slice(wavBytes.byteOffset, wavBytes.byteOffset + wavBytes.byteLength);
+
+            try {
+                const audioBuffer = await ctx.decodeAudioData(arr.slice(0));
+                compareAudioDuration = audioBuffer.duration || 0;
+                renderCompareWave(audioBuffer);
+                compareWaveReady = true;
+                updateTimelineMetrics();
+                updateTrackViewportTransforms();
+            } catch (e) {
+                compareWaveReady = false;
+                compareAudioDuration = 0;
+                statusLabel.innerText = `波形解码失败: ${e.message || e}`;
+            } finally {
+                ctx.close();
+            }
+        }
+
+        function renderCompareWave(audioBuffer) {
+            const duration = audioBuffer.duration || 0;
+            const width = Math.max(1, Math.ceil(duration * PIXELS_PER_STEP));
+            const height = compareWaveCanvas.height || 56;
+
+            compareWaveCanvas.width = width;
+            compareWaveCanvas.height = height;
+
+            const context = compareWaveCanvas.getContext('2d');
+            context.clearRect(0, 0, width, height);
+            context.fillStyle = '#ffffff';
+            context.fillRect(0, 0, width, height);
+
+            const channelData = audioBuffer.getChannelData(0);
+            const step = Math.max(1, Math.floor(channelData.length / width));
+            const half = height / 2;
+
+            context.strokeStyle = '#6c757d';
+            context.lineWidth = 1;
+            context.beginPath();
+            context.moveTo(0, half);
+            context.lineTo(width, half);
+            context.stroke();
+
+            context.strokeStyle = '#198754';
+            context.beginPath();
+            for (let x = 0; x < width; x++) {
+                const start = x * step;
+                const end = Math.min(channelData.length, start + step);
+                let min = 1;
+                let max = -1;
+                for (let i = start; i < end; i++) {
+                    const v = channelData[i];
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                }
+                context.moveTo(x, half + min * half * 0.9);
+                context.lineTo(x, half + max * half * 0.9);
+            }
+            context.stroke();
+        }
+
+        function startCompareAudio(offsetSeconds = 0) {
+            if (!compareAudioEl || compareMuted) return;
+            try {
+                compareAudioEl.currentTime = Math.max(0, Math.min(offsetSeconds, compareAudioEl.duration || offsetSeconds));
+                compareAudioEl.play().catch(() => { });
+            } catch {
+            }
+        }
+
+        function pauseCompareAudio() {
+            if (!compareAudioEl) return;
+            compareAudioEl.pause();
+        }
+
+        function stopCompareAudio() {
+            if (!compareAudioEl) return;
+            compareAudioEl.pause();
+            compareAudioEl.currentTime = 0;
+        }
+
+        function setMoveMode(enabled) {
+            isMoveMode = !!enabled;
+            moveModeBtn.classList.toggle('active', isMoveMode);
+            moveModeBtn.innerText = isMoveMode ? '移动模式:开' : '移动模式:关';
+            tracks.forEach(t => {
+                if (!t.dom || !t.dom.clipBox) return;
+                t.dom.clipBox.style.cursor = isMoveMode ? 'grab' : 'default';
+            });
+
+            if (isPlaying) {
+                const current = Math.min(mm.Player.tone.context.currentTime - startTime, totalDurationForDisplay);
+                if (compareMuted) {
+                    pauseCompareAudio();
+                } else {
+                    startCompareAudio(current);
+                }
+            }
+
+            updateTimelineMetrics();
+            updateTrackViewportTransforms();
+            updatePlayheads(Math.min(pauseOffset, totalDurationForDisplay));
+        }
+
+        function bindTrackDrag(track) {
+            const clipBox = track.dom.clipBox;
+            let dragging = false;
+            let startX = 0;
+            let startOffset = 0;
+            let playedBeforeDrag = false;
+            let moved = false;
+
+            clipBox.addEventListener('pointerdown', (e) => {
+                if (e.button !== 0) return;
+                if (!isMoveMode) return;
+                dragging = true;
+                moved = false;
+                startX = e.clientX;
+                startOffset = track.offsetSeconds || 0;
+                playedBeforeDrag = isPlaying;
+                if (isPlaying) pausePlayback();
+                clipBox.classList.add('dragging');
+                clipBox.setPointerCapture(e.pointerId);
+                e.preventDefault();
+                e.stopPropagation();
+            });
+
+            clipBox.addEventListener('pointermove', (e) => {
+                if (!dragging) return;
+                const deltaX = e.clientX - startX;
+                if (Math.abs(deltaX) > DRAG_PIXEL_THRESHOLD) moved = true;
+                const deltaSeconds = deltaX / PIXELS_PER_STEP;
+                const minOffset = -track.minStart;
+                const newOffset = Math.max(minOffset, startOffset + deltaSeconds);
+                setTrackOffset(track, newOffset, true);
+            });
+
+            const stopDrag = () => {
+                if (!dragging) return;
+                dragging = false;
+                clipBox.classList.remove('dragging');
+                track.suppressNextSeekClick = moved;
+                if (playedBeforeDrag) startPlayback(pauseOffset);
+            };
+
+            clipBox.addEventListener('pointerup', stopDrag);
+            clipBox.addEventListener('pointercancel', stopDrag);
+        }
+
+        function setTrackOffset(track, offsetSeconds, fromDrag = false) {
+            const rounded = Math.round(offsetSeconds * 1000) / 1000;
+            track.offsetSeconds = rounded;
+            updateTrackOffsetUI(track);
+            updateTrackClipPosition(track);
+            updateTimelineMetrics();
+            if (!fromDrag && isPlaying) restartPlayback();
+        }
+
+        function resetTrackOffset(track) {
+            setTrackOffset(track, 0);
+        }
+
+        function resetAllTrackOffsets() {
+            tracks.forEach(track => {
+                track.offsetSeconds = 0;
+                updateTrackOffsetUI(track);
+                updateTrackClipPosition(track);
+            });
+            updateTimelineMetrics();
+            updateTrackViewportTransforms();
+            updatePlayheads(Math.min(pauseOffset, totalDurationForDisplay));
+        }
+
+        function commitOffsetsToCurrentState() {
+            const shiftedSeq = normalizeSequenceForExport(getShiftedFullSequence());
+            const oldState = new Map();
+            tracks.forEach(t => {
+                oldState.set(t.id, { muted: !!t.muted, soloed: !!t.soloed });
+            });
+
+            currentSequence = JSON.parse(JSON.stringify(shiftedSeq));
+            tracks = processTracks(currentSequence);
+            tracks.forEach(t => {
+                const state = oldState.get(t.id);
+                if (state) {
+                    t.muted = state.muted;
+                    t.soloed = state.soloed;
+                }
+            });
+
+            renderTracks();
+            pauseOffset = Math.min(pauseOffset, totalDurationForDisplay);
+            tracks.forEach(t => {
+                t.dom.playhead.style.display = 'block';
+            });
+            updatePlayheads(pauseOffset);
+            updateTimeLabel(pauseOffset);
+        }
+
+        function updateTrackOffsetUI(track) {
+            const sign = track.offsetSeconds >= 0 ? '+' : '';
+            track.dom.offsetLabel.innerText = `偏移: ${sign}${track.offsetSeconds.toFixed(2)}s`;
+        }
+
+        function updateTrackClipPosition(track) {
+            const leftSeconds = track.minStart + track.offsetSeconds;
+            track.dom.clipBox.style.left = (leftSeconds * PIXELS_PER_STEP) + 'px';
+        }
+
+        function getTrackShiftedNotes(track) {
+            return track.notes.map(n => ({
+                ...n,
+                startTime: n.startTime + track.offsetSeconds,
+                endTime: n.endTime + track.offsetSeconds
+            }));
+        }
+
+        function updateTimelineMetrics() {
+            let maxEnd = 0;
+            tracks.forEach(t => {
+                const end = t.maxEnd + t.offsetSeconds;
+                if (end > maxEnd) maxEnd = end;
+            });
+            if (compareWaveReady && compareAudioDuration > maxEnd) {
+                maxEnd = compareAudioDuration;
+            }
+            totalDuration = Math.max(maxEnd, 0);
+            totalDurationForDisplay = totalDuration;
+
             const scrollContent = document.getElementById('timeline-scroll-content');
-            const width = totalDuration * PIXELS_PER_STEP;
+            const width = Math.max(totalDuration * PIXELS_PER_STEP + 120, 800);
             scrollContent.style.width = width + 'px';
+
+            const currentShown = Math.min(pauseOffset, totalDurationForDisplay);
+            updateTimeLabel(currentShown);
+            updatePlayheads(currentShown);
         }
 
         function toggleMute(track) {
@@ -494,12 +1066,15 @@
             }
 
             const notes = [];
-            activeTracks.forEach(t => notes.push(...t.notes));
+            activeTracks.forEach(t => notes.push(...getTrackShiftedNotes(t)));
+            notes.sort((a, b) => a.startTime - b.startTime);
+
+            const maxEnd = notes.reduce((acc, n) => Math.max(acc, n.endTime), 0);
 
             // Return a new sequence object
             return {
                 notes: notes,
-                totalTime: totalDuration,
+                totalTime: maxEnd,
                 tempos: currentSequence.tempos,
                 timeSignatures: currentSequence.timeSignatures
             };
@@ -509,6 +1084,8 @@
 
         const playBtn = document.getElementById('playBtn');
         const stopBtn = document.getElementById('stopBtn');
+        const moveModeBtn = document.getElementById('moveModeBtn');
+        const exportBtn = document.getElementById('exportBtn');
         const timeLabel = document.getElementById('timeLabel');
         const statusLabel = document.getElementById('status');
 
@@ -522,18 +1099,31 @@
             stopPlayback();
         });
 
-        function handleSeek(e, timelineEl) {
+        moveModeBtn.addEventListener('click', () => {
+            setMoveMode(!isMoveMode);
+        });
+
+        exportBtn.addEventListener('click', async () => {
+            await exportShiftedMidi();
+        });
+
+        function handleSeek(e, track) {
             if (!currentSequence) return;
+            if (track.suppressNextSeekClick) {
+                track.suppressNextSeekClick = false;
+                return;
+            }
+            const timelineEl = track.dom.timeline;
 
             // Calculate time based on click position + scroll
             const rect = timelineEl.getBoundingClientRect();
             const clickX = e.clientX - rect.left;
-            const scrollLeft = timelineEl.scrollLeft;
+            const scrollLeft = getTimelineScrollLeft();
             const absoluteX = clickX + scrollLeft;
 
             const targetTime = absoluteX / PIXELS_PER_STEP;
 
-            if (targetTime >= 0 && targetTime <= totalDuration) {
+            if (targetTime >= 0 && targetTime <= totalDurationForDisplay) {
                 seekTo(targetTime);
             }
         }
@@ -543,6 +1133,12 @@
             if (wasPlaying) pausePlayback(); // Pause temporarily
 
             pauseOffset = seconds;
+            if (!wasPlaying && compareAudioEl) {
+                try {
+                    compareAudioEl.currentTime = Math.max(0, Math.min(seconds, compareAudioEl.duration || seconds));
+                } catch {
+                }
+            }
             updatePlayheads(seconds);
             updateTimeLabel(seconds);
 
@@ -551,28 +1147,44 @@
 
         function restartPlayback() {
             // Called when Mute/Solo changes
-            const current = mm.Player.tone.context.currentTime - startTime;
+            const current = Math.min(mm.Player.tone.context.currentTime - startTime, totalDurationForDisplay);
             startPlayback(current);
         }
 
         async function startPlayback(offsetSeconds = 0) {
             if (player.isPlaying()) player.stop();
 
-            const seq = getPlayableSequence();
-            // Trim for seek
-            const playSeq = trimSequence(seq, offsetSeconds);
+            const midiEnabled = !compareSoloed;
+            const compareEnabled = compareWaveReady && !!compareAudioEl && !compareMuted;
+
+            let playSeq = null;
+            if (midiEnabled) {
+                const seq = getPlayableSequence();
+                playSeq = trimSequence(seq, offsetSeconds);
+            }
+
+            if ((!playSeq || !playSeq.notes.length || playSeq.totalTime <= 0) && !compareEnabled) {
+                statusLabel.innerText = "无可播放音符";
+                isPlaying = false;
+                return;
+            }
 
             isPlaying = true;
             playBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
             playBtn.title = "暂停";
             statusLabel.innerText = "播放中...";
 
-            player.start(playSeq).then(() => {
-                if (isPlaying) {
-                    // Natural finish
-                    stopPlayback();
-                }
-            });
+            if (playSeq && playSeq.notes.length && playSeq.totalTime > 0) {
+                player.start(playSeq).then(() => {
+                    if (isPlaying && !compareEnabled) {
+                        stopPlayback();
+                    }
+                });
+            }
+
+            if (compareEnabled) {
+                startCompareAudio(offsetSeconds);
+            }
 
             startTime = mm.Player.tone.context.currentTime - offsetSeconds;
 
@@ -584,6 +1196,7 @@
 
         function pausePlayback() {
             if (player.isPlaying()) player.stop();
+            pauseCompareAudio();
             isPlaying = false;
             cancelAnimationFrame(animationId);
             playBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
@@ -595,6 +1208,7 @@
 
         function stopPlayback() {
             if (player.isPlaying()) player.stop();
+            stopCompareAudio();
             isPlaying = false;
             cancelAnimationFrame(animationId);
             playBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
@@ -631,9 +1245,12 @@
 
         function updatePlayheads(seconds) {
             const x = seconds * PIXELS_PER_STEP;
+            const scrollLeft = getTimelineScrollLeft();
             tracks.forEach(t => {
-                t.dom.playhead.style.left = x + 'px';
+                t.dom.playhead.style.left = (x - scrollLeft) + 'px';
             });
+            comparePlayhead.style.display = 'block';
+            comparePlayhead.style.left = (x - scrollLeft) + 'px';
         }
 
         function autoScroll(seconds) {
@@ -654,7 +1271,7 @@
                 const s = Math.floor(t % 60);
                 return `${m < 10 ? '0' + m : m}:${s < 10 ? '0' + s : s}`;
             };
-            timeLabel.innerText = `${fmt(current)} / ${fmt(totalDuration)}`;
+            timeLabel.innerText = `${fmt(current)} / ${fmt(totalDurationForDisplay)}`;
         }
 
         // --- Helpers ---
@@ -665,8 +1282,125 @@
                 n.startTime -= startTime;
                 n.endTime -= startTime;
             });
-            newSeq.totalTime -= startTime;
+            newSeq.totalTime = Math.max(newSeq.totalTime - startTime, 0);
             return newSeq;
+        }
+
+        function getShiftedFullSequence() {
+            const seq = JSON.parse(JSON.stringify(currentSequence));
+            const shiftedNotes = [];
+            tracks.forEach(track => {
+                shiftedNotes.push(...getTrackShiftedNotes(track));
+            });
+            shiftedNotes.sort((a, b) => a.startTime - b.startTime);
+
+            const maxEnd = shiftedNotes.reduce((acc, n) => Math.max(acc, n.endTime), 0);
+            seq.notes = shiftedNotes;
+            seq.totalTime = maxEnd;
+            return seq;
+        }
+
+        function normalizeSequenceForExport(seq) {
+            if (!seq || typeof seq !== 'object') {
+                return {
+                    notes: [],
+                    tempos: [{ time: 0, qpm: 120 }],
+                    timeSignatures: [],
+                    keySignatures: [],
+                    controlChanges: [],
+                    pitchBends: [],
+                    textAnnotations: [],
+                    totalTime: 0,
+                    ticksPerQuarter: 220
+                };
+            }
+
+            if (!Array.isArray(seq.notes)) seq.notes = [];
+            if (!Array.isArray(seq.tempos)) seq.tempos = [];
+            if (!Array.isArray(seq.timeSignatures)) seq.timeSignatures = [];
+            if (!Array.isArray(seq.keySignatures)) seq.keySignatures = [];
+            if (!Array.isArray(seq.controlChanges)) seq.controlChanges = [];
+            if (!Array.isArray(seq.pitchBends)) seq.pitchBends = [];
+            if (!Array.isArray(seq.textAnnotations)) seq.textAnnotations = [];
+
+            if (seq.tempos.length === 0) {
+                seq.tempos.push({ time: 0, qpm: 120 });
+            }
+
+            if (typeof seq.ticksPerQuarter !== 'number' || !Number.isFinite(seq.ticksPerQuarter) || seq.ticksPerQuarter <= 0) {
+                seq.ticksPerQuarter = 220;
+            }
+
+            seq.notes = seq.notes
+                .filter(n => n && typeof n.startTime === 'number' && typeof n.endTime === 'number')
+                .map(n => ({
+                    ...n,
+                    startTime: Math.max(0, n.startTime),
+                    endTime: Math.max(n.startTime, n.endTime),
+                    velocity: typeof n.velocity === 'number' ? n.velocity : 80,
+                    pitch: typeof n.pitch === 'number' ? n.pitch : 60,
+                    instrument: typeof n.instrument === 'number' ? n.instrument : 0,
+                    program: typeof n.program === 'number' ? n.program : 0,
+                    isDrum: !!n.isDrum
+                }));
+
+            seq.totalTime = seq.notes.reduce((acc, n) => Math.max(acc, n.endTime), 0);
+            return seq;
+        }
+
+        async function exportShiftedMidi() {
+            if (!currentSequence || !tracks.length) return;
+            try {
+                statusLabel.innerText = '正在保存 MIDI...';
+                const seq = normalizeSequenceForExport(getShiftedFullSequence());
+                const midiBytes = await Promise.resolve(mm.sequenceProtoToMidi(seq));
+
+                if (exportBridge && typeof exportBridge.saveMidiBase64 === 'function') {
+                    let binary = '';
+                    const chunkSize = 0x8000;
+                    for (let i = 0; i < midiBytes.length; i += chunkSize) {
+                        const chunk = midiBytes.subarray(i, i + chunkSize);
+                        binary += String.fromCharCode.apply(null, chunk);
+                    }
+                    const midiBase64 = btoa(binary);
+
+                    const result = await new Promise((resolve) => {
+                        if (typeof exportBridge.saveMidiToCurrentPath === 'function') {
+                            exportBridge.saveMidiToCurrentPath(midiBase64, resolve);
+                        } else {
+                            exportBridge.saveMidiBase64(midiBase64, defaultExportFilename, resolve);
+                        }
+                    });
+
+                    if (result === 'CANCELLED') {
+                        statusLabel.innerText = '已取消保存';
+                        return;
+                    }
+                    if (typeof result === 'string' && result.startsWith('ERROR:')) {
+                        throw new Error(result.replace('ERROR:', '').trim());
+                    }
+
+                    commitOffsetsToCurrentState();
+                    statusLabel.innerText = '保存完成';
+                    return;
+                }
+
+                const blob = new Blob([midiBytes], { type: 'audio/midi' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = defaultExportFilename;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                commitOffsetsToCurrentState();
+                statusLabel.innerText = '保存完成(浏览器下载)';
+            } catch (e) {
+                console.error(e);
+                statusLabel.innerText = '保存失败: ' + e.message;
+                statusLabel.classList.add('error');
+            }
         }
 
         function base64ToUint8Array(base64) {
@@ -690,6 +1424,7 @@
                 const seq = await mm.midiToSequenceProto(midiBytes);
                 currentSequence = seq;
                 totalDuration = seq.totalTime;
+                totalDurationForDisplay = seq.totalTime;
 
                 // Process Tracks
                 tracks = processTracks(seq);
@@ -703,7 +1438,12 @@
 
                 statusLabel.innerText = "准备就绪";
                 playBtn.disabled = false;
-                stopBtn.disabled = false; 7
+                stopBtn.disabled = false;
+                moveModeBtn.disabled = false;
+                exportBtn.disabled = false;
+                compareTrackLoaded = false;
+                await ensureCompareTrackLoaded();
+                setMoveMode(false);
 
                 // 显示播放头在起始位置
                 tracks.forEach(t => {
@@ -717,6 +1457,8 @@
                 console.error(e);
                 statusLabel.innerText = "错误: " + e.message;
                 statusLabel.classList.add('error');
+                moveModeBtn.disabled = true;
+                exportBtn.disabled = true;
             }
         }
 
