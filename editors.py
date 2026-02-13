@@ -3,7 +3,7 @@
 包含文本编辑器、音频播放器、MIDI预览器和编辑器管理器
 """
 
-from PyQt6.QtCore import pyqtSignal, Qt, QThread, QObject, pyqtSlot
+from PyQt6.QtCore import pyqtSignal, Qt, QThread, QObject, pyqtSlot, QUrl
 import os
 import struct
 import csv
@@ -994,12 +994,14 @@ class MidiPreview(QWebEngineView):
         try:
             with open("asset/midi_player.html", "r", encoding="utf-8") as f:
                 self.html_template = f.read()
-            self.setHtml(self.html_template)
+            base_path = os.path.abspath("asset")
+            self.setHtml(self.html_template, QUrl.fromLocalFile(base_path + "/"))
         except Exception as e:
             self.html_template = (
                 f"<html><body><h3>Error loading player template: {e}</h3></body></html>"
             )
-            self.setHtml(self.html_template)
+            base_path = os.path.abspath("asset")
+            self.setHtml(self.html_template, QUrl.fromLocalFile(base_path + "/"))
 
     def load_file(self, path):
         try:
@@ -1011,7 +1013,8 @@ class MidiPreview(QWebEngineView):
             self._prepare_compare_wavs(path)
             self.pending_midi_data = base64.b64encode(data).decode("ascii")
             # Reload the page to clear state
-            self.setHtml(self.html_template)
+            base_path = os.path.abspath("asset")
+            self.setHtml(self.html_template, QUrl.fromLocalFile(base_path + "/"))
         except Exception as e:
             print(f"Error loading MIDI: {e}")
 
@@ -1128,12 +1131,50 @@ class MidiExportBridge(QObject):
 
     @pyqtSlot(result=str)
     def getCompareWavList(self) -> str:
+        urls = {}
+        if self.preview.compare_wav_dir:
+            for name in self.preview.compare_wav_files:
+                file_path = os.path.join(self.preview.compare_wav_dir, name)
+                urls[name] = QUrl.fromLocalFile(file_path).toString()
+
         payload = {
             "files": self.preview.compare_wav_files,
             "default": self.preview.default_compare_wav,
             "dir": self.preview.compare_wav_dir,
+            "urls": urls,
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    @pyqtSlot(str, result=str)
+    def getCompareWavUrl(self, filename: str) -> str:
+        if not filename:
+            return json.dumps(
+                {"ok": False, "error": "empty filename"}, ensure_ascii=False
+            )
+
+        if not self.preview.compare_wav_dir:
+            return json.dumps(
+                {"ok": False, "error": "分轨wav目录不存在"}, ensure_ascii=False
+            )
+
+        if filename not in self.preview.compare_wav_files:
+            return json.dumps(
+                {"ok": False, "error": "文件不在可选列表中"}, ensure_ascii=False
+            )
+
+        file_path = os.path.join(self.preview.compare_wav_dir, filename)
+        if not os.path.isfile(file_path):
+            return json.dumps({"ok": False, "error": "文件不存在"}, ensure_ascii=False)
+
+        return json.dumps(
+            {
+                "ok": True,
+                "name": filename,
+                "mime": "audio/wav",
+                "url": QUrl.fromLocalFile(file_path).toString(),
+            },
+            ensure_ascii=False,
+        )
 
     @pyqtSlot(str, result=str)
     def getCompareWavBase64(self, filename: str) -> str:

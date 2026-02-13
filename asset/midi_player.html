@@ -343,7 +343,7 @@
         }
     </style>
 
-    <script src="https://cdn.jsdelivr.net/npm/@magenta/music@1.23.1/dist/magentamusic.min.js"></script>
+    <script src="magentamusic.min.js"></script>
     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
 
@@ -428,6 +428,7 @@
         let compareTrackLoaded = false;
         let compareMuted = false;
         let compareSoloed = false;
+        let compareWavUrlMap = {};
 
         const PIXELS_PER_STEP = 50;
         const DRAG_PIXEL_THRESHOLD = 3;
@@ -452,7 +453,7 @@
         async function init() {
             const status = document.getElementById('status');
             try {
-                player = new mm.SoundFontPlayer('https://storage.googleapis.com/magentadata/js/soundfonts/sgm_plus');
+                player = new mm.SoundFontPlayer('sgm_plus');
                 console.log("Player initialized");
 
                 if (window.qt && window.QWebChannel) {
@@ -720,6 +721,7 @@
             }
 
             const files = Array.isArray(payload.files) ? payload.files : [];
+            compareWavUrlMap = (payload && typeof payload.urls === 'object' && payload.urls) ? payload.urls : {};
             compareWavSelect.innerHTML = '';
 
             if (!files.length) {
@@ -744,46 +746,86 @@
         }
 
         async function loadCompareWavByName(filename) {
-            if (!exportBridge || typeof exportBridge.getCompareWavBase64 !== 'function') return;
-
-            statusLabel.innerText = `加载对照WAV: ${filename}`;
-            const payloadText = await new Promise((resolve) => {
-                exportBridge.getCompareWavBase64(filename, resolve);
-            });
-
-            let payload = {};
+            if (!exportBridge) return;
             try {
-                payload = JSON.parse(payloadText || '{}');
-            } catch {
-                payload = {};
-            }
+                compareWaveReady = false;
+                compareAudioDuration = 0;
+                statusLabel.innerText = `加载对照WAV: ${filename}`;
 
-            if (!payload.ok || !payload.data) {
-                statusLabel.innerText = `对照WAV加载失败: ${payload.error || '未知错误'}`;
-                return;
-            }
+                const preloadUrl = compareWavUrlMap && compareWavUrlMap[filename];
+                let payloadText = null;
+                if (preloadUrl) {
+                    payloadText = JSON.stringify({
+                        ok: true,
+                        name: filename,
+                        mime: 'audio/wav',
+                        url: preloadUrl
+                    });
+                } else if (typeof exportBridge.getCompareWavUrl === 'function') {
+                    payloadText = await new Promise((resolve) => {
+                        exportBridge.getCompareWavUrl(filename, resolve);
+                    });
+                } else if (typeof exportBridge.getCompareWavBase64 === 'function') {
+                    payloadText = await new Promise((resolve) => {
+                        exportBridge.getCompareWavBase64(filename, resolve);
+                    });
+                } else {
+                    statusLabel.innerText = '对照WAV桥接接口不可用';
+                    return;
+                }
 
-            const wavBytes = base64ToUint8Array(payload.data);
-            const wavBlob = new Blob([wavBytes], { type: payload.mime || 'audio/wav' });
-            const url = URL.createObjectURL(wavBlob);
+                let payload = {};
+                try {
+                    payload = JSON.parse(payloadText || '{}');
+                } catch {
+                    payload = {};
+                }
 
-            if (compareAudioUrl) {
-                URL.revokeObjectURL(compareAudioUrl);
-            }
-            compareAudioUrl = url;
+                if (!payload.ok) {
+                    statusLabel.innerText = `对照WAV加载失败: ${payload.error || '未知错误'}`;
+                    return;
+                }
 
-            if (!compareAudioEl) {
-                compareAudioEl = new Audio();
-                compareAudioEl.preload = 'auto';
-            }
+                let url = '';
+                let wavBytes = null;
+                if (payload.url) {
+                    url = payload.url;
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    wavBytes = new Uint8Array(await response.arrayBuffer());
+                } else if (payload.data) {
+                    wavBytes = base64ToUint8Array(payload.data);
+                    const wavBlob = new Blob([wavBytes], { type: payload.mime || 'audio/wav' });
+                    url = URL.createObjectURL(wavBlob);
+                } else {
+                    throw new Error('桥接返回中缺少WAV数据');
+                }
 
-            compareAudioEl.src = compareAudioUrl;
-            compareAudioEl.currentTime = Math.min(pauseOffset, compareAudioEl.duration || pauseOffset || 0);
+                if (compareAudioUrl && compareAudioUrl.startsWith('blob:')) {
+                    URL.revokeObjectURL(compareAudioUrl);
+                }
+                compareAudioUrl = url;
 
-            await decodeAndRenderCompareWave(wavBytes);
+                if (!compareAudioEl) {
+                    compareAudioEl = new Audio();
+                    compareAudioEl.preload = 'auto';
+                }
 
-            if (isMoveMode && isPlaying) {
-                startCompareAudio(mm.Player.tone.context.currentTime - startTime);
+                compareAudioEl.src = compareAudioUrl;
+                compareAudioEl.currentTime = Math.min(pauseOffset, compareAudioEl.duration || pauseOffset || 0);
+
+                await decodeAndRenderCompareWave(wavBytes);
+
+                if (isPlaying && !compareMuted) {
+                    startCompareAudio(mm.Player.tone.context.currentTime - startTime);
+                }
+                statusLabel.innerText = `对照WAV就绪: ${filename}`;
+            } catch (e) {
+                compareWaveReady = false;
+                compareAudioDuration = 0;
+                statusLabel.innerText = `对照WAV加载失败: ${e.message || e}`;
             }
         }
 
@@ -863,6 +905,17 @@
                 compareAudioEl.currentTime = Math.max(0, Math.min(offsetSeconds, compareAudioEl.duration || offsetSeconds));
                 compareAudioEl.play().catch(() => { });
             } catch {
+            }
+        }
+
+        function syncCompareAudioToTimeline(currentSec) {
+            if (!compareAudioEl || compareMuted || compareAudioEl.paused) return;
+            const drift = Math.abs((compareAudioEl.currentTime || 0) - currentSec);
+            if (drift > 0.08) {
+                try {
+                    compareAudioEl.currentTime = Math.max(0, Math.min(currentSec, compareAudioEl.duration || currentSec));
+                } catch {
+                }
             }
         }
 
@@ -1175,7 +1228,8 @@
             statusLabel.innerText = "播放中...";
 
             if (playSeq && playSeq.notes.length && playSeq.totalTime > 0) {
-                player.start(playSeq).then(() => {
+                const pianoPlaySeq = buildPianoPlaybackSequence(playSeq);
+                player.start(pianoPlaySeq).then(() => {
                     if (isPlaying && !compareEnabled) {
                         stopPlayback();
                     }
@@ -1239,6 +1293,7 @@
             updatePlayheads(currentSec);
             updateTimeLabel(currentSec);
             autoScroll(currentSec);
+            syncCompareAudioToTimeline(currentSec);
 
             animationId = requestAnimationFrame(animate);
         }
@@ -1413,6 +1468,16 @@
             return bytes;
         }
 
+        function buildPianoPlaybackSequence(seq) {
+            const cloned = JSON.parse(JSON.stringify(seq || {}));
+            if (!Array.isArray(cloned.notes)) cloned.notes = [];
+            cloned.notes.forEach(n => {
+                n.program = 0;
+                n.isDrum = false;
+            });
+            return cloned;
+        }
+
         // --- Python 接口 ---
         window.loadMidiContent = async function (base64Data) {
             statusLabel.innerText = "正在解析 MIDI...";
@@ -1434,7 +1499,7 @@
                 stopPlayback();
 
                 statusLabel.innerText = "正在加载采样...";
-                await player.loadSamples(seq);
+                await player.loadSamples(buildPianoPlaybackSequence(seq));
 
                 statusLabel.innerText = "准备就绪";
                 playBtn.disabled = false;
@@ -1442,7 +1507,9 @@
                 moveModeBtn.disabled = false;
                 exportBtn.disabled = false;
                 compareTrackLoaded = false;
-                await ensureCompareTrackLoaded();
+                ensureCompareTrackLoaded().catch((e) => {
+                    statusLabel.innerText = `对照WAV初始化失败: ${e.message || e}`;
+                });
                 setMoveMode(false);
 
                 // 显示播放头在起始位置
