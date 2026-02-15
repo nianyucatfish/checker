@@ -247,25 +247,114 @@
         .compare-track-row {
             display: flex;
             margin-bottom: 10px;
+            height: 96px;
+            overflow: visible;
+            position: relative;
+            z-index: 30;
         }
 
         .compare-track-row.show {
             display: flex;
         }
 
-        .compare-select {
+        .compare-dropdown {
+            position: relative;
+            width: 100%;
+        }
+
+        .compare-select-btn {
             width: 100%;
             font-size: 11px;
             border: 1px solid #ced4da;
             border-radius: 4px;
             background: #fff;
             color: #495057;
-            padding: 2px 4px;
+            padding: 2px 20px 2px 6px;
+            height: 24px;
+            min-height: 24px;
+            max-height: 24px;
+            flex: 0 0 auto;
+            cursor: pointer;
+            text-align: left;
+            line-height: 18px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            position: relative;
+        }
+
+        .compare-select-btn::after {
+            content: '▾';
+            position: absolute;
+            right: 6px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #6c757d;
+            pointer-events: none;
+        }
+
+        .compare-select-btn:hover {
+            background: #f8f9fa;
+        }
+
+        .compare-select-btn:disabled {
+            color: #adb5bd;
+            background: #f8f9fa;
+            cursor: not-allowed;
+        }
+
+        .compare-menu {
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            right: 0;
+            max-height: 180px;
+            overflow-y: auto;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            background: #fff;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+            z-index: 60;
+        }
+
+        #tracks-container {
+            position: relative;
+            z-index: 1;
+        }
+
+        .compare-menu-item {
+            display: block;
+            width: 100%;
+            border: 0;
+            border-radius: 0;
+            background: #fff;
+            color: #495057;
+            text-align: left;
+            padding: 4px 6px;
+            font-size: 11px;
+            line-height: 1.2;
+            cursor: pointer;
+        }
+
+        .compare-menu-item:hover {
+            background: #e9f2ff;
+            color: #1f2937;
+        }
+
+        .compare-menu-item.active {
+            background: #dbeafe;
+            color: #111827;
+        }
+
+        .compare-track-row .track-sidebar {
+            justify-content: flex-start;
+            gap: 6px;
         }
 
         .compare-wave {
             display: block;
             background: #fff;
+            height: 72px;
         }
 
         /* Right: Timeline / Canvas */
@@ -385,14 +474,17 @@
                         <button id="compareMuteBtn" class="btn-mini btn-mute">M</button>
                         <button id="compareSoloBtn" class="btn-mini btn-solo">S</button>
                     </div>
-                    <select id="compareWavSelect" class="compare-select"></select>
+                    <div id="compareWavDropdown" class="compare-dropdown">
+                        <button id="compareWavTrigger" type="button" class="compare-select-btn" disabled>请选择WAV</button>
+                        <div id="compareWavMenu" class="compare-menu" hidden></div>
+                    </div>
                 </div>
                 <div class="track-vscroll" style="cursor: default;">
-                    <div class="vscroll-spacer" style="height: 56px;"></div>
+                    <div class="vscroll-spacer" style="height: 72px;"></div>
                 </div>
                 <div id="compareTimeline" class="track-timeline">
                     <div id="compareCanvasContent" class="canvas-content">
-                        <canvas id="compareWaveCanvas" class="compare-wave" height="56"></canvas>
+                        <canvas id="compareWaveCanvas" class="compare-wave" height="72"></canvas>
                     </div>
                     <div id="comparePlayhead" class="playhead"></div>
                 </div>
@@ -429,12 +521,16 @@
         let compareMuted = false;
         let compareSoloed = false;
         let compareWavUrlMap = {};
+        let compareWavFiles = [];
+        let compareSelectedWav = '';
 
         const PIXELS_PER_STEP = 50;
         const DRAG_PIXEL_THRESHOLD = 3;
 
         const compareTrackRow = document.getElementById('compare-track-row');
-        const compareWavSelect = document.getElementById('compareWavSelect');
+        const compareWavDropdown = document.getElementById('compareWavDropdown');
+        const compareWavTrigger = document.getElementById('compareWavTrigger');
+        const compareWavMenu = document.getElementById('compareWavMenu');
         const compareMuteBtn = document.getElementById('compareMuteBtn');
         const compareSoloBtn = document.getElementById('compareSoloBtn');
         const compareTimeline = document.getElementById('compareTimeline');
@@ -476,10 +572,18 @@
                 updatePlayheads(currentShown);
             });
 
-            compareWavSelect.addEventListener('change', async () => {
-                const name = compareWavSelect.value;
-                if (!name) return;
-                await loadCompareWavByName(name);
+            compareWavTrigger.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (compareWavTrigger.disabled) return;
+                const willOpen = compareWavMenu.hidden;
+                closeCompareWavMenu();
+                if (willOpen) compareWavMenu.hidden = false;
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!compareWavDropdown.contains(e.target)) {
+                    closeCompareWavMenu();
+                }
             });
 
             compareMuteBtn.addEventListener('click', () => {
@@ -699,7 +803,43 @@
 
         function applyCompareViewportTransform() {
             const left = getTimelineScrollLeft();
-            compareCanvasContent.style.transform = `translate(${-left}px, 0px)`;
+            const timelineHeight = compareTimeline.clientHeight || 0;
+            const waveHeight = compareWaveCanvas.height || 0;
+            const offsetY = Math.max(0, (timelineHeight - waveHeight) / 2);
+            compareCanvasContent.style.transform = `translate(${-left}px, ${offsetY}px)`;
+        }
+
+        function closeCompareWavMenu() {
+            compareWavMenu.hidden = true;
+        }
+
+        function updateCompareWavTriggerLabel() {
+            compareWavTrigger.innerText = compareSelectedWav || '请选择WAV';
+            compareWavTrigger.title = compareSelectedWav || '请选择WAV';
+        }
+
+        function renderCompareWavMenu() {
+            compareWavMenu.innerHTML = '';
+            compareWavFiles.forEach(name => {
+                const item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'compare-menu-item';
+                if (name === compareSelectedWav) {
+                    item.classList.add('active');
+                }
+                item.innerText = name;
+                item.title = name;
+                item.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    closeCompareWavMenu();
+                    if (name === compareSelectedWav) return;
+                    compareSelectedWav = name;
+                    updateCompareWavTriggerLabel();
+                    renderCompareWavMenu();
+                    await loadCompareWavByName(name);
+                });
+                compareWavMenu.appendChild(item);
+            });
         }
 
         async function ensureCompareTrackLoaded() {
@@ -722,25 +862,26 @@
 
             const files = Array.isArray(payload.files) ? payload.files : [];
             compareWavUrlMap = (payload && typeof payload.urls === 'object' && payload.urls) ? payload.urls : {};
-            compareWavSelect.innerHTML = '';
+            compareWavFiles = files.slice();
+            compareSelectedWav = '';
+            closeCompareWavMenu();
+            renderCompareWavMenu();
 
             if (!files.length) {
                 statusLabel.innerText = '未找到分轨WAV文件';
+                compareWavTrigger.disabled = true;
+                updateCompareWavTriggerLabel();
                 compareTrackLoaded = true;
                 return;
             }
-
-            files.forEach(name => {
-                const option = document.createElement('option');
-                option.value = name;
-                option.innerText = name;
-                compareWavSelect.appendChild(option);
-            });
+            compareWavTrigger.disabled = false;
 
             const defaultName = payload.default && files.includes(payload.default)
                 ? payload.default
                 : files[0];
-            compareWavSelect.value = defaultName;
+            compareSelectedWav = defaultName;
+            updateCompareWavTriggerLabel();
+            renderCompareWavMenu();
             compareTrackLoaded = true;
             await loadCompareWavByName(defaultName);
         }
@@ -860,7 +1001,7 @@
         function renderCompareWave(audioBuffer) {
             const duration = audioBuffer.duration || 0;
             const width = Math.max(1, Math.ceil(duration * PIXELS_PER_STEP));
-            const height = compareWaveCanvas.height || 56;
+            const height = compareWaveCanvas.height || 72;
 
             compareWaveCanvas.width = width;
             compareWaveCanvas.height = height;
@@ -872,13 +1013,17 @@
 
             const channelData = audioBuffer.getChannelData(0);
             const step = Math.max(1, Math.floor(channelData.length / width));
-            const half = height / 2;
+            const verticalPadding = 6;
+            const centerY = height / 2;
+            const amplitudeHalf = Math.max(1, (height - verticalPadding * 2) / 2);
+            const minY = centerY - amplitudeHalf;
+            const maxY = centerY + amplitudeHalf;
 
             context.strokeStyle = '#6c757d';
             context.lineWidth = 1;
             context.beginPath();
-            context.moveTo(0, half);
-            context.lineTo(width, half);
+            context.moveTo(0, centerY);
+            context.lineTo(width, centerY);
             context.stroke();
 
             context.strokeStyle = '#198754';
@@ -893,8 +1038,16 @@
                     if (v < min) min = v;
                     if (v > max) max = v;
                 }
-                context.moveTo(x, half + min * half * 0.9);
-                context.lineTo(x, half + max * half * 0.9);
+                let yMin = centerY + min * amplitudeHalf;
+                let yMax = centerY + max * amplitudeHalf;
+
+                if (yMin < minY) yMin = minY;
+                if (yMin > maxY) yMin = maxY;
+                if (yMax < minY) yMax = minY;
+                if (yMax > maxY) yMax = maxY;
+
+                context.moveTo(x, yMin);
+                context.lineTo(x, yMax);
             }
             context.stroke();
         }
