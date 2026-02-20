@@ -478,6 +478,7 @@
                         <button id="compareWavTrigger" type="button" class="compare-select-btn" disabled>请选择WAV</button>
                         <div id="compareWavMenu" class="compare-menu" hidden></div>
                     </div>
+                    <button id="compareVizBtn" class="btn-mini" disabled>可视化: 波形</button>
                 </div>
                 <div class="track-vscroll" style="cursor: default;">
                     <div class="vscroll-spacer" style="height: 72px;"></div>
@@ -523,6 +524,9 @@
         let compareWavUrlMap = {};
         let compareWavFiles = [];
         let compareSelectedWav = '';
+        let compareVizMode = 'waveform';
+        let compareAudioBuffer = null;
+        const COMPARE_VIZ_MODES = ['waveform', 'cqt'];
 
         const PIXELS_PER_STEP = 50;
         const DRAG_PIXEL_THRESHOLD = 3;
@@ -531,6 +535,7 @@
         const compareWavDropdown = document.getElementById('compareWavDropdown');
         const compareWavTrigger = document.getElementById('compareWavTrigger');
         const compareWavMenu = document.getElementById('compareWavMenu');
+        const compareVizBtn = document.getElementById('compareVizBtn');
         const compareMuteBtn = document.getElementById('compareMuteBtn');
         const compareSoloBtn = document.getElementById('compareSoloBtn');
         const compareTimeline = document.getElementById('compareTimeline');
@@ -619,6 +624,18 @@
                     seekTo(targetTime);
                 }
             });
+
+            compareVizBtn.addEventListener('click', () => {
+                if (compareVizBtn.disabled) return;
+                compareVizMode = getNextCompareVizMode(compareVizMode);
+                updateCompareVizButtonLabel();
+                if (compareAudioBuffer) {
+                    renderCompareVisualization(compareAudioBuffer);
+                    updateTrackViewportTransforms();
+                }
+            });
+
+            updateCompareVizButtonLabel();
         }
 
         window.setExportDefaultFilename = function (filename) {
@@ -818,6 +835,22 @@
             compareWavTrigger.title = compareSelectedWav || '请选择WAV';
         }
 
+        function updateCompareVizButtonLabel() {
+            const nextMode = getNextCompareVizMode(compareVizMode);
+            const nextTextMap = {
+                waveform: '波形',
+                cqt: '频谱图'
+            };
+            compareVizBtn.innerText = `切换为${nextTextMap[nextMode]}`;
+            compareVizBtn.title = `切换为${nextTextMap[nextMode]}`;
+        }
+
+        function getNextCompareVizMode(currentMode) {
+            const idx = COMPARE_VIZ_MODES.indexOf(currentMode);
+            if (idx < 0) return COMPARE_VIZ_MODES[0];
+            return COMPARE_VIZ_MODES[(idx + 1) % COMPARE_VIZ_MODES.length];
+        }
+
         function renderCompareWavMenu() {
             compareWavMenu.innerHTML = '';
             compareWavFiles.forEach(name => {
@@ -870,11 +903,14 @@
             if (!files.length) {
                 statusLabel.innerText = '未找到分轨WAV文件';
                 compareWavTrigger.disabled = true;
+                compareVizBtn.disabled = true;
+                compareAudioBuffer = null;
                 updateCompareWavTriggerLabel();
                 compareTrackLoaded = true;
                 return;
             }
             compareWavTrigger.disabled = false;
+            compareVizBtn.disabled = false;
 
             const defaultName = payload.default && files.includes(payload.default)
                 ? payload.default
@@ -891,6 +927,7 @@
             try {
                 compareWaveReady = false;
                 compareAudioDuration = 0;
+                compareAudioBuffer = null;
                 statusLabel.innerText = `加载对照WAV: ${filename}`;
 
                 const preloadUrl = compareWavUrlMap && compareWavUrlMap[filename];
@@ -966,6 +1003,7 @@
             } catch (e) {
                 compareWaveReady = false;
                 compareAudioDuration = 0;
+                compareAudioBuffer = null;
                 statusLabel.innerText = `对照WAV加载失败: ${e.message || e}`;
             }
         }
@@ -985,17 +1023,27 @@
             try {
                 const audioBuffer = await ctx.decodeAudioData(arr.slice(0));
                 compareAudioDuration = audioBuffer.duration || 0;
-                renderCompareWave(audioBuffer);
+                compareAudioBuffer = audioBuffer;
+                renderCompareVisualization(audioBuffer);
                 compareWaveReady = true;
                 updateTimelineMetrics();
                 updateTrackViewportTransforms();
             } catch (e) {
                 compareWaveReady = false;
                 compareAudioDuration = 0;
+                compareAudioBuffer = null;
                 statusLabel.innerText = `波形解码失败: ${e.message || e}`;
             } finally {
                 ctx.close();
             }
+        }
+
+        function renderCompareVisualization(audioBuffer) {
+            if (compareVizMode === 'cqt') {
+                renderCompareCqt(audioBuffer);
+                return;
+            }
+            renderCompareWave(audioBuffer);
         }
 
         function renderCompareWave(audioBuffer) {
@@ -1050,6 +1098,294 @@
                 context.lineTo(x, yMax);
             }
             context.stroke();
+        }
+
+        function renderCompareSpectrogram(audioBuffer) {
+            const duration = audioBuffer.duration || 0;
+            const width = Math.max(1, Math.ceil(duration * PIXELS_PER_STEP));
+            const height = compareWaveCanvas.height || 72;
+
+            compareWaveCanvas.width = width;
+            compareWaveCanvas.height = height;
+
+            const context = compareWaveCanvas.getContext('2d');
+            context.clearRect(0, 0, width, height);
+            context.fillStyle = '#ffffff';
+            context.fillRect(0, 0, width, height);
+
+            const channelData = audioBuffer.getChannelData(0);
+            if (!channelData || !channelData.length) return;
+
+            const fftSize = 2048;
+            const sampleRate = audioBuffer.sampleRate || 44100;
+            const hop = Math.max(32, Math.floor(sampleRate * 0.0025));
+            const estimatedCols = Math.max(1, Math.floor((channelData.length - fftSize) / hop) + 1);
+            const minCols = Math.max(width, 360);
+            const maxCols = 6000;
+            const columns = Math.max(minCols, Math.min(maxCols, estimatedCols));
+            const hopByColumns = Math.max(1, Math.floor((channelData.length - fftSize) / Math.max(columns - 1, 1)));
+            const binCount = fftSize >> 1;
+            const nyquist = sampleRate / 2;
+            const vocalMinHz = 70;
+            const vocalMaxHz = 1400;
+
+            const offscreen = document.createElement('canvas');
+            offscreen.width = columns;
+            offscreen.height = height;
+            const offCtx = offscreen.getContext('2d');
+            const image = offCtx.createImageData(columns, height);
+            const pixels = image.data;
+
+            const real = new Float32Array(fftSize);
+            const imag = new Float32Array(fftSize);
+            const window = createHannWindow(fftSize);
+            const minBinIndex = Math.max(1, Math.floor((vocalMinHz / nyquist) * binCount));
+            const maxBinIndex = Math.max(minBinIndex + 1, Math.min(binCount - 1, Math.ceil((vocalMaxHz / nyquist) * binCount)));
+            const minDb = -92;
+            const maxDb = -24;
+
+            for (let x = 0; x < columns; x++) {
+                const frameStart = Math.min(x * hopByColumns, Math.max(0, channelData.length - fftSize));
+
+                for (let i = 0; i < fftSize; i++) {
+                    real[i] = channelData[frameStart + i] * window[i];
+                    imag[i] = 0;
+                }
+
+                fftInPlace(real, imag);
+
+                for (let y = 0; y < height; y++) {
+                    const y0 = y / Math.max(1, height - 1);
+                    const y1 = (y + 1) / Math.max(1, height);
+                    const lowPos = Math.pow(1 - y1, 1.9);
+                    const highPos = Math.pow(1 - y0, 1.9);
+
+                    const lowHz = vocalMinHz + lowPos * (vocalMaxHz - vocalMinHz);
+                    const highHz = vocalMinHz + highPos * (vocalMaxHz - vocalMinHz);
+
+                    let lowBin = Math.max(minBinIndex, Math.floor((lowHz / nyquist) * binCount));
+                    let highBin = Math.max(lowBin + 1, Math.ceil((highHz / nyquist) * binCount));
+                    if (highBin > maxBinIndex) highBin = maxBinIndex;
+
+                    let peakMag = 0;
+                    for (let b = lowBin; b <= highBin; b++) {
+                        const re = real[b];
+                        const im = imag[b];
+                        const mag = Math.sqrt(re * re + im * im) / fftSize;
+                        if (mag > peakMag) peakMag = mag;
+                    }
+
+                    const db = 20 * Math.log10(peakMag + 1e-8);
+                    let intensity = (db - minDb) / (maxDb - minDb);
+                    intensity = Math.max(0, Math.min(1, intensity));
+                    intensity = Math.pow(intensity, 1.25);
+                    intensity = Math.min(0.88, intensity);
+
+                    const color = spectrogramColor(intensity);
+                    const idx = (y * columns + x) * 4;
+                    pixels[idx] = color.r;
+                    pixels[idx + 1] = color.g;
+                    pixels[idx + 2] = color.b;
+                    pixels[idx + 3] = 255;
+                }
+            }
+
+            offCtx.putImageData(image, 0, 0);
+            context.imageSmoothingEnabled = false;
+            context.drawImage(offscreen, 0, 0, width, height);
+        }
+
+        function renderCompareCqt(audioBuffer) {
+            const duration = audioBuffer.duration || 0;
+            const width = Math.max(1, Math.ceil(duration * PIXELS_PER_STEP));
+            const height = compareWaveCanvas.height || 72;
+
+            compareWaveCanvas.width = width;
+            compareWaveCanvas.height = height;
+
+            const context = compareWaveCanvas.getContext('2d');
+            context.clearRect(0, 0, width, height);
+            context.fillStyle = '#ffffff';
+            context.fillRect(0, 0, width, height);
+
+            const channelData = audioBuffer.getChannelData(0);
+            if (!channelData || !channelData.length) return;
+
+            const sampleRate = audioBuffer.sampleRate || 44100;
+            const fftSize = 4096;
+            const hop = Math.max(64, Math.floor(sampleRate * 0.004));
+            const estimatedCols = Math.max(1, Math.floor((channelData.length - fftSize) / hop) + 1);
+            const minCols = Math.max(width, 360);
+            const maxCols = 5000;
+            const columns = Math.max(minCols, Math.min(maxCols, estimatedCols));
+            const hopByColumns = Math.max(1, Math.floor((channelData.length - fftSize) / Math.max(columns - 1, 1)));
+
+            const binCount = fftSize >> 1;
+            const nyquist = sampleRate / 2;
+
+            const fMin = 65;
+            const fMax = 1400;
+            const binsPerOctave = 36;
+            const q = 1 / (Math.pow(2, 1 / binsPerOctave) - 1);
+
+            const real = new Float32Array(fftSize);
+            const imag = new Float32Array(fftSize);
+            const window = createHannWindow(fftSize);
+
+            const offscreen = document.createElement('canvas');
+            offscreen.width = columns;
+            offscreen.height = height;
+            const offCtx = offscreen.getContext('2d');
+            const image = offCtx.createImageData(columns, height);
+            const pixels = image.data;
+
+            const cqtBands = new Array(height);
+            for (let y = 0; y < height; y++) {
+                const t = 1 - (y / Math.max(1, height - 1));
+                const centerFreq = fMin * Math.pow(fMax / fMin, t);
+                const bandwidth = Math.max(8, centerFreq / q);
+                const lowFreq = Math.max(fMin, centerFreq - bandwidth * 0.6);
+                const highFreq = Math.min(fMax, centerFreq + bandwidth * 0.6);
+                const lowBin = Math.max(1, Math.floor((lowFreq / nyquist) * binCount));
+                const highBin = Math.max(lowBin + 1, Math.min(binCount - 1, Math.ceil((highFreq / nyquist) * binCount)));
+                cqtBands[y] = { lowBin, highBin };
+            }
+
+            const minDb = -96;
+            const maxDb = -28;
+
+            for (let x = 0; x < columns; x++) {
+                const frameStart = Math.min(x * hopByColumns, Math.max(0, channelData.length - fftSize));
+
+                for (let i = 0; i < fftSize; i++) {
+                    real[i] = channelData[frameStart + i] * window[i];
+                    imag[i] = 0;
+                }
+
+                fftInPlace(real, imag);
+
+                for (let y = 0; y < height; y++) {
+                    const band = cqtBands[y];
+                    let peakMag = 0;
+
+                    for (let b = band.lowBin; b <= band.highBin; b++) {
+                        const re = real[b];
+                        const im = imag[b];
+                        const mag = Math.sqrt(re * re + im * im) / fftSize;
+                        if (mag > peakMag) peakMag = mag;
+                    }
+
+                    const db = 20 * Math.log10(peakMag + 1e-9);
+                    let intensity = (db - minDb) / (maxDb - minDb);
+                    intensity = Math.max(0, Math.min(1, intensity));
+                    intensity = Math.pow(intensity, 1.15);
+                    intensity = Math.min(0.9, intensity);
+
+                    const color = spectrogramColor(intensity);
+                    const idx = (y * columns + x) * 4;
+                    pixels[idx] = color.r;
+                    pixels[idx + 1] = color.g;
+                    pixels[idx + 2] = color.b;
+                    pixels[idx + 3] = 255;
+                }
+            }
+
+            offCtx.putImageData(image, 0, 0);
+            context.imageSmoothingEnabled = false;
+            context.drawImage(offscreen, 0, 0, width, height);
+        }
+
+        function createHannWindow(size) {
+            const window = new Float32Array(size);
+            const denom = Math.max(1, size - 1);
+            for (let i = 0; i < size; i++) {
+                window[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / denom));
+            }
+            return window;
+        }
+
+        function fftInPlace(real, imag) {
+            const n = real.length;
+            let j = 0;
+            for (let i = 1; i < n; i++) {
+                let bit = n >> 1;
+                while (j & bit) {
+                    j ^= bit;
+                    bit >>= 1;
+                }
+                j ^= bit;
+                if (i < j) {
+                    const tr = real[i];
+                    const ti = imag[i];
+                    real[i] = real[j];
+                    imag[i] = imag[j];
+                    real[j] = tr;
+                    imag[j] = ti;
+                }
+            }
+
+            for (let len = 2; len <= n; len <<= 1) {
+                const halfLen = len >> 1;
+                const angle = -2 * Math.PI / len;
+                const wLenReal = Math.cos(angle);
+                const wLenImag = Math.sin(angle);
+
+                for (let start = 0; start < n; start += len) {
+                    let wReal = 1;
+                    let wImag = 0;
+                    for (let i = 0; i < halfLen; i++) {
+                        const uReal = real[start + i];
+                        const uImag = imag[start + i];
+
+                        const vReal = real[start + i + halfLen] * wReal - imag[start + i + halfLen] * wImag;
+                        const vImag = real[start + i + halfLen] * wImag + imag[start + i + halfLen] * wReal;
+
+                        real[start + i] = uReal + vReal;
+                        imag[start + i] = uImag + vImag;
+                        real[start + i + halfLen] = uReal - vReal;
+                        imag[start + i + halfLen] = uImag - vImag;
+
+                        const nextWReal = wReal * wLenReal - wImag * wLenImag;
+                        const nextWImag = wReal * wLenImag + wImag * wLenReal;
+                        wReal = nextWReal;
+                        wImag = nextWImag;
+                    }
+                }
+            }
+        }
+
+        function spectrogramColor(v) {
+            if (v <= 0) return { r: 12, g: 18, b: 34 };
+            if (v < 0.25) {
+                const t = v / 0.25;
+                return {
+                    r: Math.round(12 + (35 - 12) * t),
+                    g: Math.round(18 + (74 - 18) * t),
+                    b: Math.round(34 + (156 - 34) * t)
+                };
+            }
+            if (v < 0.5) {
+                const t = (v - 0.25) / 0.25;
+                return {
+                    r: Math.round(35 + (41 - 35) * t),
+                    g: Math.round(74 + (185 - 74) * t),
+                    b: Math.round(156 + (208 - 156) * t)
+                };
+            }
+            if (v < 0.75) {
+                const t = (v - 0.5) / 0.25;
+                return {
+                    r: Math.round(41 + (250 - 41) * t),
+                    g: Math.round(185 + (214 - 185) * t),
+                    b: Math.round(208 + (89 - 208) * t)
+                };
+            }
+            const t = (v - 0.75) / 0.25;
+            return {
+                r: Math.round(250 + (255 - 250) * t),
+                g: Math.round(214 + (255 - 214) * t),
+                b: Math.round(89 + (255 - 89) * t)
+            };
         }
 
         function startCompareAudio(offsetSeconds = 0) {
