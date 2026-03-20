@@ -31,6 +31,21 @@ class ProjectModel(QFileSystemModel):
     # 自定义数据 Role：用于文件树右侧显示 WAV 时长
     DurationRole = Qt.ItemDataRole.UserRole + 101
 
+    def flags(self, index):
+        flags = super().flags(index)
+        if not index.isValid():
+            return flags
+
+        path = os.path.normpath(self.filePath(index))
+        if path:
+            flags |= Qt.ItemFlag.ItemIsDragEnabled
+        if path and os.path.isdir(path):
+            flags |= Qt.ItemFlag.ItemIsDropEnabled
+        return flags
+
+    def supportedDropActions(self):
+        return Qt.DropAction.MoveAction
+
     def update_status(self, error_map, unsaved_files):
         """
         重新计算高亮路径

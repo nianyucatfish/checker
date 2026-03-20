@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QFileDialog,
+    QSlider,
 )
 from PyQt6.QtGui import (
     QFont,
@@ -818,10 +819,21 @@ class AudioPlayerWithWaveform(QWidget):
         top_controls.addWidget(self.btn_render_structure)
 
         top_controls.addStretch()
+        self.metronome_volume_label = QLabel("节拍器: 150%")
+        self.metronome_volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.metronome_volume_slider.setRange(0, 300)
+        self.metronome_volume_slider.setValue(150)
+        self.metronome_volume_slider.setFixedWidth(140)
+        self.metronome_volume_slider.valueChanged.connect(
+            self._on_metronome_volume_changed
+        )
+        top_controls.addWidget(self.metronome_volume_label)
+        top_controls.addWidget(self.metronome_volume_slider)
         layout.addLayout(top_controls)
 
         self.waveform_widget = WaveformWidget()
         self.media_player = MediaPlayer()
+        self.media_player.set_metronome_volume(1.5)
 
         self.waveform_widget.on_seek_request.connect(self.media_player.seek_ms)
         self.media_player.position_changed.connect(
@@ -831,6 +843,10 @@ class AudioPlayerWithWaveform(QWidget):
 
         layout.addWidget(self.waveform_widget)
         layout.addWidget(self.media_player)
+
+    def _on_metronome_volume_changed(self, value):
+        self.metronome_volume_label.setText(f"节拍器: {value}%")
+        self.media_player.set_metronome_volume(value / 100.0)
 
     def _toggle_beat_render(self, checked):
         if not checked:
@@ -1331,6 +1347,31 @@ class EditorManager(QWidget):
         else:
             self.stack.setCurrentIndex(0)
             self.empty_lbl.setText(f"不支持预览此文件类型: {ext}")
+
+    def _remap_path(self, path, path_map):
+        if not path:
+            return path
+        path_norm = os.path.normpath(os.path.abspath(path))
+        for src, dst in sorted(path_map.items(), key=lambda item: len(item[0]), reverse=True):
+            src_norm = os.path.normpath(os.path.abspath(src))
+            dst_norm = os.path.normpath(os.path.abspath(dst))
+            if path_norm == src_norm:
+                return dst_norm
+            src_prefix = src_norm + os.sep
+            if path_norm.startswith(src_prefix):
+                suffix = path_norm[len(src_prefix) :]
+                return os.path.normpath(os.path.join(dst_norm, suffix))
+        return path_norm
+
+    def remap_paths(self, path_map):
+        if not path_map:
+            return
+
+        self.text_editor.current_path = self._remap_path(self.text_editor.current_path, path_map)
+        self.csv_table_editor.current_path = self._remap_path(self.csv_table_editor.current_path, path_map)
+        self.csv_text_editor.current_path = self._remap_path(self.csv_text_editor.current_path, path_map)
+        self.midi_info.current_midi_path = self._remap_path(self.midi_info.current_midi_path, path_map)
+        self.media_player.path = self._remap_path(self.media_player.path, path_map)
 
     def close_all_tabs(self):
         self.media_player.stop()

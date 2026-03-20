@@ -28,6 +28,9 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QHBoxLayout,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect
 from PyQt6.QtGui import QAction, QKeySequence, QColor
@@ -123,6 +126,218 @@ class WavDurationDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class AutofixPreviewDialog(QDialog):
+    def __init__(self, parent, title, ops, base_path):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(560, 360)
+        self.ops = list(ops)
+        self.base_path = base_path
+
+        layout = QVBoxLayout(self)
+
+        tip = QLabel("以下项目将被修复，可选中后移除不想执行的项。")
+        layout.addWidget(tip)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        layout.addWidget(self.list_widget)
+
+        action_row = QHBoxLayout()
+        self.remove_btn = QPushButton("移除选中项")
+        self.remove_btn.clicked.connect(self._remove_selected)
+        action_row.addWidget(self.remove_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setText("确定")
+        cancel_btn = self.button_box.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_btn:
+            cancel_btn.setText("取消")
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+        self._refresh_list()
+
+    def _format_op(self, op):
+        src = os.path.relpath(op["src"], self.base_path)
+        dst = os.path.relpath(op["dst"], self.base_path)
+        return f"{src} → {dst}"
+
+    def _refresh_list(self):
+        self.list_widget.clear()
+        for op in self.ops:
+            self.list_widget.addItem(self._format_op(op))
+        self.remove_btn.setEnabled(bool(self.ops))
+        ok_btn = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setEnabled(bool(self.ops))
+
+    def _remove_selected(self):
+        rows = sorted(
+            {self.list_widget.row(item) for item in self.list_widget.selectedItems()},
+            reverse=True,
+        )
+        for row in rows:
+            if 0 <= row < len(self.ops):
+                self.ops.pop(row)
+        self._refresh_list()
+
+    def selected_ops(self):
+        return list(self.ops)
+
+
+class ProjectTreeView(QTreeView):
+    def __init__(self, move_handler=None, parent=None):
+        super().__init__(parent)
+        self.move_handler = move_handler
+        self._saved_current_index = None
+        self._drop_target_index = None
+        self._drag_source_paths = []
+
+    def _selected_source_paths(self):
+        selection_model = self.selectionModel()
+        model = self.model()
+        if not selection_model or not model:
+            return []
+
+        paths = []
+        seen = set()
+        for index in selection_model.selectedRows(0):
+            path = os.path.normpath(model.filePath(index))
+            if path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+
+        if not paths:
+            index = self.currentIndex()
+            if index.isValid():
+                path = os.path.normpath(model.filePath(index))
+                if path:
+                    paths.append(path)
+        return paths
+
+    def _resolve_drop_target_index(self, event):
+        model = self.model()
+        if not model:
+            return None
+
+        index = self.indexAt(event.position().toPoint())
+        if index.isValid():
+            path = os.path.normpath(model.filePath(index))
+            if os.path.isdir(path):
+                return index
+            parent = index.parent()
+            if parent.isValid():
+                parent_path = os.path.normpath(model.filePath(parent))
+                if parent_path and os.path.isdir(parent_path):
+                    return parent
+
+        root_index = self.rootIndex()
+        if root_index.isValid():
+            root_path = os.path.normpath(model.filePath(root_index))
+            if root_path and os.path.isdir(root_path):
+                return root_index
+        return None
+
+    def _resolve_drop_dir(self, event):
+        model = self.model()
+        target_index = self._resolve_drop_target_index(event)
+        if model and target_index and target_index.isValid():
+            target_path = os.path.normpath(model.filePath(target_index))
+            if target_path and os.path.isdir(target_path):
+                return target_path
+
+        root_path = os.path.normpath(model.rootPath()) if model and model.rootPath() else None
+        if root_path and os.path.isdir(root_path):
+            return root_path
+        return None
+
+    def _set_drop_target_index(self, index):
+        if index is not None and index.isValid() and self._saved_current_index is None:
+            self._saved_current_index = self.currentIndex()
+        self._drop_target_index = index if index is not None and index.isValid() else None
+        if self._drop_target_index is not None:
+            self.setCurrentIndex(self._drop_target_index)
+            self.scrollTo(self._drop_target_index)
+        elif self._saved_current_index is not None and self._saved_current_index.isValid():
+            self.setCurrentIndex(self._saved_current_index)
+            self._saved_current_index = None
+        else:
+            self._saved_current_index = None
+
+    def _begin_drag_session(self):
+        self._drag_source_paths = self._selected_source_paths()
+        return bool(self._drag_source_paths)
+
+    def _end_drag_session(self):
+        self._drag_source_paths = []
+        self._set_drop_target_index(None)
+
+    def _can_handle_drag(self, event):
+        return (
+            event.source() is self
+            and self.move_handler is not None
+            and bool(self._drag_source_paths)
+            and bool(self._resolve_drop_dir(event))
+        )
+
+    def startDrag(self, supportedActions):
+        if not self._begin_drag_session():
+            return
+        try:
+            super().startDrag(supportedActions)
+        finally:
+            self._end_drag_session()
+
+    def dragEnterEvent(self, event):
+        if self._can_handle_drag(event):
+            self._set_drop_target_index(self._resolve_drop_target_index(event))
+            event.acceptProposedAction()
+            return
+        self._set_drop_target_index(None)
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._can_handle_drag(event):
+            self._set_drop_target_index(self._resolve_drop_target_index(event))
+            event.acceptProposedAction()
+            return
+        self._set_drop_target_index(None)
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._set_drop_target_index(None)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        if not self._can_handle_drag(event):
+            self._set_drop_target_index(None)
+            event.ignore()
+            return
+
+        src_paths = list(self._drag_source_paths)
+        dst_dir = self._resolve_drop_dir(event)
+        if not src_paths or not dst_dir:
+            self._set_drop_target_index(None)
+            event.ignore()
+            return
+
+        self._set_drop_target_index(None)
+        if self.move_handler(src_paths, dst_dir):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+
 class MainWindow(QMainWindow):
     """
     主窗口模块
@@ -205,8 +420,7 @@ class MainWindow(QMainWindow):
         except IOError as e:
             self.log(f"保存配置失败: {e}")
 
-    def _is_song_folder(self, path: str) -> bool:
-        """判断是否为工作区下的歌曲文件夹（一级子目录）。"""
+    def _is_workspace_top_level_dir(self, path: str) -> bool:
         if (
             not path
             or not os.path.isdir(path)
@@ -216,7 +430,11 @@ class MainWindow(QMainWindow):
             return False
         parent = os.path.normpath(os.path.dirname(path))
         root = os.path.normpath(self.root_dir)
-        if parent != root:
+        return parent == root
+
+    def _is_song_folder(self, path: str) -> bool:
+        """判断是否为工作区下的歌曲文件夹（一级子目录）。"""
+        if not self._is_workspace_top_level_dir(path):
             return False
         # 至少包含一个目标子目录，避免对普通文件夹误触发
         return os.path.isdir(os.path.join(path, "分轨wav")) or os.path.isdir(
@@ -605,7 +823,7 @@ class MainWindow(QMainWindow):
         self.model = ProjectModel()
         self.model.setRootPath(self.root_dir or "")
 
-        self.tree = QTreeView()
+        self.tree = ProjectTreeView(move_handler=self._move_paths_via_tree)
         self.tree.setModel(self.model)
         # 检查根目录是否有效
         if self.root_dir and os.path.isdir(self.root_dir):
@@ -617,6 +835,12 @@ class MainWindow(QMainWindow):
         self.tree.setColumnHidden(1, True)
         self.tree.setColumnHidden(2, True)
         self.tree.setColumnHidden(3, True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.tree.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.tree.setItemDelegateForColumn(0, WavDurationDelegate(self.tree))
         self.tree.clicked.connect(self.on_file_clicked)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -962,8 +1186,13 @@ class MainWindow(QMainWindow):
         act_reveal.triggered.connect(lambda: self.reveal_in_explorer(path))
         menu.addAction(act_reveal)
 
-        if self._is_song_folder(path):
+        if self._is_workspace_top_level_dir(path):
             menu.addSeparator()
+            act_autofix_names = QAction("自动修复本项目命名", self)
+            act_autofix_names.triggered.connect(lambda: self.autofix_song_folder_names(path))
+            menu.addAction(act_autofix_names)
+
+        if self._is_song_folder(path):
             act_trim = QAction("统一时长到最短音频(裁剪尾部)", self)
             act_trim.triggered.connect(lambda: self.trim_song_wavs_to_shortest(path))
             menu.addAction(act_trim)
@@ -1124,47 +1353,503 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _rename_path(self, src_path, dst_path):
+        self._check_and_stop_player_if_needed(src_path)
+        os.rename(src_path, dst_path)
+        self.log(f"已重命名: {os.path.basename(src_path)} → {os.path.basename(dst_path)}")
+
+    def _normalize_path(self, path):
+        if not path:
+            return None
+        return os.path.normpath(os.path.abspath(path))
+
+    def _is_same_or_child_path(self, path, base_path):
+        path_norm = self._normalize_path(path)
+        base_norm = self._normalize_path(base_path)
+        if not path_norm or not base_norm:
+            return False
+        return path_norm == base_norm or path_norm.startswith(base_norm + os.sep)
+
+    def _remap_path(self, path, path_map):
+        path_norm = self._normalize_path(path)
+        if not path_norm:
+            return path
+
+        for src, dst in sorted(path_map.items(), key=lambda item: len(item[0]), reverse=True):
+            src_norm = self._normalize_path(src)
+            dst_norm = self._normalize_path(dst)
+            if not src_norm or not dst_norm:
+                continue
+            if path_norm == src_norm:
+                return dst_norm
+            src_prefix = src_norm + os.sep
+            if path_norm.startswith(src_prefix):
+                suffix = path_norm[len(src_prefix) :]
+                return os.path.normpath(os.path.join(dst_norm, suffix))
+        return path_norm
+
+    def _remap_runtime_paths(self, path_map):
+        if not path_map:
+            return
+
+        if self.last_selected_path:
+            self.last_selected_path = self._remap_path(self.last_selected_path, path_map)
+        if self.current_folder_path:
+            self.current_folder_path = self._remap_path(self.current_folder_path, path_map)
+
+        self.unsaved_files = {
+            self._remap_path(path, path_map) for path in self.unsaved_files if self._remap_path(path, path_map)
+        }
+
+        new_error_data = {}
+        for path, errors in self.error_data.items():
+            new_error_data[self._remap_path(path, path_map)] = errors
+        self.error_data = new_error_data
+
+        self.editor_manager.remap_paths(path_map)
+
+    def _refresh_watch_paths(self):
+        if not hasattr(self, "watcher"):
+            return
+
+        desired = []
+        if self.root_dir and os.path.isdir(self.root_dir):
+            desired.append(self.root_dir)
+            desired.extend(self._collect_song_folders())
+
+        current = [os.path.normpath(p) for p in self.watcher.directories()]
+        desired_norm = [os.path.normpath(p) for p in desired]
+
+        for path in list(self.watcher.directories()):
+            if os.path.normpath(path) not in desired_norm:
+                self.watcher.removePath(path)
+        for path in desired:
+            if os.path.normpath(path) not in current:
+                self.watcher.addPath(path)
+
+    def _collect_affected_song_paths(self, paths):
+        affected = []
+        seen = set()
+        for path in paths:
+            path_norm = self._normalize_path(path)
+            if not path_norm or not self.root_dir:
+                continue
+            try:
+                rel_path = os.path.relpath(path_norm, self.root_dir)
+            except ValueError:
+                continue
+            parts = rel_path.split(os.sep)
+            if not parts or parts[0] == ".":
+                continue
+            song_path = os.path.normpath(os.path.join(self.root_dir, parts[0]))
+            if song_path not in seen:
+                seen.add(song_path)
+                affected.append(song_path)
+        return affected
+
+    def _rescan_affected_paths(self, paths):
+        for song_path in self._collect_affected_song_paths(paths):
+            self.trigger_partial_scan(song_path)
+
+    def _filter_drag_sources(self, src_paths):
+        normalized = []
+        seen = set()
+        for path in src_paths:
+            path_norm = self._normalize_path(path)
+            if not path_norm or path_norm in seen:
+                continue
+            if self.root_dir and not self._is_same_or_child_path(path_norm, self.root_dir):
+                continue
+            seen.add(path_norm)
+            normalized.append(path_norm)
+
+        result = []
+        for path in sorted(normalized, key=lambda item: (item.count(os.sep), item)):
+            if any(self._is_same_or_child_path(path, parent) for parent in result):
+                continue
+            result.append(path)
+        return result
+
+    def _build_move_plan(self, src_paths, dst_dir):
+        dst_dir_norm = self._normalize_path(dst_dir)
+        if not dst_dir_norm or not os.path.isdir(dst_dir_norm):
+            return [], [], ["目标不是有效文件夹。"]
+
+        filtered = self._filter_drag_sources(src_paths)
+        if not filtered:
+            return [], [], ["没有可移动的项目。"]
+
+        plan = []
+        skip_messages = []
+        hard_conflicts = []
+        target_counts = {}
+
+        for src_path in filtered:
+            if not os.path.exists(src_path):
+                hard_conflicts.append(f"源路径不存在: {src_path}")
+                continue
+            if src_path == dst_dir_norm:
+                hard_conflicts.append(f"不能移动到自身: {os.path.basename(src_path)}")
+                continue
+            if os.path.isdir(src_path) and self._is_same_or_child_path(dst_dir_norm, src_path):
+                hard_conflicts.append(f"不能将文件夹移动到其自身或子目录: {os.path.basename(src_path)}")
+                continue
+            if os.path.dirname(src_path) == dst_dir_norm:
+                skip_messages.append(f"原地移动，已跳过: {os.path.basename(src_path)}")
+                continue
+
+            dst_path = os.path.normpath(os.path.join(dst_dir_norm, os.path.basename(src_path)))
+            target_counts[dst_path] = target_counts.get(dst_path, 0) + 1
+            plan.append({"src": src_path, "dst": dst_path, "overwrite": False})
+
+        duplicate_targets = {path for path, count in target_counts.items() if count > 1}
+        if duplicate_targets:
+            for path in sorted(duplicate_targets):
+                hard_conflicts.append(f"拖拽项存在重复目标名: {os.path.basename(path)}")
+
+        valid_plan = []
+        overwrite_candidates = []
+        for item in plan:
+            dst_path = item["dst"]
+            if dst_path in duplicate_targets:
+                continue
+            if os.path.exists(dst_path):
+                overwrite_candidates.append(item)
+                continue
+            valid_plan.append(item)
+
+        valid_plan.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
+        overwrite_candidates.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
+        return valid_plan, overwrite_candidates, skip_messages + hard_conflicts
+
+    def _confirm_move_plan(self, move_plan, dst_dir, notice_count=0):
+        if not move_plan:
+            return False
+
+        dst_name = os.path.basename(dst_dir.rstrip(os.sep)) or dst_dir
+        if len(move_plan) == 1:
+            src_name = os.path.basename(move_plan[0]["src"])
+            message = f'是否确定要将“{src_name}”移到“{dst_name}”？'
+        else:
+            lines = [f'是否确定要将这 {len(move_plan)} 个项目移到“{dst_name}”？']
+            for item in move_plan[:4]:
+                lines.append(f'- {os.path.basename(item["src"])}')
+            if len(move_plan) > 4:
+                lines.append(f'- 其余 {len(move_plan) - 4} 个项目')
+            if notice_count:
+                lines.append(f'另有 {notice_count} 个项目不会移动。')
+            message = "\n".join(lines)
+
+        return (
+            QMessageBox.question(self, "确认移动", message)
+            == QMessageBox.StandardButton.Yes
+        )
+
+    def _confirm_overwrite_candidates(self, overwrite_candidates):
+        if not overwrite_candidates:
+            return True
+
+        if len(overwrite_candidates) == 1:
+            name = os.path.basename(overwrite_candidates[0]["dst"])
+            message = f'目标文件夹中已存在名称为“{name}”的文件或文件夹。是否要替换它?'
+        else:
+            lines = [f'目标文件夹中已有 {len(overwrite_candidates)} 个同名文件或文件夹。是否全部替换?']
+            for item in overwrite_candidates[:4]:
+                lines.append(f'- {os.path.basename(item["dst"])}')
+            if len(overwrite_candidates) > 4:
+                lines.append(f'- 其余 {len(overwrite_candidates) - 4} 个项目')
+            message = "\n".join(lines)
+
+        return (
+            QMessageBox.question(self, "替换文件", message)
+            == QMessageBox.StandardButton.Yes
+        )
+
+    def _make_move_backup_path(self, dst_path):
+        candidate = f"{dst_path}.move_backup"
+        index = 1
+        while os.path.exists(candidate):
+            candidate = f"{dst_path}.move_backup_{index}"
+            index += 1
+        return candidate
+
+    def _cleanup_move_backups(self, executed_moves):
+        cleanup_errors = []
+        for item in reversed(executed_moves):
+            backup_path = item.get("backup_path")
+            if not backup_path or not os.path.exists(backup_path):
+                continue
+            try:
+                if os.path.isdir(backup_path):
+                    shutil.rmtree(backup_path)
+                else:
+                    os.remove(backup_path)
+            except Exception as e:
+                cleanup_errors.append(f"{backup_path}: {e}")
+        return cleanup_errors
+
+    def _rollback_move_plan(self, executed_moves):
+        rollback_errors = []
+        for item in reversed(executed_moves):
+            src_path = item["src"]
+            dst_path = item["dst"]
+            backup_path = item.get("backup_path")
+            try:
+                if os.path.exists(dst_path):
+                    self._check_and_stop_player_if_needed(dst_path)
+                    os.rename(dst_path, src_path)
+                if backup_path and os.path.exists(backup_path):
+                    self._check_and_stop_player_if_needed(backup_path)
+                    os.rename(backup_path, dst_path)
+            except Exception as e:
+                rollback_errors.append(f"{dst_path} -> {src_path}: {e}")
+        return rollback_errors
+
+    def _execute_move_plan(self, move_plan):
+        executed = []
+        path_map = {}
+        for item in move_plan:
+            src_path = item["src"]
+            dst_path = item["dst"]
+            overwrite = bool(item.get("overwrite"))
+            backup_path = None
+            self._check_and_stop_player_if_needed(src_path)
+            if overwrite and os.path.exists(dst_path):
+                self._check_and_stop_player_if_needed(dst_path)
+                backup_path = self._make_move_backup_path(dst_path)
+                os.rename(dst_path, backup_path)
+            os.rename(src_path, dst_path)
+            executed_item = {**item, "backup_path": backup_path}
+            executed.append(executed_item)
+            path_map[src_path] = dst_path
+            self.log(f"已移动: {os.path.basename(src_path)} → {dst_path}")
+        return executed, path_map
+
+    def _move_paths_via_tree(self, src_paths, dst_dir):
+        move_plan, overwrite_candidates, notices = self._build_move_plan(src_paths, dst_dir)
+        combined_plan = list(move_plan) + list(overwrite_candidates)
+        combined_plan.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
+
+        display_notices = [msg for msg in notices if not msg.startswith("原地移动，已跳过")]
+
+        if display_notices and not combined_plan:
+            QMessageBox.warning(self, "无法移动", "\n".join(display_notices[:12]))
+            return False
+        if not combined_plan:
+            return False
+        if not self._confirm_move_plan(combined_plan, dst_dir, notice_count=len(display_notices)):
+            return False
+        if overwrite_candidates and not self._confirm_overwrite_candidates(overwrite_candidates):
+            return False
+
+        final_plan = list(move_plan) + [{**item, "overwrite": True} for item in overwrite_candidates]
+        final_plan.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
+
+        before_paths = [item["src"] for item in final_plan]
+        after_paths = [item["dst"] for item in final_plan]
+        executed = []
+        try:
+            watcher = getattr(self, "watcher", None)
+            if watcher:
+                watcher.blockSignals(True)
+            executed, path_map = self._execute_move_plan(final_plan)
+            cleanup_errors = self._cleanup_move_backups(executed)
+            self._remap_runtime_paths(path_map)
+            self._refresh_watch_paths()
+            self._rescan_affected_paths(before_paths + after_paths)
+            self.refresh_model()
+            first_target = final_plan[0]["dst"]
+            if os.path.exists(first_target):
+                QTimer.singleShot(100, lambda: self._select_path_in_tree(first_target))
+            if cleanup_errors:
+                QMessageBox.warning(
+                    self,
+                    "移动完成",
+                    "移动已完成，但清理覆盖备份时有残留：\n" + "\n".join(cleanup_errors[:8]),
+                )
+            return True
+        except Exception as e:
+            rollback_errors = self._rollback_move_plan(executed)
+            if executed:
+                rollback_map = {item["dst"]: item["src"] for item in executed}
+                self._remap_runtime_paths(rollback_map)
+                self._refresh_watch_paths()
+                self._rescan_affected_paths(before_paths + after_paths)
+                self.refresh_model()
+            if rollback_errors:
+                QMessageBox.critical(
+                    self,
+                    "移动失败",
+                    f"移动失败: {e}\n\n回滚时仍有失败：\n" + "\n".join(rollback_errors[:12]),
+                )
+            else:
+                QMessageBox.critical(self, "移动失败", f"移动失败，已恢复到移动前状态。\n\n{e}")
+            return False
+        finally:
+            watcher = getattr(self, "watcher", None)
+            if watcher:
+                watcher.blockSignals(False)
+
+    def _collect_song_folders(self):
+        if not self.root_dir or not os.path.isdir(self.root_dir):
+            return []
+        try:
+            names = sorted(os.listdir(self.root_dir))
+        except Exception:
+            return []
+        return [
+            os.path.join(self.root_dir, name)
+            for name in names
+            if os.path.isdir(os.path.join(self.root_dir, name))
+        ]
+
+    def _build_autofix_plan(self, song_paths):
+        raw_ops = []
+        for song_path in song_paths:
+            raw_ops.extend(LogicChecker.propose_simple_renames(song_path))
+
+        deduped_ops = []
+        seen_pairs = set()
+        for op in raw_ops:
+            src = os.path.normpath(op["src"])
+            dst = os.path.normpath(op["dst"])
+            if src == dst:
+                continue
+            pair = (src, dst)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            deduped_ops.append({**op, "src": src, "dst": dst})
+
+        src_set = {op["src"] for op in deduped_ops}
+        target_counts = {}
+        for op in deduped_ops:
+            target_counts[op["dst"]] = target_counts.get(op["dst"], 0) + 1
+
+        conflicts = []
+        valid_ops = []
+        duplicate_targets = {dst for dst, count in target_counts.items() if count > 1}
+
+        for dst in sorted(duplicate_targets):
+            conflicts.append(f"目标重名，已跳过: {dst}")
+
+        for op in deduped_ops:
+            dst = op["dst"]
+            if dst in duplicate_targets:
+                continue
+            if os.path.exists(dst) and dst not in src_set:
+                conflicts.append(f"目标已存在，已跳过: {dst}")
+                continue
+            valid_ops.append(op)
+
+        valid_ops.sort(
+            key=lambda op: (
+                1 if op["kind"] == "song_folder" else 0,
+                -op["src"].count(os.sep),
+            )
+        )
+        return valid_ops, conflicts
+
+    def _show_autofix_summary(self, title, executed_ops, conflicts):
+        if not executed_ops and not conflicts:
+            QMessageBox.information(self, title, "未发现可自动修复的简单命名问题。")
+            return
+
+        lines = []
+        if executed_ops:
+            lines.append(f"已修复 {len(executed_ops)} 项：")
+            lines.extend(
+                f"- {os.path.basename(op['src'])} → {os.path.basename(op['dst'])}"
+                for op in executed_ops[:15]
+            )
+            if len(executed_ops) > 15:
+                lines.append(f"- 其余 {len(executed_ops) - 15} 项已省略")
+        if conflicts:
+            if lines:
+                lines.append("")
+            lines.append(f"已跳过 {len(conflicts)} 项：")
+            lines.extend(f"- {msg}" for msg in conflicts[:10])
+            if len(conflicts) > 10:
+                lines.append(f"- 其余 {len(conflicts) - 10} 项已省略")
+
+        QMessageBox.information(self, title, "\n".join(lines))
+
+    def _choose_autofix_ops(self, valid_ops, conflicts, *, base_path):
+        if not valid_ops:
+            self._show_autofix_summary("自动修复命名", [], conflicts)
+            return None
+
+        dialog = AutofixPreviewDialog(self, "自动修复命名", valid_ops, base_path)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.selected_ops()
+
+    def _run_autofix(self, song_paths, *, full_rescan=False):
+        valid_ops, conflicts = self._build_autofix_plan(song_paths)
+        base_path = self.root_dir if full_rescan else song_paths[0]
+        selected_ops = self._choose_autofix_ops(valid_ops, conflicts, base_path=base_path)
+        if selected_ops is None:
+            return
+
+        executed_ops = []
+        path_updates = {}
+
+        for op in selected_ops:
+            original_src = op["src"]
+            current_src = path_updates.get(original_src, original_src)
+            original_dst = op["dst"]
+            current_dst = path_updates.get(original_dst, original_dst)
+            if current_src == current_dst:
+                continue
+            try:
+                self._rename_path(current_src, current_dst)
+                executed_ops.append({**op, "src": current_src, "dst": current_dst})
+                for old_path, mapped_path in list(path_updates.items()):
+                    if mapped_path == current_src:
+                        path_updates[old_path] = current_dst
+                path_updates[original_src] = current_dst
+            except Exception as e:
+                conflicts.append(
+                    f"重命名失败 {os.path.basename(current_src)} → {os.path.basename(current_dst)}: {e}"
+                )
+
+        if executed_ops:
+            if full_rescan:
+                self.run_full_scan()
+            else:
+                final_song_paths = [op["dst"] for op in executed_ops if op["kind"] == "song_folder"]
+                song_path = final_song_paths[-1] if final_song_paths else path_updates.get(song_paths[-1], song_paths[-1])
+                self.trigger_partial_scan(song_path)
+                self.refresh_model()
+                if os.path.exists(song_path):
+                    QTimer.singleShot(100, lambda: self._select_path_in_tree(song_path))
+
+        self._show_autofix_summary("自动修复命名", executed_ops, conflicts)
+
+    def autofix_song_folder_names(self, song_path):
+        if not self._is_workspace_top_level_dir(song_path):
+            QMessageBox.warning(self, "无效路径", "只能修复工作区一级目录中的项目。")
+            return
+        self._run_autofix([song_path], full_rescan=False)
+
     def do_rename(self, path):
         old_name = os.path.basename(path)
         new_name, ok = QInputDialog.getText(self, "重命名", "新名称:", text=old_name)
         if ok and new_name and new_name != old_name:
             new_path = os.path.join(os.path.dirname(path), new_name)
 
-            # 检查是否正在重命名当前打开的文件
-            was_open = False
-            if self.last_selected_path:
-                try:
-                    if os.path.normpath(self.last_selected_path) == os.path.normpath(
-                        path
-                    ):
-                        was_open = True
-                except Exception:
-                    pass
-
-            # 尝试释放句柄
-            self._check_and_stop_player_if_needed(path)
-
             try:
-                os.rename(path, new_path)
-                # 新增：重命名后触发扫描和刷新
-                self.trigger_partial_scan(new_path)
+                old_path_norm = self._normalize_path(path)
+                new_path_norm = self._normalize_path(new_path)
+                self._rename_path(old_path_norm, new_path_norm)
+                self._remap_runtime_paths({old_path_norm: new_path_norm})
+                self._refresh_watch_paths()
+                self._rescan_affected_paths([old_path_norm, new_path_norm])
                 self.refresh_model()
 
-                # 移除会导致视图重置的代码
-                # self.model.setRootPath(self.root_dir)
-                # self.tree.setRootIndex(self.model.index(self.root_dir))
-
-                self.log(f"已重命名: {old_name} → {new_name}")
-
-                # 如果重命名的是当前文件，重新打开新路径以更新编辑器/播放器
-                if was_open:
-                    self.last_selected_path = new_path
-                    self.editor_manager.open_file(new_path)
-
-                # 尝试选中新文件 (延迟一点以等待模型更新)
                 QTimer.singleShot(
                     100,
-                    lambda: self._select_path_in_tree(new_path),
+                    lambda: self._select_path_in_tree(new_path_norm),
                 )
 
             except Exception as e:
@@ -1183,37 +1868,44 @@ class MainWindow(QMainWindow):
             == QMessageBox.StandardButton.Yes
         ):
             try:
-                # 检查是否正在删除当前打开的文件
-                was_open = False
-                if self.last_selected_path:
-                    try:
-                        if os.path.normpath(
-                            self.last_selected_path
-                        ) == os.path.normpath(path):
-                            was_open = True
-                    except Exception:
-                        pass
+                path_norm = self._normalize_path(path)
 
-                # 尝试释放句柄
-                self._check_and_stop_player_if_needed(path)
+                should_close_editor = False
+                if self.last_selected_path and self._is_same_or_child_path(
+                    self.last_selected_path, path_norm
+                ):
+                    should_close_editor = True
 
-                if os.path.isdir(path):
-                    shutil.rmtree(path)
+                self._check_and_stop_player_if_needed(path_norm)
+
+                if os.path.isdir(path_norm):
+                    shutil.rmtree(path_norm)
                 else:
-                    os.remove(path)
-                # 删除后触发增量扫描和刷新
-                self.trigger_partial_scan(os.path.dirname(path))
-                self.refresh_model()
+                    os.remove(path_norm)
 
-                # 移除会导致视图重置的代码
-                # self.model.setRootPath(self.root_dir)
-                # self.tree.setRootIndex(self.model.index(self.root_dir))
-
-                self.log(f"已删除: {os.path.basename(path)}")
-
-                # 如果删除的是当前文件，清空编辑器
-                if was_open:
+                self.unsaved_files = {
+                    p for p in self.unsaved_files if not self._is_same_or_child_path(p, path_norm)
+                }
+                self.error_data = {
+                    p: errs
+                    for p, errs in self.error_data.items()
+                    if not self._is_same_or_child_path(p, path_norm)
+                }
+                if self.current_folder_path and self._is_same_or_child_path(
+                    self.current_folder_path, path_norm
+                ):
+                    self.current_folder_path = None
+                if self.last_selected_path and self._is_same_or_child_path(
+                    self.last_selected_path, path_norm
+                ):
                     self.last_selected_path = None
+
+                self._refresh_watch_paths()
+                self._rescan_affected_paths([os.path.dirname(path_norm)])
+                self.refresh_model()
+                self.log(f"已删除: {os.path.basename(path_norm)}")
+
+                if should_close_editor:
                     self.editor_manager.close_all_tabs()
 
             except Exception as e:

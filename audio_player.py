@@ -74,18 +74,51 @@ class AudioPlaybackWorker(QThread):
 
         self.beat_data = []
         self.metronome_active = False
-        try:
-            self.ding_data, _ = sf.read("asset/ding.wav", dtype="float32")
-            self.da_data, _ = sf.read("asset/da.wav", dtype="float32")
-        except Exception:
-            self.ding_data = None
-            self.da_data = None
+        self.metronome_volume = 1.0
+        self._click_cache = {}
+        self._strong_click_freq = 1800.0
+        self._weak_click_freq = 1100.0
+        self._strong_click_duration = 0.065
+        self._weak_click_duration = 0.055
+        self._strong_click_gain = 0.12
+        self._weak_click_gain = 0.075
+
+    def _build_click_waveform(self, samplerate, is_first, channels):
+        frequency = self._strong_click_freq if is_first else self._weak_click_freq
+        duration = (
+            self._strong_click_duration if is_first else self._weak_click_duration
+        )
+        gain = self._strong_click_gain if is_first else self._weak_click_gain
+
+        sample_count = max(1, int(round(duration * samplerate)))
+        t = np.arange(sample_count, dtype=np.float32) / float(samplerate)
+        wave = np.sign(np.sin(2 * np.pi * frequency * t)).astype(np.float32)
+        envelope = np.geomspace(1.0, 0.003, sample_count).astype(np.float32)
+        click = (wave * envelope * gain).astype(np.float32)
+
+        if channels > 1:
+            click = np.repeat(click[:, np.newaxis], channels, axis=1)
+        return click
+
+    def _get_click_waveform(self, samplerate, is_first, channels):
+        key = (int(samplerate), int(channels), bool(is_first))
+        cached = self._click_cache.get(key)
+        if cached is None:
+            cached = self._build_click_waveform(samplerate, is_first, channels)
+            self._click_cache[key] = cached
+        return cached
 
     def set_beat_data(self, beat_data):
         self.beat_data = beat_data
 
     def set_metronome_active(self, active):
         self.metronome_active = active
+
+    def set_metronome_volume(self, volume):
+        try:
+            self.metronome_volume = max(0.0, float(volume))
+        except Exception:
+            self.metronome_volume = 1.0
 
     def run(self):
         try:
@@ -121,7 +154,7 @@ class AudioPlaybackWorker(QThread):
                             break  # End of file
 
                         # Metronome Mixing
-                        if self.metronome_active and self.ding_data is not None:
+                        if self.metronome_active:
                             start_frame = self.current_position
                             end_frame = start_frame + len(data)
 
@@ -130,7 +163,9 @@ class AudioPlaybackWorker(QThread):
                                 b_frame = int(beat_time * samplerate)
                                 if start_frame <= b_frame < end_frame:
                                     offset = b_frame - start_frame
-                                    sound = self.ding_data if is_first else self.da_data
+                                    sound = self._get_click_waveform(
+                                        samplerate, is_first, audio_file.channels
+                                    )
                                     active_clicks.append([sound, 0, offset])
 
                             # Mix active clicks
@@ -149,7 +184,7 @@ class AudioPlaybackWorker(QThread):
                                     if data.ndim == 2 and source_slice.ndim == 1:
                                         source_slice = source_slice[:, np.newaxis]
                                     try:
-                                        target_slice += source_slice
+                                        target_slice += source_slice * self.metronome_volume
                                     except Exception:
                                         pass
                                     s_idx += to_write
@@ -222,6 +257,7 @@ class MediaPlayer(QWidget):
         )
         self.beat_data = []
         self.metronome_active = False
+        self.metronome_volume = 1.0
 
         self._init_ui()
 
@@ -239,6 +275,14 @@ class MediaPlayer(QWidget):
         self.metronome_active = active
         if self.playback_worker:
             self.playback_worker.set_metronome_active(active)
+
+    def set_metronome_volume(self, volume):
+        try:
+            self.metronome_volume = max(0.0, float(volume))
+        except Exception:
+            self.metronome_volume = 1.0
+        if self.playback_worker:
+            self.playback_worker.set_metronome_volume(self.metronome_volume)
 
     def _init_ui(self):
         # ... (此方法内容保持不变) ...
@@ -311,6 +355,7 @@ class MediaPlayer(QWidget):
             self.playback_worker = AudioPlaybackWorker(self.path)
             self.playback_worker.set_beat_data(self.beat_data)
             self.playback_worker.set_metronome_active(self.metronome_active)
+            self.playback_worker.set_metronome_volume(self.metronome_volume)
 
             # 如果用户在首次播放前已通过滑块/波形设定了起始位置，
             # 则从该位置开始播放（ms -> frames）

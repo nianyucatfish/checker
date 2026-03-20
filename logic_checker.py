@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import soundfile as sf
 
 
@@ -7,6 +8,172 @@ class LogicChecker:
     """
     静态逻辑检查类，保持纯函数风格，便于复用。
     """
+
+    SONG_FOLDER_PATTERN = re.compile(r"^(.+?)_(.+?)_(.+?)$")
+    EXPECTED_FOLDERS = ["分轨wav", "总轨wav", "midi", "csv", "混音工程原文件"]
+    TRACK_REQUIRED_SUFFIXES = [
+        "Vocal_A",
+        "Vocal_B",
+        "Vocal_A(干声)",
+        "Vocal_B(干声)",
+    ]
+    TRACK_ALLOWED_SUFFIXES = ["BASS", "DR", "GTR", "PNO", "OTHER", "BG", "BG(干声)"]
+    MIX_EXPECTED_SUFFIXES = ["Mix_A", "Mix_B"]
+    MIDI_EXPECTED_SUFFIXES = ["Vocal_midi", "Mix_midi"]
+    MIDI_ALLOWED_SUFFIXES = ["BG_midi"]
+    CSV_EXPECTED_SUFFIXES = ["Beat", "Structure"]
+
+    @staticmethod
+    def normalize_simple_name(name):
+        if name is None:
+            return None
+        normalized = unicodedata.normalize("NFKC", str(name))
+        normalized = normalized.replace("-", "_")
+        return re.sub(r"[\s\u3000]+", "", normalized)
+
+    @staticmethod
+    def canonical_simple_name(name):
+        normalized = LogicChecker.normalize_simple_name(name)
+        return normalized.casefold() if normalized is not None else None
+
+    @staticmethod
+    def parse_song_folder_name(folder_name):
+        match = LogicChecker.SONG_FOLDER_PATTERN.match(folder_name or "")
+        if not match:
+            return None
+        return match.groups()
+
+    @staticmethod
+    def build_expected_structure(song_name):
+        return {
+            "top_level_dirs": list(LogicChecker.EXPECTED_FOLDERS),
+            "dir_valid_names": {
+                "分轨wav": [
+                    f"{song_name}_{suffix}.wav"
+                    for suffix in (
+                        LogicChecker.TRACK_REQUIRED_SUFFIXES
+                        + LogicChecker.TRACK_ALLOWED_SUFFIXES
+                    )
+                ],
+                "总轨wav": [
+                    f"{song_name}_{suffix}.wav"
+                    for suffix in LogicChecker.MIX_EXPECTED_SUFFIXES
+                ],
+                "midi": [
+                    f"{song_name}_{suffix}.mid"
+                    for suffix in (
+                        LogicChecker.MIDI_EXPECTED_SUFFIXES
+                        + LogicChecker.MIDI_ALLOWED_SUFFIXES
+                    )
+                ],
+                "csv": [
+                    f"{song_name}_{suffix}.csv"
+                    for suffix in LogicChecker.CSV_EXPECTED_SUFFIXES
+                ],
+            },
+        }
+
+    @staticmethod
+    def resolve_valid_name(current_name, valid_names):
+        current_key = LogicChecker.canonical_simple_name(current_name)
+        if current_key is None:
+            return None
+        matches = [
+            valid_name
+            for valid_name in valid_names
+            if LogicChecker.canonical_simple_name(valid_name) == current_key
+        ]
+        unique_matches = list(dict.fromkeys(matches))
+        if len(unique_matches) != 1:
+            return None
+        target_name = unique_matches[0]
+        if target_name == current_name:
+            return None
+        return target_name
+
+    @staticmethod
+    def propose_simple_renames(song_path):
+        rename_ops = []
+        if not os.path.isdir(song_path):
+            return rename_ops
+
+        folder_name = os.path.basename(song_path)
+        normalized_folder_name = LogicChecker.normalize_simple_name(folder_name)
+        effective_folder_name = folder_name
+
+        if (
+            normalized_folder_name
+            and normalized_folder_name != folder_name
+            and LogicChecker.parse_song_folder_name(normalized_folder_name)
+        ):
+            rename_ops.append(
+                {
+                    "src": song_path,
+                    "dst": os.path.join(os.path.dirname(song_path), normalized_folder_name),
+                    "kind": "song_folder",
+                }
+            )
+            effective_folder_name = normalized_folder_name
+
+        parsed = LogicChecker.parse_song_folder_name(effective_folder_name)
+        if not parsed:
+            return rename_ops
+
+        _, song_name, _ = parsed
+        structure = LogicChecker.build_expected_structure(song_name)
+        valid_top_level_dirs = structure["top_level_dirs"]
+
+        try:
+            top_level_items = sorted(os.listdir(song_path))
+        except Exception:
+            return rename_ops
+
+        managed_dirs = []
+        for item in top_level_items:
+            item_path = os.path.join(song_path, item)
+            if not os.path.isdir(item_path):
+                continue
+
+            target_dir_name = item if item in valid_top_level_dirs else LogicChecker.resolve_valid_name(item, valid_top_level_dirs)
+            if not target_dir_name:
+                continue
+
+            managed_dirs.append((item, target_dir_name, item_path))
+            if target_dir_name != item:
+                rename_ops.append(
+                    {
+                        "src": item_path,
+                        "dst": os.path.join(song_path, target_dir_name),
+                        "kind": "managed_dir",
+                    }
+                )
+
+        for _, target_dir_name, actual_dir_path in managed_dirs:
+            valid_file_names = structure["dir_valid_names"].get(target_dir_name)
+            if not valid_file_names:
+                continue
+
+            try:
+                child_items = sorted(os.listdir(actual_dir_path))
+            except Exception:
+                continue
+
+            for item in child_items:
+                item_path = os.path.join(actual_dir_path, item)
+                if not os.path.isfile(item_path):
+                    continue
+                target_file_name = LogicChecker.resolve_valid_name(item, valid_file_names)
+                if not target_file_name:
+                    continue
+                rename_ops.append(
+                    {
+                        "src": item_path,
+                        "dst": os.path.join(actual_dir_path, target_file_name),
+                        "kind": "file",
+                    }
+                )
+
+        return rename_ops
 
     @staticmethod
     def collect_files(folder, ext):
