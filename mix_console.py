@@ -15,8 +15,11 @@ from PyQt6.QtCore import (
     QObject,
     QRunnable,
     QThreadPool,
+    QRect,
+    QPoint,
+    QSize,
 )
-from PyQt6.QtGui import QFontMetrics
+from PyQt6.QtGui import QFontMetrics, QGuiApplication
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -402,6 +405,8 @@ class MixConsoleWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("混音台")
         self.resize(900, 600)
+        self._preferred_size = QSize(900, 600)
+        self._initial_geometry_applied = False
 
         self.tracks: List[MixTrack] = []
         self.track_widgets: Dict[str, MixTrackWidget] = {}
@@ -507,6 +512,53 @@ class MixConsoleWindow(QMainWindow):
 
         # 初始化一次加载提示
         self._update_loading_indicator()
+
+    def prepare_for_show(self, parent_window: Optional[QWidget] = None) -> None:
+        state = self.windowState()
+        if state & (
+            Qt.WindowState.WindowFullScreen
+            | Qt.WindowState.WindowMaximized
+            | Qt.WindowState.WindowMinimized
+        ):
+            self.setWindowState(Qt.WindowState.WindowNoState)
+
+        target_parent = parent_window or self.parentWidget()
+        screen = None
+        if target_parent is not None:
+            window_handle = target_parent.windowHandle()
+            if window_handle is not None:
+                screen = window_handle.screen()
+            if screen is None:
+                screen = target_parent.screen()
+        if screen is None:
+            window_handle = self.windowHandle()
+            if window_handle is not None:
+                screen = window_handle.screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        width = min(self._preferred_size.width(), max(480, available.width() - 80))
+        height = min(self._preferred_size.height(), max(320, available.height() - 80))
+
+        if not self._initial_geometry_applied:
+            origin = available.topLeft() + QPoint(40, 40)
+            if target_parent is not None:
+                origin = target_parent.frameGeometry().topLeft() + QPoint(48, 48)
+            left = min(max(origin.x(), available.left()), available.right() - width + 1)
+            top = min(max(origin.y(), available.top()), available.bottom() - height + 1)
+            self.setGeometry(QRect(left, top, width, height))
+            self._initial_geometry_applied = True
+            return
+
+        frame = self.frameGeometry()
+        if frame.isValid():
+            left = min(max(frame.left(), available.left()), available.right() - frame.width() + 1)
+            top = min(max(frame.top(), available.top()), available.bottom() - frame.height() + 1)
+            if left != frame.left() or top != frame.top():
+                self.move(left, top)
 
     def _update_loading_indicator(self) -> None:
         pending = len(self._pending_paths)

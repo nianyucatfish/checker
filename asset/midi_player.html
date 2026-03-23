@@ -28,21 +28,21 @@
         .global-controls {
             padding: 12px 20px;
             border-bottom: 1px solid #e1e4e8;
-            display: flex;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
             align-items: center;
-            justify-content: space-between;
+            gap: 12px;
             background: #fff;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
             z-index: 20;
-            position: relative;
         }
 
         .center-controls {
-            position: absolute;
-            left: 50%;
-            transform: translateX(-50%);
             display: flex;
+            align-items: center;
+            justify-self: center;
             gap: 12px;
+            min-width: 0;
         }
 
         .time-display {
@@ -50,13 +50,16 @@
             font-size: 14px;
             color: #666;
             min-width: 100px;
+            white-space: nowrap;
         }
 
         .right-controls {
-            margin-left: auto;
             display: flex;
             align-items: center;
+            justify-content: flex-end;
             gap: 10px;
+            min-width: 0;
+            overflow: hidden;
         }
 
         button {
@@ -101,8 +104,26 @@
         #status {
             font-weight: 500;
             color: #007bff;
-            margin-left: auto;
             font-size: 13px;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        @media (max-width: 620px) {
+            .global-controls {
+                padding: 10px 12px;
+                gap: 8px;
+            }
+
+            .right-controls {
+                gap: 6px;
+            }
+
+            #status {
+                display: none;
+            }
         }
 
         .error {
@@ -197,6 +218,18 @@
             cursor: pointer;
             flex: 1;
             text-align: center;
+        }
+
+        .toolbar-btn-fixed {
+            flex: 0 0 auto;
+        }
+
+        #moveModeBtn {
+            width: 96px;
+        }
+
+        #exportBtn {
+            width: 92px;
         }
 
         .btn-mini:hover {
@@ -456,8 +489,8 @@
             </div>
 
             <div class="right-controls">
-                <button id="moveModeBtn" class="btn-mini btn-move-mode" style="width: 96px;" disabled>移动模式:关</button>
-                <button id="exportBtn" class="btn-mini" style="width: 92px;" disabled>保存MIDI</button>
+                <button id="moveModeBtn" class="btn-mini btn-move-mode toolbar-btn-fixed" disabled>移动模式:关</button>
+                <button id="exportBtn" class="btn-mini toolbar-btn-fixed" disabled>保存MIDI</button>
                 <div id="status">等待加载 MIDI...</div>
             </div>
         </div>
@@ -551,6 +584,22 @@
         };
 
         // --- Initialization ---
+        function bindHorizontalScrollControls() {
+            const scrollBar = document.getElementById('timeline-scrollbar-container');
+            const trackArea = document.getElementById('tracks-scroll-area');
+            const handleHorizontalWheel = (e) => {
+                if (!scrollBar) return;
+                const deltaX = Number.isFinite(e.deltaX) ? e.deltaX : 0;
+                const deltaY = Number.isFinite(e.deltaY) ? e.deltaY : 0;
+                const horizontalDelta = Math.abs(deltaX) > 0 ? deltaX : (e.shiftKey ? deltaY : 0);
+                if (!horizontalDelta) return;
+                scrollBar.scrollLeft += horizontalDelta;
+                e.preventDefault();
+            };
+            scrollBar.addEventListener('wheel', handleHorizontalWheel, { passive: false });
+            trackArea.addEventListener('wheel', handleHorizontalWheel, { passive: false });
+        }
+
         async function init() {
             const status = document.getElementById('status');
             try {
@@ -576,6 +625,7 @@
                     : Math.min(pauseOffset, totalDurationForDisplay);
                 updatePlayheads(currentShown);
             });
+            bindHorizontalScrollControls();
 
             compareWavTrigger.addEventListener('click', (e) => {
                 e.stopPropagation();

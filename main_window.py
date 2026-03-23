@@ -865,6 +865,7 @@ class MainWindow(QMainWindow):
 
         # 底部：日志/问题面板
         self.bottom_tabs = QTabWidget()
+        self.bottom_tabs.tabBar().setExpanding(False)
         self.bottom_tabs.setStyleSheet(
             """
             QTabWidget::pane { border-top: 1px solid #e1e1e1; background: white; }
@@ -1297,13 +1298,18 @@ class MainWindow(QMainWindow):
                 self._on_mix_console_visibility_change
             )
 
+    def _show_mix_console_window(self):
+        self.ensure_mix_console()
+        self.mix_console_window.prepare_for_show(self)
+        self.mix_console_window.show()
+        self.mix_console_window.raise_()
+        self.mix_console_window.activateWindow()
+
     def toggle_mix_console(self, checked):
         self.ensure_mix_console()
         if checked:
             if not self.mix_console_window.isVisible():
-                self.mix_console_window.show()
-                self.mix_console_window.raise_()
-                self.mix_console_window.activateWindow()
+                self._show_mix_console_window()
         else:
             if self.mix_console_window.isVisible():
                 self.mix_console_window.hide()
@@ -1327,10 +1333,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "类型不支持", "仅支持将 WAV 文件添加到混音台。")
             return
 
-        self.ensure_mix_console()
-        self.mix_console_window.show()
-        self.mix_console_window.raise_()
-        self.mix_console_window.activateWindow()
+        self._show_mix_console_window()
         self.action_mix_console.setChecked(True)
         self.mix_console_window.add_track_from_file(path)
 
@@ -1360,10 +1363,7 @@ class MainWindow(QMainWindow):
             return
 
         # 确保混音台窗口存在并显示
-        self.ensure_mix_console()
-        self.mix_console_window.show()
-        self.mix_console_window.raise_()
-        self.mix_console_window.activateWindow()
+        self._show_mix_console_window()
         if hasattr(self, "action_mix_console"):
             self.action_mix_console.setChecked(True)
 
