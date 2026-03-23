@@ -8,7 +8,6 @@ APP_DIR_NAME = "AudioQC"
 
 def _unique_existing_or_fallback(paths):
     seen = set()
-    fallback = None
     for path in paths:
         if not path:
             continue
@@ -16,15 +15,14 @@ def _unique_existing_or_fallback(paths):
         if normalized in seen:
             continue
         seen.add(normalized)
-        if fallback is None:
-            fallback = normalized
         if os.path.exists(normalized):
             return normalized
-    return fallback
+    return None
 
 
 def asset_root() -> str:
     module_dir = os.path.dirname(os.path.abspath(__file__))
+    source_asset_dir = os.path.join(module_dir, "asset")
     candidates = []
 
     meipass = getattr(sys, "_MEIPASS", None)
@@ -40,9 +38,9 @@ def asset_root() -> str:
                 break
             current = parent
 
-    candidates.append(os.path.join(module_dir, "asset"))
+    candidates.append(source_asset_dir)
     resolved = _unique_existing_or_fallback(candidates)
-    return resolved or os.path.join(module_dir, "asset")
+    return resolved or source_asset_dir
 
 
 def resource_path(*parts: str) -> str:

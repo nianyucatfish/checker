@@ -78,9 +78,15 @@ jobs:
 
       # 2. PyInstaller 打包
       # 注意：这里使用 env.APP_NAME 统一命名
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller (Windows)
+        if: matrix.os == 'windows-latest'
         run: |
-          pyinstaller -F -w -n ${{ env.APP_NAME }} main.py
+          pyinstaller -F -w --add-data "asset;asset" -n ${{ env.APP_NAME }} main.py
+
+      - name: Build with PyInstaller (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          pyinstaller -F -w --add-data "asset:asset" -n ${{ env.APP_NAME }} main.py
 
       # 3. 整理文件并打包 (Windows)
       - name: Package for Windows
