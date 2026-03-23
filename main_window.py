@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QAbstractItemView,
 )
-from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect
+from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect, QMimeData, QUrl
 from PyQt6.QtGui import QAction, QKeySequence, QColor, QShortcut
 
 from paths import app_config_path
@@ -444,16 +444,16 @@ class MainWindow(QMainWindow):
             os.path.join(path, "总轨wav")
         )
 
-    def _confirm_trim_duration_action(self) -> bool:
-        """确认统一时长裁剪操作。可通过配置选择不再提示。"""
+    def _confirm_pad_duration_action(self) -> bool:
+        """确认统一时长补空白操作。可通过配置选择不再提示。"""
         if getattr(self, "suppress_trim_duration_prompt", False):
             return True
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("统一时长到最短音频")
+        box.setWindowTitle("统一时长到最长音频")
         box.setText(
-            "该功能会将该歌曲的‘分轨wav’与‘总轨wav’中的 WAV 文件统一裁剪到最短音频时长（仅切掉尾部）。"
+            "该功能会将该歌曲的‘分轨wav’与‘总轨wav’中的 WAV 文件统一补空白到最长音频时长（仅在尾部补静音）。"
         )
         box.setInformativeText(
             "请先手动确认所有音频起始点已对齐后再使用，否则可能导致听感错位。"
@@ -463,7 +463,7 @@ class MainWindow(QMainWindow):
         )
         yes_btn = box.button(QMessageBox.StandardButton.Yes)
         if yes_btn:
-            yes_btn.setText("确认裁剪")
+            yes_btn.setText("确认补空白")
         cancel_btn = box.button(QMessageBox.StandardButton.Cancel)
         if cancel_btn:
             cancel_btn.setText("取消")
@@ -480,12 +480,12 @@ class MainWindow(QMainWindow):
         return result == QMessageBox.StandardButton.Yes
 
     def trim_song_wavs_to_shortest(self, song_path: str) -> None:
-        """将歌曲文件夹内（分轨wav/总轨wav）所有 WAV 裁剪到最短时长（仅切尾部）。"""
+        """将歌曲文件夹内（分轨wav/总轨wav）所有 WAV 补空白到最长时长（仅尾部补静音）。"""
         if not song_path or not os.path.isdir(song_path):
             QMessageBox.warning(self, "无效路径", "无法识别所选歌曲文件夹。")
             return
 
-        if not self._confirm_trim_duration_action():
+        if not self._confirm_pad_duration_action():
             return
 
         self.editor_manager.media_player.stop()
@@ -514,32 +514,32 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "无 WAV 文件", "未找到可处理的 WAV 文件。")
             return
 
-        # 1) 扫描最短时长（秒）
+        # 1) 扫描最长时长（秒）
         metas: list[tuple[str, int, int, int]] = []  # (path, sr, channels, frames)
-        min_dur_sec: float | None = None
+        max_dur_sec: float | None = None
         for fp in wav_files:
             try:
                 with sf.SoundFile(fp) as f:
                     sr = int(f.samplerate)
                     ch = int(f.channels)
                     frames = int(f.frames)
-                    if sr <= 0 or frames <= 0:
+                    if sr <= 0 or frames < 0:
                         raise RuntimeError("采样率或帧数无效")
-                    dur = float(frames) / float(sr)
+                    dur = float(frames) / float(sr) if sr > 0 else 0.0
             except Exception as e:
                 QMessageBox.critical(self, "读取失败", f"无法读取 WAV: {fp}\n\n{e}")
                 return
 
             metas.append((fp, sr, ch, frames))
-            if min_dur_sec is None or dur < min_dur_sec:
-                min_dur_sec = dur
+            if max_dur_sec is None or dur > max_dur_sec:
+                max_dur_sec = dur
 
-        if not min_dur_sec or min_dur_sec <= 0:
-            QMessageBox.warning(self, "无法处理", "未能获取有效的最短时长。")
+        if max_dur_sec is None or max_dur_sec < 0:
+            QMessageBox.warning(self, "无法处理", "未能获取有效的最长时长。")
             return
 
-        # 2) 执行裁剪（流式写入临时文件再覆盖原文件）
-        trimmed = 0
+        # 2) 执行补空白（流式写入原音频 + 静音块到临时文件再覆盖原文件）
+        padded = 0
         watcher = getattr(self, "watcher", None)
         if watcher:
             try:
@@ -548,13 +548,13 @@ class MainWindow(QMainWindow):
                 watcher = None
 
         try:
-            for fp, sr, _ch, frames in metas:
-                target_frames = int(math.floor(min_dur_sec * sr))
-                target_frames = max(0, min(target_frames, frames))
-                if target_frames >= frames:
+            for fp, sr, ch, frames in metas:
+                target_frames = int(math.ceil(max_dur_sec * sr))
+                target_frames = max(frames, target_frames)
+                if target_frames <= frames:
                     continue
 
-                tmp_path = fp + ".trim_tmp.wav"
+                tmp_path = fp + ".pad_tmp.wav"
                 try:
                     with sf.SoundFile(fp, mode="r") as in_f:
                         with sf.SoundFile(
@@ -565,18 +565,23 @@ class MainWindow(QMainWindow):
                             format=in_f.format,
                             subtype=in_f.subtype,
                         ) as out_f:
-                            remaining = target_frames
                             block = 65536
-                            while remaining > 0:
-                                to_read = min(block, remaining)
-                                data = in_f.read(to_read, dtype="int32", always_2d=True)
+                            while True:
+                                data = in_f.read(block, dtype="int32", always_2d=True)
                                 if data.size == 0:
                                     break
                                 out_f.write(data)
-                                remaining -= data.shape[0]
+
+                            remaining = target_frames - frames
+                            if remaining > 0:
+                                silence_block = np.zeros((min(block, remaining), ch), dtype=np.int32)
+                                while remaining > 0:
+                                    chunk = min(silence_block.shape[0], remaining)
+                                    out_f.write(silence_block[:chunk])
+                                    remaining -= chunk
 
                     os.replace(tmp_path, fp)
-                    trimmed += 1
+                    padded += 1
                 except Exception as e:
                     try:
                         if os.path.exists(tmp_path):
@@ -585,7 +590,7 @@ class MainWindow(QMainWindow):
                         pass
                     QMessageBox.critical(
                         self,
-                        "裁剪失败",
+                        "补空白失败",
                         f"处理失败：{fp}\n\n{e}",
                     )
                     return
@@ -597,7 +602,7 @@ class MainWindow(QMainWindow):
                     pass
 
         self.log(
-            f"统一时长完成：目标 {min_dur_sec:.3f}s，已裁剪 {trimmed} 个文件（仅切尾部）"
+            f"统一时长完成：目标 {max_dur_sec:.3f}s，已补空白 {padded} 个文件（仅尾部补静音）"
         )
 
         # 3) 触发增量扫描刷新问题
@@ -1197,7 +1202,7 @@ class MainWindow(QMainWindow):
 
         act_paste = QAction("粘贴", self)
         act_paste.setShortcut(QKeySequence.StandardKey.Paste)
-        act_paste.setEnabled(bool(self.tree_copy_buffer))
+        act_paste.setEnabled(bool(self._get_pending_tree_paste_sources()[0]))
         act_paste.triggered.connect(lambda: self.paste_into_tree_target(path))
         menu.addAction(act_paste)
 
@@ -1214,7 +1219,7 @@ class MainWindow(QMainWindow):
             menu.addAction(act_autofix_names)
 
         if self._is_song_folder(path):
-            act_trim = QAction("统一时长到最短音频(裁剪尾部)", self)
+            act_trim = QAction("统一音频长度(尾部补空白)", self)
             act_trim.triggered.connect(lambda: self.trim_song_wavs_to_shortest(path))
             menu.addAction(act_trim)
 
@@ -1239,6 +1244,91 @@ class MainWindow(QMainWindow):
             return []
         return self._filter_drag_sources(self.tree._selected_source_paths())
 
+    def _clipboard_mime_data(self):
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            return None
+        return clipboard.mimeData()
+
+    def _decode_mime_bytes(self, data, encoding):
+        if not data:
+            return ""
+        try:
+            return bytes(data).decode(encoding, errors="ignore")
+        except Exception:
+            return ""
+
+    def _extract_local_paths_from_text(self, text):
+        paths = []
+        if not text:
+            return paths
+
+        for raw_line in text.splitlines():
+            line = raw_line.strip().strip("\x00")
+            if not line or line.startswith("#"):
+                continue
+
+            url = QUrl(line)
+            if url.isValid() and url.isLocalFile():
+                paths.append(url.toLocalFile())
+                continue
+
+            if os.path.isabs(line):
+                paths.append(line)
+
+        return paths
+
+    def _clipboard_windows_file_paths(self, mime_data):
+        if mime_data is None:
+            return []
+
+        paths = []
+        for fmt in mime_data.formats():
+            if 'FileNameW' in fmt:
+                decoded = self._decode_mime_bytes(mime_data.data(fmt), 'utf-16le')
+            elif 'FileName' in fmt:
+                decoded = self._decode_mime_bytes(mime_data.data(fmt), 'mbcs')
+            else:
+                continue
+
+            for item in decoded.split('\x00'):
+                path = item.strip().strip('\ufeff')
+                if path and os.path.isabs(path):
+                    paths.append(path)
+        return paths
+
+    def _clipboard_file_urls(self):
+        mime_data = self._clipboard_mime_data()
+        if mime_data is None or not mime_data.hasUrls():
+            return []
+        return [url for url in mime_data.urls() if isinstance(url, QUrl) and url.isLocalFile()]
+
+    def _clipboard_file_paths(self):
+        mime_data = self._clipboard_mime_data()
+        if mime_data is None:
+            return []
+
+        candidate_paths = [url.toLocalFile() for url in self._clipboard_file_urls()]
+        candidate_paths.extend(
+            self._extract_local_paths_from_text(
+                self._decode_mime_bytes(mime_data.data('text/uri-list'), 'utf-8')
+            )
+        )
+        candidate_paths.extend(self._extract_local_paths_from_text(mime_data.text()))
+        candidate_paths.extend(self._clipboard_windows_file_paths(mime_data))
+        return self._filter_copy_sources(candidate_paths, allow_external=True)
+
+    def _get_pending_tree_paste_sources(self):
+        clipboard_sources = self._clipboard_file_paths()
+        if clipboard_sources:
+            return clipboard_sources, "clipboard"
+
+        internal_sources = self._filter_copy_sources(self.tree_copy_buffer, allow_external=False)
+        if internal_sources:
+            return internal_sources, "internal"
+
+        return [], None
+
     def copy_selected_tree_items(self, source_path=None):
         explicit_path = self._normalize_path(source_path)
         selected_paths = self._get_tree_selected_paths()
@@ -1254,6 +1344,11 @@ class MainWindow(QMainWindow):
             return False
 
         self.tree_copy_buffer = list(src_paths)
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(path) for path in src_paths])
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setMimeData(mime_data)
         if len(src_paths) == 1:
             self.log(f'已复制“{os.path.basename(src_paths[0])}”，可在目标文件夹中粘贴。')
         else:
@@ -1280,8 +1375,9 @@ class MainWindow(QMainWindow):
         return None
 
     def paste_into_tree_target(self, target_path=None):
-        if not self.tree_copy_buffer:
-            self.log("复制缓冲区为空。")
+        src_paths, source_kind = self._get_pending_tree_paste_sources()
+        if not src_paths:
+            self.log("没有可粘贴的文件。")
             return False
 
         dst_dir = self._resolve_tree_paste_target_dir(target_path)
@@ -1289,7 +1385,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法粘贴", "目标不是有效文件夹。")
             return False
 
-        return self._copy_paths_via_tree(self.tree_copy_buffer, dst_dir)
+        copied = self._copy_paths_via_tree(
+            src_paths,
+            dst_dir,
+            allow_external=(source_kind == "clipboard"),
+        )
+        if copied and source_kind == "clipboard":
+            self.tree_copy_buffer = []
+        return copied
 
     def ensure_mix_console(self):
         if self.mix_console_window is None:
@@ -1528,14 +1631,16 @@ class MainWindow(QMainWindow):
         for song_path in self._collect_affected_song_paths(paths):
             self.trigger_partial_scan(song_path)
 
-    def _filter_drag_sources(self, src_paths):
+    def _filter_copy_sources(self, src_paths, allow_external=False):
         normalized = []
         seen = set()
         for path in src_paths:
             path_norm = self._normalize_path(path)
             if not path_norm or path_norm in seen:
                 continue
-            if self.root_dir and not self._is_same_or_child_path(path_norm, self.root_dir):
+            if not allow_external and self.root_dir and not self._is_same_or_child_path(path_norm, self.root_dir):
+                continue
+            if not os.path.exists(path_norm):
                 continue
             seen.add(path_norm)
             normalized.append(path_norm)
@@ -1546,6 +1651,9 @@ class MainWindow(QMainWindow):
                 continue
             result.append(path)
         return result
+
+    def _filter_drag_sources(self, src_paths):
+        return self._filter_copy_sources(src_paths, allow_external=False)
 
     def _build_move_plan(self, src_paths, dst_dir):
         dst_dir_norm = self._normalize_path(dst_dir)
@@ -1599,12 +1707,12 @@ class MainWindow(QMainWindow):
         overwrite_candidates.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
         return valid_plan, overwrite_candidates, skip_messages + hard_conflicts
 
-    def _build_copy_plan(self, src_paths, dst_dir):
+    def _build_copy_plan(self, src_paths, dst_dir, allow_external=False):
         dst_dir_norm = self._normalize_path(dst_dir)
         if not dst_dir_norm or not os.path.isdir(dst_dir_norm):
             return [], [], ["目标不是有效文件夹。"]
 
-        filtered = self._filter_drag_sources(src_paths)
+        filtered = self._filter_copy_sources(src_paths, allow_external=allow_external)
         if not filtered:
             return [], [], ["没有可复制的项目。"]
 
@@ -1858,8 +1966,12 @@ class MainWindow(QMainWindow):
             if watcher:
                 watcher.blockSignals(False)
 
-    def _copy_paths_via_tree(self, src_paths, dst_dir):
-        copy_plan, overwrite_candidates, notices = self._build_copy_plan(src_paths, dst_dir)
+    def _copy_paths_via_tree(self, src_paths, dst_dir, allow_external=False):
+        copy_plan, overwrite_candidates, notices = self._build_copy_plan(
+            src_paths,
+            dst_dir,
+            allow_external=allow_external,
+        )
         combined_plan = list(copy_plan) + list(overwrite_candidates)
         display_notices = [msg for msg in notices if not msg.startswith("原地复制，已跳过")]
 
