@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect
 from PyQt6.QtGui import QAction, QKeySequence, QColor
 
+from paths import app_config_path
 from file_model import ProjectModel
 from editors import EditorManager
 from workers import InitialScanWorker
@@ -47,7 +48,7 @@ import resampy
 import soundfile as sf
 
 # --- 配置常量 ---
-CONFIG_FILE = "asset/ide_config.json"
+CONFIG_FILE = app_config_path("ide_config.json")
 RECENT_WORKSPACE_KEY = "last_workspace"
 SPLITTER_SIZES_KEY = "splitter_sizes"
 SUPPRESS_TRIM_DURATION_PROMPT_KEY = "suppress_trim_duration_prompt"
@@ -415,6 +416,7 @@ class MainWindow(QMainWindow):
                     getattr(self, "suppress_trim_duration_prompt", False)
                 ),
             }
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=4)
         except IOError as e:

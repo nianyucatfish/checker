@@ -47,6 +47,7 @@ import librosa
 
 # 已移除图形 MIDI 预览依赖 (mido, pyqtgraph)。
 from audio_player import MediaPlayer
+from paths import resource_path, user_documents_dir
 
 
 class CsvTableEditor(QWidget):
@@ -1005,19 +1006,18 @@ class MidiPreview(QWebEngineView):
         self.page().setWebChannel(self.web_channel)
 
         self.loadFinished.connect(self._on_load_finished)
+        self.asset_base_url = QUrl.fromLocalFile(resource_path("") + os.sep)
 
         # Load HTML template
         try:
-            with open("asset/midi_player.html", "r", encoding="utf-8") as f:
+            with open(resource_path("midi_player.html"), "r", encoding="utf-8") as f:
                 self.html_template = f.read()
-            base_path = os.path.abspath("asset")
-            self.setHtml(self.html_template, QUrl.fromLocalFile(base_path + "/"))
+            self.setHtml(self.html_template, self.asset_base_url)
         except Exception as e:
             self.html_template = (
                 f"<html><body><h3>Error loading player template: {e}</h3></body></html>"
             )
-            base_path = os.path.abspath("asset")
-            self.setHtml(self.html_template, QUrl.fromLocalFile(base_path + "/"))
+            self.setHtml(self.html_template, self.asset_base_url)
 
     def load_file(self, path):
         try:
@@ -1029,8 +1029,7 @@ class MidiPreview(QWebEngineView):
             self._prepare_compare_wavs(path)
             self.pending_midi_data = base64.b64encode(data).decode("ascii")
             # Reload the page to clear state
-            base_path = os.path.abspath("asset")
-            self.setHtml(self.html_template, QUrl.fromLocalFile(base_path + "/"))
+            self.setHtml(self.html_template, self.asset_base_url)
         except Exception as e:
             print(f"Error loading MIDI: {e}")
 
@@ -1095,7 +1094,7 @@ class MidiExportBridge(QObject):
         if self.preview.current_midi_path:
             default_dir = os.path.dirname(self.preview.current_midi_path)
         else:
-            default_dir = os.getcwd()
+            default_dir = user_documents_dir()
 
         default_path = os.path.join(default_dir, default_name)
 
@@ -1125,7 +1124,7 @@ class MidiExportBridge(QObject):
         if not target_path:
             return "ERROR: 当前未打开MIDI文件"
 
-        target_dir = os.path.dirname(target_path) or os.getcwd()
+        target_dir = os.path.dirname(target_path) or user_documents_dir()
         try:
             midi_bytes = base64.b64decode(midi_base64)
 
