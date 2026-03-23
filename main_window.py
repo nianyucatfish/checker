@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect
-from PyQt6.QtGui import QAction, QKeySequence, QColor
+from PyQt6.QtGui import QAction, QKeySequence, QColor, QShortcut
 
 from paths import app_config_path
 from file_model import ProjectModel
@@ -360,6 +360,7 @@ class MainWindow(QMainWindow):
         self.last_selected_path = None
         self.mix_console_window = None
         self.suppress_trim_duration_prompt = False
+        self.tree_copy_buffer = []
 
         # 1. 配置加载与工作区初始化
         self.root_dir = None
@@ -847,6 +848,10 @@ class MainWindow(QMainWindow):
         self.tree.clicked.connect(self.on_file_clicked)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.open_tree_menu)
+        self.tree_copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self.tree)
+        self.tree_copy_shortcut.activated.connect(self.copy_selected_tree_items)
+        self.tree_paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self.tree)
+        self.tree_paste_shortcut.activated.connect(self.paste_into_tree_target)
 
         # 右侧：编辑器
         self.editor_manager = EditorManager()
@@ -1184,6 +1189,19 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
+        act_copy = QAction("复制", self)
+        act_copy.setShortcut(QKeySequence.StandardKey.Copy)
+        act_copy.triggered.connect(lambda: self.copy_selected_tree_items(path))
+        menu.addAction(act_copy)
+
+        act_paste = QAction("粘贴", self)
+        act_paste.setShortcut(QKeySequence.StandardKey.Paste)
+        act_paste.setEnabled(bool(self.tree_copy_buffer))
+        act_paste.triggered.connect(lambda: self.paste_into_tree_target(path))
+        menu.addAction(act_paste)
+
+        menu.addSeparator()
+
         act_reveal = QAction("在资源管理器中显示", self)
         act_reveal.triggered.connect(lambda: self.reveal_in_explorer(path))
         menu.addAction(act_reveal)
@@ -1214,6 +1232,63 @@ class MainWindow(QMainWindow):
             menu.addAction(act_add_mix_folder)
 
         menu.exec(self.tree.mapToGlobal(pos))
+
+    def _get_tree_selected_paths(self):
+        if not hasattr(self, "tree") or self.tree is None:
+            return []
+        return self._filter_drag_sources(self.tree._selected_source_paths())
+
+    def copy_selected_tree_items(self, source_path=None):
+        explicit_path = self._normalize_path(source_path)
+        selected_paths = self._get_tree_selected_paths()
+        if explicit_path and explicit_path in selected_paths:
+            src_paths = selected_paths
+        elif explicit_path:
+            src_paths = self._filter_drag_sources([explicit_path])
+        else:
+            src_paths = selected_paths
+
+        if not src_paths:
+            self.log("没有可复制的项目。")
+            return False
+
+        self.tree_copy_buffer = list(src_paths)
+        if len(src_paths) == 1:
+            self.log(f'已复制“{os.path.basename(src_paths[0])}”，可在目标文件夹中粘贴。')
+        else:
+            self.log(f"已复制 {len(src_paths)} 个项目，可在目标文件夹中粘贴。")
+        return True
+
+    def _resolve_tree_paste_target_dir(self, target_path=None):
+        target_norm = self._normalize_path(target_path)
+        if not target_norm and hasattr(self, "tree") and self.tree is not None:
+            index = self.tree.currentIndex()
+            if index.isValid():
+                target_norm = self._normalize_path(self.model.filePath(index))
+
+        if target_norm:
+            if os.path.isdir(target_norm):
+                return target_norm
+            parent_dir = os.path.dirname(target_norm)
+            if parent_dir and os.path.isdir(parent_dir):
+                return parent_dir
+
+        root_norm = self._normalize_path(self.root_dir)
+        if root_norm and os.path.isdir(root_norm):
+            return root_norm
+        return None
+
+    def paste_into_tree_target(self, target_path=None):
+        if not self.tree_copy_buffer:
+            self.log("复制缓冲区为空。")
+            return False
+
+        dst_dir = self._resolve_tree_paste_target_dir(target_path)
+        if not dst_dir or not os.path.isdir(dst_dir):
+            QMessageBox.warning(self, "无法粘贴", "目标不是有效文件夹。")
+            return False
+
+        return self._copy_paths_via_tree(self.tree_copy_buffer, dst_dir)
 
     def ensure_mix_console(self):
         if self.mix_console_window is None:
@@ -1524,6 +1599,58 @@ class MainWindow(QMainWindow):
         overwrite_candidates.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
         return valid_plan, overwrite_candidates, skip_messages + hard_conflicts
 
+    def _build_copy_plan(self, src_paths, dst_dir):
+        dst_dir_norm = self._normalize_path(dst_dir)
+        if not dst_dir_norm or not os.path.isdir(dst_dir_norm):
+            return [], [], ["目标不是有效文件夹。"]
+
+        filtered = self._filter_drag_sources(src_paths)
+        if not filtered:
+            return [], [], ["没有可复制的项目。"]
+
+        plan = []
+        skip_messages = []
+        hard_conflicts = []
+        target_counts = {}
+
+        for src_path in filtered:
+            if not os.path.exists(src_path):
+                hard_conflicts.append(f"源路径不存在: {src_path}")
+                continue
+            if src_path == dst_dir_norm:
+                hard_conflicts.append(f"不能复制到自身: {os.path.basename(src_path)}")
+                continue
+            if os.path.isdir(src_path) and self._is_same_or_child_path(dst_dir_norm, src_path):
+                hard_conflicts.append(f"不能将文件夹复制到其自身或子目录: {os.path.basename(src_path)}")
+                continue
+
+            dst_path = os.path.normpath(os.path.join(dst_dir_norm, os.path.basename(src_path)))
+            if src_path == dst_path:
+                skip_messages.append(f"原地复制，已跳过: {os.path.basename(src_path)}")
+                continue
+            target_counts[dst_path] = target_counts.get(dst_path, 0) + 1
+            plan.append({"src": src_path, "dst": dst_path, "overwrite": False})
+
+        duplicate_targets = {path for path, count in target_counts.items() if count > 1}
+        if duplicate_targets:
+            for path in sorted(duplicate_targets):
+                hard_conflicts.append(f"复制项存在重复目标名: {os.path.basename(path)}")
+
+        valid_plan = []
+        overwrite_candidates = []
+        for item in plan:
+            dst_path = item["dst"]
+            if dst_path in duplicate_targets:
+                continue
+            if os.path.exists(dst_path):
+                overwrite_candidates.append(item)
+                continue
+            valid_plan.append(item)
+
+        valid_plan.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
+        overwrite_candidates.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
+        return valid_plan, overwrite_candidates, skip_messages + hard_conflicts
+
     def _confirm_move_plan(self, move_plan, dst_dir, notice_count=0):
         if not move_plan:
             return False
@@ -1620,12 +1747,51 @@ class MainWindow(QMainWindow):
                 self._check_and_stop_player_if_needed(dst_path)
                 backup_path = self._make_move_backup_path(dst_path)
                 os.rename(dst_path, backup_path)
-            os.rename(src_path, dst_path)
             executed_item = {**item, "backup_path": backup_path}
             executed.append(executed_item)
+            os.rename(src_path, dst_path)
             path_map[src_path] = dst_path
             self.log(f"已移动: {os.path.basename(src_path)} → {dst_path}")
         return executed, path_map
+
+    def _execute_copy_plan(self, copy_plan):
+        executed = []
+        for item in copy_plan:
+            src_path = item["src"]
+            dst_path = item["dst"]
+            overwrite = bool(item.get("overwrite"))
+            backup_path = None
+            if overwrite and os.path.exists(dst_path):
+                self._check_and_stop_player_if_needed(dst_path)
+                backup_path = self._make_move_backup_path(dst_path)
+                os.rename(dst_path, backup_path)
+            executed_item = {**item, "backup_path": backup_path}
+            executed.append(executed_item)
+            if os.path.isdir(src_path):
+                shutil.copytree(src_path, dst_path)
+            else:
+                shutil.copy2(src_path, dst_path)
+            self.log(f"已复制: {os.path.basename(src_path)} → {dst_path}")
+        return executed
+
+    def _rollback_copy_plan(self, executed_copies):
+        rollback_errors = []
+        for item in reversed(executed_copies):
+            dst_path = item["dst"]
+            backup_path = item.get("backup_path")
+            try:
+                if os.path.exists(dst_path):
+                    self._check_and_stop_player_if_needed(dst_path)
+                    if os.path.isdir(dst_path):
+                        shutil.rmtree(dst_path)
+                    else:
+                        os.remove(dst_path)
+                if backup_path and os.path.exists(backup_path):
+                    self._check_and_stop_player_if_needed(backup_path)
+                    os.rename(backup_path, dst_path)
+            except Exception as e:
+                rollback_errors.append(f"{dst_path}: {e}")
+        return rollback_errors
 
     def _move_paths_via_tree(self, src_paths, dst_dir):
         move_plan, overwrite_candidates, notices = self._build_move_plan(src_paths, dst_dir)
@@ -1686,6 +1852,63 @@ class MainWindow(QMainWindow):
                 )
             else:
                 QMessageBox.critical(self, "移动失败", f"移动失败，已恢复到移动前状态。\n\n{e}")
+            return False
+        finally:
+            watcher = getattr(self, "watcher", None)
+            if watcher:
+                watcher.blockSignals(False)
+
+    def _copy_paths_via_tree(self, src_paths, dst_dir):
+        copy_plan, overwrite_candidates, notices = self._build_copy_plan(src_paths, dst_dir)
+        combined_plan = list(copy_plan) + list(overwrite_candidates)
+        display_notices = [msg for msg in notices if not msg.startswith("原地复制，已跳过")]
+
+        if display_notices and not combined_plan:
+            QMessageBox.warning(self, "无法复制", "\n".join(display_notices[:12]))
+            return False
+        if not combined_plan:
+            return False
+        if overwrite_candidates and not self._confirm_overwrite_candidates(overwrite_candidates):
+            return False
+
+        final_plan = list(copy_plan) + [{**item, "overwrite": True} for item in overwrite_candidates]
+        final_plan.sort(key=lambda item: (-item["src"].count(os.sep), item["src"]))
+
+        affected_paths = [item["src"] for item in final_plan] + [item["dst"] for item in final_plan]
+        executed = []
+        try:
+            watcher = getattr(self, "watcher", None)
+            if watcher:
+                watcher.blockSignals(True)
+            executed = self._execute_copy_plan(final_plan)
+            cleanup_errors = self._cleanup_move_backups(executed)
+            self._refresh_watch_paths()
+            self._rescan_affected_paths(affected_paths)
+            self.refresh_model()
+            first_target = final_plan[0]["dst"]
+            if os.path.exists(first_target):
+                QTimer.singleShot(100, lambda: self._select_path_in_tree(first_target))
+            if cleanup_errors:
+                QMessageBox.warning(
+                    self,
+                    "复制完成",
+                    "复制已完成，但清理覆盖备份时有残留：\n" + "\n".join(cleanup_errors[:8]),
+                )
+            return True
+        except Exception as e:
+            rollback_errors = self._rollback_copy_plan(executed)
+            if executed:
+                self._refresh_watch_paths()
+                self._rescan_affected_paths(affected_paths)
+                self.refresh_model()
+            if rollback_errors:
+                QMessageBox.critical(
+                    self,
+                    "复制失败",
+                    f"复制失败: {e}\n\n回滚时仍有失败：\n" + "\n".join(rollback_errors[:12]),
+                )
+            else:
+                QMessageBox.critical(self, "复制失败", f"复制失败，已恢复到复制前状态。\n\n{e}")
             return False
         finally:
             watcher = getattr(self, "watcher", None)
