@@ -51,6 +51,7 @@ import soundfile as sf
 CONFIG_FILE = app_config_path("ide_config.json")
 RECENT_WORKSPACE_KEY = "last_workspace"
 SPLITTER_SIZES_KEY = "splitter_sizes"
+HORIZONTAL_SPLITTER_SIZES_KEY = "horizontal_splitter_sizes"
 SUPPRESS_TRIM_DURATION_PROMPT_KEY = "suppress_trim_duration_prompt"
 
 
@@ -383,6 +384,7 @@ class MainWindow(QMainWindow):
     def _load_config(self):
         """从配置文件加载上次打开的工作区路径和界面布局"""
         self.saved_splitter_sizes = None  # 初始化保存的分割器尺寸
+        self.saved_horizontal_splitter_sizes = None
 
         if os.path.exists(CONFIG_FILE):
             try:
@@ -397,6 +399,9 @@ class MainWindow(QMainWindow):
 
                     # 加载分割器尺寸
                     self.saved_splitter_sizes = config.get(SPLITTER_SIZES_KEY)
+                    self.saved_horizontal_splitter_sizes = config.get(
+                        HORIZONTAL_SPLITTER_SIZES_KEY
+                    )
 
                     # 是否不再提示“统一时长裁剪”警告
                     self.suppress_trim_duration_prompt = bool(
@@ -412,6 +417,9 @@ class MainWindow(QMainWindow):
                 RECENT_WORKSPACE_KEY: self.root_dir,
                 SPLITTER_SIZES_KEY: (
                     self.splitter_v.sizes() if hasattr(self, "splitter_v") else None
+                ),
+                HORIZONTAL_SPLITTER_SIZES_KEY: (
+                    self.splitter_h.sizes() if hasattr(self, "splitter_h") else None
                 ),
                 SUPPRESS_TRIM_DURATION_PROMPT_KEY: bool(
                     getattr(self, "suppress_trim_duration_prompt", False)
@@ -826,6 +834,7 @@ class MainWindow(QMainWindow):
 
         splitter_v = QSplitter(Qt.Orientation.Vertical)
         splitter_h = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter_h = splitter_h
 
         # 左侧：文件树
         self.model = ProjectModel()
@@ -867,6 +876,8 @@ class MainWindow(QMainWindow):
         splitter_h.addWidget(self.editor_manager)
         splitter_h.setStretchFactor(0, 1)
         splitter_h.setStretchFactor(1, 3)
+        if self.saved_horizontal_splitter_sizes and len(self.saved_horizontal_splitter_sizes) == 2:
+            splitter_h.setSizes(self.saved_horizontal_splitter_sizes)
 
         # 底部：日志/问题面板
         self.bottom_tabs = QTabWidget()
@@ -2059,9 +2070,11 @@ class MainWindow(QMainWindow):
             deduped_ops.append({**op, "src": src, "dst": dst})
 
         src_set = {op["src"] for op in deduped_ops}
+        src_casefold_set = {os.path.normcase(src) for src in src_set}
         target_counts = {}
         for op in deduped_ops:
-            target_counts[op["dst"]] = target_counts.get(op["dst"], 0) + 1
+            dst_key = os.path.normcase(op["dst"])
+            target_counts[dst_key] = target_counts.get(dst_key, 0) + 1
 
         conflicts = []
         valid_ops = []
@@ -2072,9 +2085,10 @@ class MainWindow(QMainWindow):
 
         for op in deduped_ops:
             dst = op["dst"]
-            if dst in duplicate_targets:
+            dst_key = os.path.normcase(dst)
+            if dst_key in duplicate_targets:
                 continue
-            if os.path.exists(dst) and dst not in src_set:
+            if os.path.exists(dst) and dst_key not in src_casefold_set:
                 conflicts.append(f"目标已存在，已跳过: {dst}")
                 continue
             valid_ops.append(op)
@@ -2200,19 +2214,45 @@ class MainWindow(QMainWindow):
             self.tree.scrollTo(idx)
 
     def do_delete(self, path):
-        if (
-            QMessageBox.question(self, "删除", "确定永久删除?")
-            == QMessageBox.StandardButton.Yes
-        ):
-            try:
-                path_norm = self._normalize_path(path)
+        selected_paths = self._get_tree_selected_paths()
+        explicit_path = self._normalize_path(path)
+        if explicit_path and explicit_path in selected_paths:
+            target_paths = selected_paths
+        elif explicit_path:
+            target_paths = self._filter_drag_sources([explicit_path])
+        else:
+            target_paths = selected_paths
 
-                should_close_editor = False
-                if self.last_selected_path and self._is_same_or_child_path(
-                    self.last_selected_path, path_norm
-                ):
-                    should_close_editor = True
+        if not target_paths:
+            QMessageBox.information(self, "未选择项目", "请先选择要删除的文件或文件夹。")
+            return
 
+        if len(target_paths) == 1:
+            message = f'确定永久删除“{os.path.basename(target_paths[0])}”？'
+        else:
+            lines = [f"确定永久删除这 {len(target_paths)} 个项目？"]
+            for target_path in target_paths[:4]:
+                lines.append(f'- {os.path.basename(target_path)}')
+            if len(target_paths) > 4:
+                lines.append(f'- 其余 {len(target_paths) - 4} 个项目')
+            message = "\n".join(lines)
+
+        if QMessageBox.question(self, "删除", message) != QMessageBox.StandardButton.Yes:
+            return
+
+        should_close_editor = any(
+            self.last_selected_path and self._is_same_or_child_path(self.last_selected_path, target_path)
+            for target_path in target_paths
+        )
+        affected_parent_dirs = []
+
+        try:
+            watcher = getattr(self, "watcher", None)
+            if watcher:
+                watcher.blockSignals(True)
+
+            for path_norm in target_paths:
+                affected_parent_dirs.append(os.path.dirname(path_norm))
                 self._check_and_stop_player_if_needed(path_norm)
 
                 if os.path.isdir(path_norm):
@@ -2237,16 +2277,21 @@ class MainWindow(QMainWindow):
                 ):
                     self.last_selected_path = None
 
-                self._refresh_watch_paths()
-                self._rescan_affected_paths([os.path.dirname(path_norm)])
-                self.refresh_model()
                 self.log(f"已删除: {os.path.basename(path_norm)}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", str(e))
+            return
+        finally:
+            watcher = getattr(self, "watcher", None)
+            if watcher:
+                watcher.blockSignals(False)
 
-                if should_close_editor:
-                    self.editor_manager.close_all_tabs()
+        self._refresh_watch_paths()
+        self._rescan_affected_paths(affected_parent_dirs)
+        self.refresh_model()
 
-            except Exception as e:
-                QMessageBox.critical(self, "错误", str(e))
+        if should_close_editor:
+            self.editor_manager.close_all_tabs()
 
     def closeEvent(self, event):
         """应用关闭前保存配置并检查未保存文件"""

@@ -33,8 +33,10 @@ class LogicChecker:
 
     @staticmethod
     def canonical_simple_name(name):
-        normalized = LogicChecker.normalize_simple_name(name)
-        return normalized.casefold() if normalized is not None else None
+        if name is None:
+            return None
+        normalized = unicodedata.normalize("NFKC", str(name))
+        return normalized.casefold()
 
     @staticmethod
     def parse_song_folder_name(folder_name):
@@ -75,6 +77,25 @@ class LogicChecker:
 
     @staticmethod
     def resolve_valid_name(current_name, valid_names):
+        normalized_name = LogicChecker.normalize_simple_name(current_name)
+        if normalized_name is None:
+            return None
+
+        if normalized_name != current_name:
+            normalized_key = LogicChecker.canonical_simple_name(normalized_name)
+            if normalized_key is not None:
+                matches = [
+                    valid_name
+                    for valid_name in valid_names
+                    if LogicChecker.canonical_simple_name(valid_name) == normalized_key
+                ]
+                unique_matches = list(dict.fromkeys(matches))
+                if len(unique_matches) == 1:
+                    target_name = unique_matches[0]
+                    if target_name != current_name:
+                        return target_name
+            return normalized_name
+
         current_key = LogicChecker.canonical_simple_name(current_name)
         if current_key is None:
             return None
@@ -101,11 +122,7 @@ class LogicChecker:
         normalized_folder_name = LogicChecker.normalize_simple_name(folder_name)
         effective_folder_name = folder_name
 
-        if (
-            normalized_folder_name
-            and normalized_folder_name != folder_name
-            and LogicChecker.parse_song_folder_name(normalized_folder_name)
-        ):
+        if normalized_folder_name and normalized_folder_name != folder_name:
             rename_ops.append(
                 {
                     "src": song_path,
