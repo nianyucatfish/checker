@@ -17,7 +17,19 @@ class LogicChecker:
         "Vocal_A(干声)",
         "Vocal_B(干声)",
     ]
-    TRACK_ALLOWED_SUFFIXES = ["BASS", "DR", "GTR", "PNO", "OTHER", "BG", "BG(干声)"]
+    TRACK_ALLOWED_SUFFIXES = [
+        "BASS",
+        "DR",
+        "GTR",
+        "PNO",
+        "OTHER",
+        "BG",
+        "BG(干声)",
+        "BG_A",
+        "BG_A(干声)",
+        "BG_B",
+        "BG_B(干声)",
+    ]
     MIX_EXPECTED_SUFFIXES = ["Mix_A", "Mix_B"]
     MIDI_EXPECTED_SUFFIXES = ["Vocal_midi", "Mix_midi"]
     MIDI_ALLOWED_SUFFIXES = ["BG_midi"]
@@ -392,6 +404,38 @@ class LogicChecker:
     #  新增通用检查逻辑：覆盖原有的重复检查代码
     # =========================================================
     @staticmethod
+    def _validate_bg_track_combination(folder_path, song_name, existing_files, add_error_func):
+        bg_files = {
+            f"{song_name}_BG.wav",
+            f"{song_name}_BG(干声).wav",
+        }
+        bg_split_files = {
+            f"{song_name}_BG_A.wav",
+            f"{song_name}_BG_A(干声).wav",
+            f"{song_name}_BG_B.wav",
+            f"{song_name}_BG_B(干声).wav",
+        }
+
+        existing_bg_files = set(existing_files) & (bg_files | bg_split_files)
+        if not existing_bg_files:
+            return
+
+        has_standard_bg = bool(existing_bg_files & bg_files)
+        has_split_bg = bool(existing_bg_files & bg_split_files)
+
+        if has_standard_bg and has_split_bg:
+            add_error_func(folder_path, "[伴唱文件错误] 伴唱只能是 BG/BG(干声) 或 BG_A/BG_A(干声)+BG_B/BG_B(干声) 两种形式之一")
+            return
+
+        if has_standard_bg:
+            if existing_bg_files != bg_files:
+                add_error_func(folder_path, "[伴唱文件错误] 使用 BG 形式时，必须同时包含 BG 和 BG(干声)")
+            return
+
+        if existing_bg_files != bg_split_files:
+            add_error_func(folder_path, "[伴唱文件错误] 使用 BG_A/BG_B 形式时，必须同时包含 BG_A、BG_A(干声)、BG_B、BG_B(干声)")
+
+    @staticmethod
     def _validate_dir_contents(
         folder_path,
         ext,
@@ -399,6 +443,7 @@ class LogicChecker:
         allowed_files,
         add_error_func,
         file_check_callback=None,
+        dir_check_callback=None,
     ):
         """
         通用的文件夹内容检查器
@@ -419,6 +464,9 @@ class LogicChecker:
         for exp in expected_files:
             if exp not in existing_files:
                 add_error_func(folder_path, f"[缺失文件] {exp}")
+
+        if dir_check_callback:
+            dir_check_callback(folder_path, existing_files, add_error_func)
 
         # 3. 检查多余 (既不在 Expected 也不在 Allowed 中)
         valid_set = set(expected_files) | set(allowed_files)
@@ -488,13 +536,8 @@ class LogicChecker:
         # =========================================================
         wav_root = os.path.join(song_path, "分轨wav")
         # 定义后缀规则
-        track_required_suffixes = [
-            "Vocal_A",
-            "Vocal_B",
-            "Vocal_A(干声)",
-            "Vocal_B(干声)",
-        ]
-        track_allowed_suffixes = ["BASS", "DR", "GTR", "PNO", "OTHER", "BG", "BG(干声)"]
+        track_required_suffixes = list(LogicChecker.TRACK_REQUIRED_SUFFIXES)
+        track_allowed_suffixes = list(LogicChecker.TRACK_ALLOWED_SUFFIXES)
         # 生成完整文件名列表
         track_expected = [f"{song_name}_{s}.wav" for s in track_required_suffixes]
         track_allowed = [f"{song_name}_{s}.wav" for s in track_allowed_suffixes]
@@ -506,6 +549,12 @@ class LogicChecker:
             allowed_files=track_allowed,
             add_error_func=add_error,
             file_check_callback=LogicChecker.check_wav_format,
+            dir_check_callback=lambda folder_path, existing_files, add_error_func: LogicChecker._validate_bg_track_combination(
+                folder_path=folder_path,
+                song_name=song_name,
+                existing_files=existing_files,
+                add_error_func=add_error_func,
+            ),
         )
 
         # 分轨 WAV 最小时长检查：少于 3 分钟报错
