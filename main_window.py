@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect, QMimeData, QUrl
-from PyQt6.QtGui import QAction, QKeySequence, QColor, QShortcut, QPalette
+from PyQt6.QtGui import QAction, QKeySequence, QColor, QShortcut
 
 from paths import app_config_path
 from file_model import ProjectModel
@@ -949,9 +949,8 @@ class MainWindow(QMainWindow):
         # 底部：日志/问题面板
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.tabBar().setExpanding(False)
-        self.bottom_tabs.setStyleSheet(
+        self.bottom_tabs.tabBar().setStyleSheet(
             """
-            QTabWidget::pane { border-top: 1px solid #e1e1e1; background: white; }
             QTabBar::tab { background: #f3f3f3; color: #555; padding: 6px 12px; border: none; }
             QTabBar::tab:selected { background: white; color: #333; font-weight: bold; border-top: 2px solid #0078d7; }
             QTabBar::tab:hover { background: #e1e1e1; }
@@ -971,15 +970,6 @@ class MainWindow(QMainWindow):
         switch_row.setSpacing(8)
         self.error_mode_combo = QComboBox()
         self.error_mode_combo.setMinimumHeight(28)
-        combo_palette = self.error_mode_combo.palette()
-        button_color = combo_palette.color(QPalette.ColorRole.Button)
-        button_text_color = combo_palette.color(QPalette.ColorRole.ButtonText)
-        if button_color == button_text_color:
-            base_color = combo_palette.color(QPalette.ColorRole.Base)
-            text_color = combo_palette.color(QPalette.ColorRole.Text)
-            combo_palette.setColor(QPalette.ColorRole.Button, base_color)
-            combo_palette.setColor(QPalette.ColorRole.ButtonText, text_color)
-            self.error_mode_combo.setPalette(combo_palette)
         self.error_mode_combo.addItems(["全部问题", "当前文件夹问题"])
         self.error_mode_combo.setToolTip(
             "切换显示全部问题或仅显示当前文件/文件夹所在文件夹的问题"
