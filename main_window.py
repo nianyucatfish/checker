@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QTimer, QFileSystemWatcher, QPoint, QRect, QMimeData, QUrl
-from PyQt6.QtGui import QAction, QKeySequence, QColor, QShortcut
+from PyQt6.QtGui import QAction, QKeySequence, QColor, QShortcut, QPalette
 
 from paths import app_config_path
 from file_model import ProjectModel
@@ -431,6 +431,21 @@ class MainWindow(QMainWindow):
         except IOError as e:
             self.log(f"保存配置失败: {e}")
 
+    def _validated_splitter_sizes(self, sizes, min_second=120):
+        """校验 splitter 尺寸，避免恢复异常布局把底部区域压得过小。"""
+        if not isinstance(sizes, (list, tuple)) or len(sizes) != 2:
+            return None
+        try:
+            first = int(sizes[0])
+            second = int(sizes[1])
+        except (TypeError, ValueError):
+            return None
+        if first <= 0 or second < min_second:
+            return None
+        if first + second <= min_second:
+            return None
+        return [first, second]
+
     def _is_workspace_top_level_dir(self, path: str) -> bool:
         if (
             not path
@@ -453,15 +468,15 @@ class MainWindow(QMainWindow):
         )
 
     def _confirm_pad_duration_action(self) -> bool:
-        """确认统一时长补空白操作。可通过配置选择不再提示。"""
+        """确认统一三个目录音频时长补空白操作。可通过配置选择不再提示。"""
         if getattr(self, "suppress_trim_duration_prompt", False):
             return True
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("统一时长到最长音频")
+        box.setWindowTitle("统一音频长度")
         box.setText(
-            "该功能会将该歌曲的‘分轨wav’与‘总轨wav’中的 WAV 文件统一补空白到最长音频时长（仅在尾部补静音）。"
+            "该功能会将该歌曲的’分轨wav’、’总轨wav’、’混音工程原文件’三个目录下的一级 WAV 文件统一补空白到最长音频时长（仅在尾部补静音）。"
         )
         box.setInformativeText(
             "请先手动确认所有音频起始点已对齐后再使用，否则可能导致听感错位。"
@@ -488,7 +503,7 @@ class MainWindow(QMainWindow):
         return result == QMessageBox.StandardButton.Yes
 
     def trim_song_wavs_to_shortest(self, song_path: str) -> None:
-        """将歌曲文件夹内（分轨wav/总轨wav）所有 WAV 补空白到最长时长（仅尾部补静音）。"""
+        """将歌曲文件夹内三个目标目录的一级 WAV 补空白到最长时长（仅尾部补静音）。"""
         if not song_path or not os.path.isdir(song_path):
             QMessageBox.warning(self, "无效路径", "无法识别所选歌曲文件夹。")
             return
@@ -501,8 +516,27 @@ class MainWindow(QMainWindow):
         target_dirs = [
             os.path.join(song_path, "分轨wav"),
             os.path.join(song_path, "总轨wav"),
+            os.path.join(song_path, "混音工程原文件"),
         ]
 
+        wav_files = self._collect_top_level_wavs(target_dirs)
+        if not wav_files:
+            QMessageBox.information(self, "无 WAV 文件", "未找到可处理的一级 WAV 文件。")
+            return
+
+        padded, max_dur_sec = self._pad_wavs_to_longest(wav_files)
+        if padded is None:
+            return
+
+        self.log(
+            f"统一音频长度完成：目标 {max_dur_sec:.3f}s，已补空白 {padded} 个文件（仅处理一级 WAV，仅尾部补静音）"
+        )
+
+        self.trigger_partial_scan(song_path)
+        self.refresh_model()
+
+    def _collect_top_level_wavs(self, target_dirs: list[str]) -> list[str]:
+        """收集多个目录下的一级 WAV 文件。"""
         wav_files: list[str] = []
         for d in target_dirs:
             if not os.path.isdir(d):
@@ -517,12 +551,13 @@ class MainWindow(QMainWindow):
                 fp = os.path.join(d, name)
                 if os.path.isfile(fp):
                     wav_files.append(fp)
+        return wav_files
 
-        if not wav_files:
-            QMessageBox.information(self, "无 WAV 文件", "未找到可处理的 WAV 文件。")
-            return
+    def _pad_wavs_to_longest(self, wav_files: list[str]):
+        """将一批 WAV 文件补空白到其中最长的时长。
 
-        # 1) 扫描最长时长（秒）
+        返回 (padded_count, max_dur_sec)；失败时返回 (None, None)。
+        """
         metas: list[tuple[str, int, int, int]] = []  # (path, sr, channels, frames)
         max_dur_sec: float | None = None
         for fp in wav_files:
@@ -536,7 +571,7 @@ class MainWindow(QMainWindow):
                     dur = float(frames) / float(sr) if sr > 0 else 0.0
             except Exception as e:
                 QMessageBox.critical(self, "读取失败", f"无法读取 WAV: {fp}\n\n{e}")
-                return
+                return None, None
 
             metas.append((fp, sr, ch, frames))
             if max_dur_sec is None or dur > max_dur_sec:
@@ -544,9 +579,43 @@ class MainWindow(QMainWindow):
 
         if max_dur_sec is None or max_dur_sec < 0:
             QMessageBox.warning(self, "无法处理", "未能获取有效的最长时长。")
-            return
+            return None, None
 
-        # 2) 执行补空白（流式写入原音频 + 静音块到临时文件再覆盖原文件）
+        padded, ok = self._do_pad_wavs(metas, max_dur_sec)
+        if not ok:
+            return None, None
+        return padded, max_dur_sec
+
+    def _pad_wavs_to_target_duration(self, wav_files: list[str], target_dur_sec: float):
+        """将一批 WAV 文件补空白到指定目标时长（秒）。
+
+        返回 (padded_count, target_dur_sec)；失败时返回 (None, None)。
+        """
+        metas: list[tuple[str, int, int, int]] = []
+        for fp in wav_files:
+            try:
+                with sf.SoundFile(fp) as f:
+                    sr = int(f.samplerate)
+                    ch = int(f.channels)
+                    frames = int(f.frames)
+                    if sr <= 0 or frames < 0:
+                        raise RuntimeError("采样率或帧数无效")
+            except Exception as e:
+                QMessageBox.critical(self, "读取失败", f"无法读取 WAV: {fp}\n\n{e}")
+                return None, None
+            metas.append((fp, sr, ch, frames))
+
+        padded, ok = self._do_pad_wavs(metas, target_dur_sec)
+        if not ok:
+            return None, None
+        return padded, target_dur_sec
+
+    def _do_pad_wavs(self, metas: list[tuple[str, int, int, int]], target_dur_sec: float):
+        """执行实际的补静音写入操作。
+
+        metas: list of (path, samplerate, channels, frames)
+        返回 (padded_count, success: bool)。
+        """
         padded = 0
         watcher = getattr(self, "watcher", None)
         if watcher:
@@ -557,7 +626,7 @@ class MainWindow(QMainWindow):
 
         try:
             for fp, sr, ch, frames in metas:
-                target_frames = int(math.ceil(max_dur_sec * sr))
+                target_frames = int(math.ceil(target_dur_sec * sr))
                 target_frames = max(frames, target_frames)
                 if target_frames <= frames:
                     continue
@@ -601,7 +670,7 @@ class MainWindow(QMainWindow):
                         "补空白失败",
                         f"处理失败：{fp}\n\n{e}",
                     )
-                    return
+                    return padded, False
         finally:
             if watcher:
                 try:
@@ -609,13 +678,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-        self.log(
-            f"统一时长完成：目标 {max_dur_sec:.3f}s，已补空白 {padded} 个文件（仅尾部补静音）"
-        )
-
-        # 3) 触发增量扫描刷新问题
-        self.trigger_partial_scan(song_path)
-        self.refresh_model()
+        return padded, True
 
     def _update_window_title(self):
         """更新窗口标题，显示当前工作区名称"""
@@ -876,8 +939,12 @@ class MainWindow(QMainWindow):
         splitter_h.addWidget(self.editor_manager)
         splitter_h.setStretchFactor(0, 1)
         splitter_h.setStretchFactor(1, 3)
-        if self.saved_horizontal_splitter_sizes and len(self.saved_horizontal_splitter_sizes) == 2:
-            splitter_h.setSizes(self.saved_horizontal_splitter_sizes)
+        valid_horizontal_sizes = self._validated_splitter_sizes(
+            self.saved_horizontal_splitter_sizes,
+            min_second=200,
+        )
+        if valid_horizontal_sizes:
+            splitter_h.setSizes(valid_horizontal_sizes)
 
         # 底部：日志/问题面板
         self.bottom_tabs = QTabWidget()
@@ -903,6 +970,16 @@ class MainWindow(QMainWindow):
         switch_row.setContentsMargins(4, 4, 4, 4)
         switch_row.setSpacing(8)
         self.error_mode_combo = QComboBox()
+        self.error_mode_combo.setMinimumHeight(28)
+        combo_palette = self.error_mode_combo.palette()
+        button_color = combo_palette.color(QPalette.ColorRole.Button)
+        button_text_color = combo_palette.color(QPalette.ColorRole.ButtonText)
+        if button_color == button_text_color:
+            base_color = combo_palette.color(QPalette.ColorRole.Base)
+            text_color = combo_palette.color(QPalette.ColorRole.Text)
+            combo_palette.setColor(QPalette.ColorRole.Button, base_color)
+            combo_palette.setColor(QPalette.ColorRole.ButtonText, text_color)
+            self.error_mode_combo.setPalette(combo_palette)
         self.error_mode_combo.addItems(["全部问题", "当前文件夹问题"])
         self.error_mode_combo.setToolTip(
             "切换显示全部问题或仅显示当前文件/文件夹所在文件夹的问题"
@@ -929,9 +1006,13 @@ class MainWindow(QMainWindow):
         splitter_v.setStretchFactor(1, 2)
 
         # 加载保存的分割器尺寸,如果没有则使用默认值
-        if self.saved_splitter_sizes and len(self.saved_splitter_sizes) == 2:
-            splitter_v.setSizes(self.saved_splitter_sizes)
-            self.log(f"已恢复界面布局: {self.saved_splitter_sizes}")
+        valid_vertical_sizes = self._validated_splitter_sizes(
+            self.saved_splitter_sizes,
+            min_second=120,
+        )
+        if valid_vertical_sizes:
+            splitter_v.setSizes(valid_vertical_sizes)
+            self.log(f"已恢复界面布局: {valid_vertical_sizes}")
         else:
             # 设置默认初始高度：上部编辑区 700px，下部日志/问题面板 200px
             splitter_v.setSizes([700, 200])

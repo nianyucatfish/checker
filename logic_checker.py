@@ -343,10 +343,21 @@ class LogicChecker:
         tolerance_seconds=0.02,
     ):
         """检查两个文件夹内所有 WAV 的时长是否一致（允许少量容差）。"""
-        if not os.path.isdir(folder_a) or not os.path.isdir(folder_b):
-            return True
+        return LogicChecker.is_wav_durations_consistent_across_folders(
+            [folder_a, folder_b],
+            tolerance_seconds=tolerance_seconds,
+        )
+
+    @staticmethod
+    def is_wav_durations_consistent_across_folders(
+        folders,
+        tolerance_seconds=0.02,
+    ):
+        """检查多个文件夹内所有 WAV 的时长是否一致（允许少量容差）。"""
 
         def _list_wavs(folder):
+            if not os.path.isdir(folder):
+                return []
             try:
                 names = sorted(os.listdir(folder))
             except Exception:
@@ -360,7 +371,10 @@ class LogicChecker:
                     out.append(p)
             return out
 
-        wavs = _list_wavs(folder_a) + _list_wavs(folder_b)
+        wavs = []
+        for folder in folders:
+            wavs.extend(_list_wavs(folder))
+
         if len(wavs) <= 1:
             return True
 
@@ -587,14 +601,14 @@ class LogicChecker:
         )
 
         # =========================================================
-        #  4.x 分轨/总轨 WAV 时长一致性检查（每首歌仅报一条，且仅报跨目录不一致）
+        #  4.x 分轨/总轨/混音工程原文件 WAV 时长一致性检查（每首歌仅报一条）
         # =========================================================
-        if not LogicChecker.is_wav_durations_consistent_between_folders(
-            folder_a=wav_root,
-            folder_b=mix_root,
+        mix_proj_root = os.path.join(song_path, "混音工程原文件")
+        if not LogicChecker.is_wav_durations_consistent_across_folders(
+            folders=[wav_root, mix_root, mix_proj_root],
             tolerance_seconds=0.02,
         ):
-            add_error(song_path, "[总轨/分轨音频文件之间时长不一致]")
+            add_error(song_path, "[总轨/分轨/混音工程原文件之间音频时长不一致]")
 
         # =========================================================
         #  5. MIDI 检查 (MID)
@@ -703,7 +717,7 @@ class LogicChecker:
         # =========================================================
         #  7. 混音工程原文件夹检查
         # =========================================================
-        mix_proj_root = os.path.join(song_path, "混音工程原文件")
+        # mix_proj_root 已在 4.x 时长一致性检查处定义
 
         if os.path.exists(mix_proj_root):
             # 获取该目录下所有项目（包括隐藏文件）
