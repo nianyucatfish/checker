@@ -949,13 +949,6 @@ class MainWindow(QMainWindow):
         # 底部：日志/问题面板
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.tabBar().setExpanding(False)
-        self.bottom_tabs.tabBar().setStyleSheet(
-            """
-            QTabBar::tab { background: #f3f3f3; color: #555; padding: 6px 12px; border: none; }
-            QTabBar::tab:selected { background: white; color: #333; font-weight: bold; border-top: 2px solid #0078d7; }
-            QTabBar::tab:hover { background: #e1e1e1; }
-        """
-        )
 
         # 问题显示切换控件
         from PyQt6.QtWidgets import QHBoxLayout, QComboBox
