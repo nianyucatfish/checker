@@ -1,7 +1,6 @@
 import os
 import shutil
 import json
-import math
 from datetime import datetime
 import webbrowser
 from PyQt6.QtWidgets import (
@@ -554,12 +553,12 @@ class MainWindow(QMainWindow):
         return wav_files
 
     def _pad_wavs_to_longest(self, wav_files: list[str]):
-        """将一批 WAV 文件补空白到其中最长的时长。
+        """将一批 WAV 文件补空白到其中最长的帧数（采样点对齐）。
 
+        若待处理的 WAV 采样率不一致，弹窗提示后中止。
         返回 (padded_count, max_dur_sec)；失败时返回 (None, None)。
         """
         metas: list[tuple[str, int, int, int]] = []  # (path, sr, channels, frames)
-        max_dur_sec: float | None = None
         for fp in wav_files:
             try:
                 with sf.SoundFile(fp) as f:
@@ -568,52 +567,42 @@ class MainWindow(QMainWindow):
                     frames = int(f.frames)
                     if sr <= 0 or frames < 0:
                         raise RuntimeError("采样率或帧数无效")
-                    dur = float(frames) / float(sr) if sr > 0 else 0.0
             except Exception as e:
                 QMessageBox.critical(self, "读取失败", f"无法读取 WAV: {fp}\n\n{e}")
                 return None, None
-
             metas.append((fp, sr, ch, frames))
-            if max_dur_sec is None or dur > max_dur_sec:
-                max_dur_sec = dur
 
-        if max_dur_sec is None or max_dur_sec < 0:
-            QMessageBox.warning(self, "无法处理", "未能获取有效的最长时长。")
+        if not metas:
+            QMessageBox.warning(self, "无法处理", "未能读取任何 WAV 文件。")
             return None, None
 
-        padded, ok = self._do_pad_wavs(metas, max_dur_sec)
+        rates = {sr for _fp, sr, _ch, _frames in metas}
+        if len(rates) > 1:
+            detail = "\n".join(
+                f"{os.path.basename(fp)}: {sr} Hz"
+                for fp, sr, _ch, _frames in metas
+            )
+            QMessageBox.warning(
+                self,
+                "采样率不一致",
+                "无法统一时长：待处理的 WAV 采样率不一致。\n\n" + detail,
+            )
+            return None, None
+
+        samplerate = next(iter(rates))
+        max_frames = max(frames for _fp, _sr, _ch, frames in metas)
+
+        padded, ok = self._do_pad_wavs(metas, max_frames)
         if not ok:
             return None, None
+
+        max_dur_sec = float(max_frames) / float(samplerate)
         return padded, max_dur_sec
 
-    def _pad_wavs_to_target_duration(self, wav_files: list[str], target_dur_sec: float):
-        """将一批 WAV 文件补空白到指定目标时长（秒）。
+    def _do_pad_wavs(self, metas: list[tuple[str, int, int, int]], target_frames: int):
+        """执行实际的补静音写入操作，按精确帧数对齐。
 
-        返回 (padded_count, target_dur_sec)；失败时返回 (None, None)。
-        """
-        metas: list[tuple[str, int, int, int]] = []
-        for fp in wav_files:
-            try:
-                with sf.SoundFile(fp) as f:
-                    sr = int(f.samplerate)
-                    ch = int(f.channels)
-                    frames = int(f.frames)
-                    if sr <= 0 or frames < 0:
-                        raise RuntimeError("采样率或帧数无效")
-            except Exception as e:
-                QMessageBox.critical(self, "读取失败", f"无法读取 WAV: {fp}\n\n{e}")
-                return None, None
-            metas.append((fp, sr, ch, frames))
-
-        padded, ok = self._do_pad_wavs(metas, target_dur_sec)
-        if not ok:
-            return None, None
-        return padded, target_dur_sec
-
-    def _do_pad_wavs(self, metas: list[tuple[str, int, int, int]], target_dur_sec: float):
-        """执行实际的补静音写入操作。
-
-        metas: list of (path, samplerate, channels, frames)
+        metas: list of (path, samplerate, channels, frames)（假定 samplerate 已统一）
         返回 (padded_count, success: bool)。
         """
         padded = 0
@@ -626,8 +615,6 @@ class MainWindow(QMainWindow):
 
         try:
             for fp, sr, ch, frames in metas:
-                target_frames = int(math.ceil(target_dur_sec * sr))
-                target_frames = max(frames, target_frames)
                 if target_frames <= frames:
                     continue
 

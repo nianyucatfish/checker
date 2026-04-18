@@ -242,6 +242,19 @@ class LogicChecker:
             return None
 
     @staticmethod
+    def get_wav_frames_and_rate(wav_path):
+        """读取 WAV 总帧数与采样率。失败返回 (None, None)。"""
+        try:
+            with sf.SoundFile(wav_path) as f:
+                sr = int(f.samplerate)
+                frames = int(f.frames)
+                if sr <= 0 or frames < 0:
+                    return None, None
+                return frames, sr
+        except Exception:
+            return None, None
+
+    @staticmethod
     def check_wav_min_duration(wav_path, min_seconds=180.0):
         """检查 WAV 时长是否小于指定阈值；不足则返回错误字符串，否则返回 None。"""
         dur = LogicChecker.get_wav_duration_seconds(wav_path)
@@ -340,20 +353,17 @@ class LogicChecker:
     def is_wav_durations_consistent_between_folders(
         folder_a,
         folder_b,
-        tolerance_seconds=0.02,
     ):
-        """检查两个文件夹内所有 WAV 的时长是否一致（允许少量容差）。"""
+        """检查两个文件夹内所有 WAV 的采样率与帧数是否完全一致。"""
         return LogicChecker.is_wav_durations_consistent_across_folders(
             [folder_a, folder_b],
-            tolerance_seconds=tolerance_seconds,
         )
 
     @staticmethod
     def is_wav_durations_consistent_across_folders(
         folders,
-        tolerance_seconds=0.02,
     ):
-        """检查多个文件夹内所有 WAV 的时长是否一致（允许少量容差）。"""
+        """检查多个文件夹内所有 WAV 的采样率是否相同，且帧数是否严格一致。"""
 
         def _list_wavs(folder):
             if not os.path.isdir(folder):
@@ -378,21 +388,17 @@ class LogicChecker:
         if len(wavs) <= 1:
             return True
 
-        ref_dur = None
+        ref_frames = None
+        ref_sr = None
         for p in wavs:
-            d = LogicChecker.get_wav_duration_seconds(p)
-            if d is not None:
-                ref_dur = d
-                break
-
-        if ref_dur is None:
-            return True
-
-        for p in wavs:
-            d = LogicChecker.get_wav_duration_seconds(p)
-            if d is None:
+            frames, sr = LogicChecker.get_wav_frames_and_rate(p)
+            if frames is None:
                 continue
-            if abs(d - ref_dur) > tolerance_seconds:
+            if ref_frames is None:
+                ref_frames = frames
+                ref_sr = sr
+                continue
+            if sr != ref_sr or frames != ref_frames:
                 return False
 
         return True
@@ -606,7 +612,6 @@ class LogicChecker:
         mix_proj_root = os.path.join(song_path, "混音工程原文件")
         if not LogicChecker.is_wav_durations_consistent_across_folders(
             folders=[wav_root, mix_root, mix_proj_root],
-            tolerance_seconds=0.02,
         ):
             add_error(song_path, "[总轨/分轨/混音工程原文件之间音频时长不一致]")
 
