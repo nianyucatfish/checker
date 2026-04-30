@@ -1,0 +1,13 @@
+# Sidecar 运行时依赖（Python 3.11+）
+# 沿用旧 PyQt 版的核心音频栈
+numpy>=1.26
+soundfile>=0.12
+
+# 新增：sidecar HTTP / agent 层
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+
+# 测试
+pytest>=8
+httpx>=0.27
