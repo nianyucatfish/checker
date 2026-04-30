@@ -9,6 +9,10 @@ export default defineConfig({
     electron([
       {
         entry: "electron/main.ts",
+        onstart(args) {
+          // 仅插件启 Electron，不让 concurrently 重复启动
+          args.startup();
+        },
         vite: {
           build: { outDir: "dist-electron", rollupOptions: { external: ["electron"] } },
         },
