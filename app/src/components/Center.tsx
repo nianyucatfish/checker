@@ -1,65 +1,88 @@
-import { CheckCircle2, AlertCircle } from "lucide-react";
-import type { CheckErrorOut } from "../api";
+import { FileQuestion, FolderOpen } from "lucide-react";
+import { CsvViewer } from "./editors/CsvViewer";
+import { MonacoTextViewer } from "./editors/MonacoTextViewer";
+import { AudioViewer } from "./editors/AudioViewer";
+import { MidiViewer } from "./editors/MidiViewer";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 interface Props {
-  selected: string | null;
-  errors: CheckErrorOut[];
+  selectedPath: string | null;
+  selectedIsDir: boolean;
 }
 
 function basename(p: string) {
-  const m = p.split(/[\/]/);
+  const m = p.split(/[\\/]/);
   return m[m.length - 1] || p;
 }
 
-function tail(p: string, depth = 2) {
-  const parts = p.split(/[\/]/);
-  return parts.slice(-depth).join("/");
+function extOf(p: string) {
+  const m = p.match(/\.([^.\\/]+)$/);
+  return m ? m[1].toLowerCase() : "";
 }
 
-export function Center({ selected, errors }: Props) {
-  if (!selected) {
+const TEXT_EXTS = new Set(["txt", "md", "json", "log", "ini", "yml", "yaml"]);
+const AUDIO_EXTS = new Set(["wav", "mp3", "ogg", "flac", "m4a"]);
+const MIDI_EXTS = new Set(["mid", "midi"]);
+
+export function Center({ selectedPath, selectedIsDir }: Props) {
+  if (!selectedPath) {
     return (
       <div className="pane bg-bg">
-        <div className="flex-1 flex items-center justify-center text-fg-muted">
-          在左侧选择一首歌
+        <div className="flex-1 flex flex-col items-center justify-center text-fg-muted gap-2">
+          <FileQuestion size={32} />
+          <p>从左侧选择一首歌或文件</p>
         </div>
       </div>
     );
   }
+
+  if (selectedIsDir) {
+    return (
+      <div className="pane bg-bg">
+        <div className="pane-header">{basename(selectedPath)}</div>
+        <div className="flex-1 flex flex-col items-center justify-center text-fg-muted gap-2">
+          <FolderOpen size={32} />
+          <p>选中目录：{basename(selectedPath)}</p>
+          <p className="text-xs text-fg-subtle break-all px-8 text-center">{selectedPath}</p>
+        </div>
+      </div>
+    );
+  }
+
+  const ext = extOf(selectedPath);
+  let body: React.ReactNode;
+  if (ext === "csv") {
+    body = <CsvViewer key={selectedPath} path={selectedPath} />;
+  } else if (TEXT_EXTS.has(ext)) {
+    body = <MonacoTextViewer key={selectedPath} path={selectedPath} />;
+  } else if (AUDIO_EXTS.has(ext)) {
+    body = <AudioViewer key={selectedPath} path={selectedPath} />;
+  } else if (MIDI_EXTS.has(ext)) {
+    body = <MidiViewer key={selectedPath} path={selectedPath} />;
+  } else {
+    body = (
+      <div className="flex-1 flex flex-col items-start gap-3 p-6 text-fg-muted overflow-auto">
+        <div className="flex flex-col gap-1">
+          <span className="text-xs uppercase tracking-wide text-fg-subtle">类型</span>
+          <span className="text-fg">{ext ? `.${ext} 文件` : "文件"}</span>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs uppercase tracking-wide text-fg-subtle">路径</span>
+          <span className="text-fg break-all font-mono text-xs">{selectedPath}</span>
+        </div>
+        <div className="text-xs text-fg-subtle italic mt-2">
+          暂不支持预览此类型
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="pane bg-bg">
-      <div className="pane-header">{basename(selected)}</div>
-      <div className="pane-body">
-        {errors.length === 0 ? (
-          <div className="flex flex-col items-center justify-center text-fg-muted gap-2 py-12">
-            <CheckCircle2 size={32} className="text-success" />
-            <p>该歌曲未发现问题（或还未扫描）</p>
-          </div>
-        ) : (
-          <div className="px-3 flex flex-col gap-2">
-            <div className="text-danger font-medium">{errors.length} 处问题</div>
-            {errors.map((e, i) => (
-              <div key={i} className="border border-border rounded px-3 py-2">
-                <div className="flex items-start gap-2">
-                  <AlertCircle size={16} className="text-danger mt-0.5 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <code className="font-mono text-xs text-fg-subtle bg-bg-hover px-1 rounded">
-                        {e.code}
-                      </code>
-                      {e.machine_fixable && (
-                        <span className="text-xs text-success">可自动修</span>
-                      )}
-                    </div>
-                    <div className="mt-1">{e.message}</div>
-                    <div className="font-mono text-xs text-fg-muted mt-1">{tail(e.path, 2)}</div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      <div className="pane-header">{basename(selectedPath)}</div>
+      <ErrorBoundary label={`Center / ${ext || "无扩展"}`} key={selectedPath}>
+        {body}
+      </ErrorBoundary>
     </div>
   );
 }
