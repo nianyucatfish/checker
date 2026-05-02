@@ -6,11 +6,13 @@ Pydantic schemas in sidecar.schemas keep contracts stable for the renderer.
 """
 
 import csv
+import mimetypes
 import os
 from typing import List
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from sidecar import checker, fixers
 from sidecar.schemas import (
@@ -19,8 +21,10 @@ from sidecar.schemas import (
     ApplyRenamesOut,
     CheckErrorOut,
     CheckResult,
+    DirEntry,
     DurationSummary,
     FileEntry,
+    ListDirOut,
     ListSongFilesOut,
     ListWorkspaceOut,
     PadResultOut,
@@ -29,6 +33,10 @@ from sidecar.schemas import (
     ReadCsvOut,
     ReadTextOut,
     RenameOpModel,
+    AudioPeaksOut,
+    WriteCsvIn,
+    WriteResultOut,
+    WriteTextIn,
 )
 from logic_checker import LogicChecker
 
@@ -112,6 +120,31 @@ def tool_get_duration_summary(folder: str = Query(...), tolerance_seconds: float
         folder, tolerance_seconds=tolerance_seconds
     )
     return DurationSummary(folder=folder, inconsistent=summary is not None, summary=summary)
+
+
+@app.get("/tools/list_dir", response_model=ListDirOut)
+def tool_list_dir(path: str = Query(..., description="absolute directory path")):
+    """列举单层目录，供前端文件树懒加载。文件夹优先 + 名称序。"""
+    if not os.path.isdir(path):
+        raise HTTPException(status_code=400, detail=f"not a directory: {path}")
+    try:
+        names = os.listdir(path)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"list failed: {e}")
+    entries: List[DirEntry] = []
+    for name in names:
+        full = os.path.join(path, name)
+        try:
+            is_dir = os.path.isdir(full)
+            size = 0 if is_dir else os.path.getsize(full)
+        except OSError:
+            continue
+        ext = "" if is_dir else os.path.splitext(name)[1].lstrip(".").lower()
+        entries.append(DirEntry(
+            path=full, name=name, is_dir=is_dir, size_bytes=size, ext=ext,
+        ))
+    entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
+    return ListDirOut(path=path, entries=entries)
 
 
 @app.get("/tools/list_song_files", response_model=ListSongFilesOut)
@@ -221,4 +254,103 @@ def tool_pad_song_to_longest(body: PadSongIn):
     return PadResultOut(
         ok=r.error is None, padded=r.padded,
         max_duration=r.max_duration, error=r.error,
+    )
+
+
+def _atomic_write(path: str, write_fn) -> int:
+    """tmp 写 + os.replace 原子覆盖；失败时清理 tmp。"""
+    parent = os.path.dirname(path) or "."
+    if not os.path.isdir(parent):
+        raise HTTPException(status_code=400, detail=f"parent not a directory: {parent}")
+    tmp = path + ".__write_tmp__"
+    try:
+        write_fn(tmp)
+        os.replace(tmp, path)
+    except Exception as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=f"write failed: {e}")
+    return os.path.getsize(path)
+
+
+@app.post("/tools/write_csv", response_model=WriteResultOut)
+def tool_write_csv(body: WriteCsvIn):
+    def _do(tmp: str):
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(body.rows)
+    size = _atomic_write(body.path, _do)
+    return WriteResultOut(path=body.path, bytes_written=size)
+
+
+@app.post("/tools/write_text", response_model=WriteResultOut)
+def tool_write_text(body: WriteTextIn):
+    def _do(tmp: str):
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(body.content)
+    size = _atomic_write(body.path, _do)
+    return WriteResultOut(path=body.path, bytes_written=size)
+
+
+@app.get("/files/raw")
+def files_raw(path: str = Query(..., description="absolute file path")):
+    """流式返回任意本地文件的字节内容。FileResponse 自带 Range 支持，
+    供前端 <audio>/<video> / fetch decodeAudioData 等使用。
+    """
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"file not found: {path}")
+    media_type, _ = mimetypes.guess_type(path)
+    if not media_type:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".mid", ".midi"):
+            media_type = "audio/midi"
+        else:
+            media_type = "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=os.path.basename(path))
+
+
+@app.get("/tools/get_audio_peaks", response_model=AudioPeaksOut)
+def tool_get_audio_peaks(path: str = Query(...), columns: int = 4000):
+    """服务端预算 min/max 波形包络。前端只画图，不再 decodeAudioData，避免 OOM。
+
+    columns 默认 4000；过大没意义（屏幕宽度撑死 ~3000px），过小波形不准。
+    """
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=400, detail=f"file not found: {path}")
+    columns = max(1, min(8000, int(columns)))
+
+    import numpy as np
+    import soundfile as sf
+
+    try:
+        with sf.SoundFile(path) as f:
+            sr = int(f.samplerate)
+            ch = int(f.channels)
+            frames = int(f.frames)
+            data = f.read(dtype="float32", always_2d=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"read failed: {e}")
+
+    if data.size == 0 or frames <= 0:
+        return AudioPeaksOut(
+            path=path, samplerate=sr, channels=ch, frames=frames,
+            duration_seconds=0.0, columns=0, mins=[], maxs=[],
+        )
+
+    chan0 = data[:, 0]
+    samples_per_col = max(1, frames // columns)
+    actual_cols = min(columns, frames // samples_per_col)
+    if actual_cols <= 0:
+        actual_cols = 1
+    trim = samples_per_col * actual_cols
+    arr = chan0[:trim].reshape(actual_cols, samples_per_col)
+    mins = arr.min(axis=1).astype(float).tolist()
+    maxs = arr.max(axis=1).astype(float).tolist()
+    return AudioPeaksOut(
+        path=path, samplerate=sr, channels=ch, frames=frames,
+        duration_seconds=float(frames) / float(sr),
+        columns=actual_cols, mins=mins, maxs=maxs,
     )

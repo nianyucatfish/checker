@@ -125,6 +125,33 @@ def test_get_duration_summary_consistent(workspace):
     assert body["inconsistent"] is False
 
 
+def test_list_dir_returns_immediate_children(workspace):
+    song = _song(workspace, "X_y_Z")
+    Path(os.path.join(song, "loose.txt")).write_text("hi", encoding="utf-8")
+    r = client.get("/tools/list_dir", params={"path": song})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    names = [e["name"] for e in body["entries"]]
+    # 文件夹优先 + 名称序；5 个目录在前，loose.txt 在最后
+    assert names[-1] == "loose.txt"
+    assert {"分轨wav", "总轨wav", "midi", "csv", "混音工程原文件"}.issubset(set(names))
+    dir_entries = [e for e in body["entries"] if e["is_dir"]]
+    file_entries = [e for e in body["entries"] if not e["is_dir"]]
+    assert len(dir_entries) == 5
+    assert len(file_entries) == 1
+    txt = file_entries[0]
+    assert txt["ext"] == "txt"
+    assert txt["size_bytes"] == 2
+
+
+def test_list_dir_rejects_non_dir(workspace):
+    p = os.path.join(workspace, "x.txt")
+    Path(p).write_text("hi", encoding="utf-8")
+    r = client.get("/tools/list_dir", params={"path": p})
+    assert r.status_code == 400
+
+
 def test_list_song_files_with_audio_meta(workspace):
     song = _song(workspace, "X_y_Z")
     _wav(os.path.join(song, "分轨wav", "X_y_Z_Vocal_A.wav"), frames=48000, sr=48000)
@@ -194,6 +221,86 @@ def test_pad_song_to_longest(workspace):
     assert body["ok"] is True
     assert body["padded"] == 1
     assert body["max_duration"] == pytest.approx(3.0, abs=1e-6)
+
+
+def test_write_csv_atomic(workspace):
+    p = os.path.join(workspace, "out.csv")
+    rows = [["TIME", "LABEL"], ["0.0", "Intro"], ["12.5", "Chorus"]]
+    r = client.post("/tools/write_csv", json={"path": p, "rows": rows})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["bytes_written"] > 0
+    rr = client.get("/tools/read_csv", params={"path": p})
+    assert rr.json()["rows"] == rows
+
+
+def test_write_csv_overwrite(workspace):
+    p = os.path.join(workspace, "out.csv")
+    Path(p).write_text("OLD,DATA\n", encoding="utf-8")
+    rows = [["X", "Y"], ["1", "2"]]
+    r = client.post("/tools/write_csv", json={"path": p, "rows": rows})
+    assert r.status_code == 200
+    rr = client.get("/tools/read_csv", params={"path": p})
+    assert rr.json()["rows"] == rows
+
+
+def test_write_csv_rejects_bad_parent():
+    r = client.post(
+        "/tools/write_csv",
+        json={"path": "/nope/nowhere/x.csv", "rows": [["a"]]},
+    )
+    assert r.status_code == 400
+
+
+def test_write_text_atomic(workspace):
+    p = os.path.join(workspace, "note.md")
+    r = client.post(
+        "/tools/write_text",
+        json={"path": p, "content": "# 标题\n\n正文内容\n"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bytes_written"] > 0
+    rr = client.get("/tools/read_text", params={"path": p, "max_bytes": "10000"})
+    assert rr.json()["content"] == "# 标题\n\n正文内容\n"
+
+
+def test_files_raw_serves_bytes(workspace):
+    p = os.path.join(workspace, "note.txt")
+    Path(p).write_bytes(b"hello-bytes")
+    r = client.get("/files/raw", params={"path": p})
+    assert r.status_code == 200
+    assert r.content == b"hello-bytes"
+
+
+def test_files_raw_404_when_missing():
+    r = client.get("/files/raw", params={"path": "/nope/missing.bin"})
+    assert r.status_code == 404
+
+
+def test_get_audio_peaks(workspace):
+    p = os.path.join(workspace, "x.wav")
+    sr = 48000
+    # 写 1 秒正弦波，便于检查 min/max 大致接近 ±1
+    t = np.arange(sr) / sr
+    samples = (np.sin(2 * np.pi * 440 * t) * 0.9).astype(np.float32)
+    samples_2d = np.stack([samples, samples], axis=1)
+    sf.write(p, samples_2d, sr, subtype="FLOAT")
+    r = client.get("/tools/get_audio_peaks", params={"path": p, "columns": 100})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["columns"] == 100
+    assert len(body["mins"]) == 100
+    assert len(body["maxs"]) == 100
+    # 振幅 0.9 的正弦应该让某些列接近 ±0.9
+    assert max(body["maxs"]) > 0.7
+    assert min(body["mins"]) < -0.7
+
+
+def test_get_audio_peaks_404():
+    r = client.get("/tools/get_audio_peaks", params={"path": "/nope/x.wav"})
+    assert r.status_code == 400
 
 
 def test_openapi_schema_available():

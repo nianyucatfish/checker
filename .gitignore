@@ -37,3 +37,10 @@ asset/ide_config.json
 
 # Local-only reference codebase (not part of this project)
 GenericAgent/
+
+# Node / Electron / Vite
+node_modules/
+app/dist/
+app/dist-electron/
+app/tsconfig.*.tsbuildinfo
+*.log

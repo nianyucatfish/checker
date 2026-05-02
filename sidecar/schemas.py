@@ -108,6 +108,25 @@ class ListSongFilesOut(BaseModel):
 
 
 # ====================================================
+#  list_dir（一级目录列举，供前端文件树懒加载）
+# ====================================================
+
+
+class DirEntry(BaseModel):
+    path: str          # 绝对路径
+    name: str
+    is_dir: bool
+    size_bytes: int = 0  # 文件夹固定 0
+    ext: str = ""        # 不带点的小写扩展名；目录为空
+
+
+class ListDirOut(BaseModel):
+    ok: bool = True
+    path: str
+    entries: List[DirEntry]
+
+
+# ====================================================
 #  propose_renames / apply_renames
 # ====================================================
 
@@ -173,3 +192,41 @@ class ReadTextOut(BaseModel):
     path: str
     content: str
     truncated: bool
+
+
+# ====================================================
+#  write_csv / write_text（原子写）
+# ====================================================
+
+
+class WriteCsvIn(BaseModel):
+    path: str
+    rows: List[List[str]]
+
+
+class WriteTextIn(BaseModel):
+    path: str
+    content: str
+
+
+class WriteResultOut(BaseModel):
+    ok: bool = True
+    path: str
+    bytes_written: int
+
+
+# ====================================================
+#  get_audio_peaks（服务端预算波形包络，避免渲染端 decodeAudioData OOM）
+# ====================================================
+
+
+class AudioPeaksOut(BaseModel):
+    ok: bool = True
+    path: str
+    samplerate: int
+    channels: int
+    frames: int
+    duration_seconds: float
+    columns: int
+    mins: List[float]
+    maxs: List[float]
