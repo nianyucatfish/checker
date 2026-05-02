@@ -85,7 +85,6 @@ declare global {
     electronAPI: {
       selectWorkspace: () => Promise<string | null>;
       getSidecarUrl: () => Promise<string>;
-      openMidiPopup: (src: string) => Promise<void>;
     };
   }
 }

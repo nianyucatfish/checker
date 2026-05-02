@@ -2023,29 +2023,21 @@
             stopBtn.disabled = true;
 
             try {
-                console.log('[midi] loadMidiContent start, base64.length=', base64Data.length);
                 const midiBytes = base64ToUint8Array(base64Data);
-                console.log('[midi] base64 decoded, bytes=', midiBytes.length);
                 const seq = await mm.midiToSequenceProto(midiBytes);
-                console.log('[midi] sequence parsed, notes=', seq.notes.length, 'totalTime=', seq.totalTime);
                 currentSequence = seq;
                 totalDuration = seq.totalTime;
                 totalDurationForDisplay = seq.totalTime;
 
                 // Process Tracks
                 tracks = processTracks(seq);
-                console.log('[midi] processTracks done, tracks=', tracks.length);
                 renderTracks();
-                console.log('[midi] renderTracks done');
 
                 // Reset
                 stopPlayback();
 
                 statusLabel.innerText = "正在加载采样...";
-                const playSeq = buildPianoPlaybackSequence(seq);
-                console.log('[midi] before loadSamples, playSeq.notes=', playSeq.notes.length);
-                await player.loadSamples(playSeq);
-                console.log('[midi] loadSamples done');
+                await player.loadSamples(buildPianoPlaybackSequence(seq));
 
                 statusLabel.innerText = "准备就绪";
                 playBtn.disabled = false;
@@ -2109,36 +2101,21 @@
                     Promise.resolve(window.loadMidiContent(msg.data)).then(replyOk).catch(replyErr);
                 }
             } else if (msg.type === 'load_midi_url' && typeof msg.url === 'string') {
-                console.log('[midi] load_midi_url received, url=', msg.url);
                 (async () => {
                     try {
-                        console.log('[midi] before fetch');
                         const r = await fetch(msg.url);
-                        console.log('[midi] fetch resp status=', r.status, 'ok=', r.ok);
                         if (!r.ok) throw new Error('fetch ' + r.status);
-                        console.log('[midi] before arrayBuffer');
                         const buf = await r.arrayBuffer();
-                        console.log('[midi] arrayBuffer done, bytes=', buf.byteLength);
-                        // base64 转换:loadMidiContent 现成期望 base64,这里直接给 ArrayBuffer 走新分支
-                        if (typeof window.loadMidiBytes === 'function') {
-                            const ok = await window.loadMidiBytes(new Uint8Array(buf));
-                            replyOk(ok);
-                        } else {
-                            // 兜底转 base64 喂老接口
-                            const bytes = new Uint8Array(buf);
-                            console.log('[midi] before base64 encode');
-                            let bin = '';
-                            const C = 0x8000;
-                            for (let i = 0; i < bytes.length; i += C) {
-                                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + C));
-                            }
-                            const b64 = btoa(bin);
-                            console.log('[midi] base64 encoded, length=', b64.length);
-                            const ok = await window.loadMidiContent(b64);
-                            replyOk(ok);
+                        // 转 base64 喂老接口 loadMidiContent
+                        const bytes = new Uint8Array(buf);
+                        let bin = '';
+                        const C = 0x8000;
+                        for (let i = 0; i < bytes.length; i += C) {
+                            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + C));
                         }
+                        const ok = await window.loadMidiContent(btoa(bin));
+                        replyOk(ok);
                     } catch (err) {
-                        console.log('[midi] load_midi_url FAILED:', String(err && err.stack || err));
                         replyErr(err);
                     }
                 })();

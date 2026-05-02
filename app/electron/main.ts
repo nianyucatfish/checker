@@ -5,15 +5,6 @@ import { spawn, ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as net from "node:net";
 
-// Chromium flags — 必须在 app.whenReady() 之前生效
-//
-// 已知坑:Tone.js / magenta 的 SoundFontPlayer 创建 AudioContext 后,Chromium 渲染进程
-// 会和独立的 audio service 进程做 IPC,某些 Win 驱动 / Electron 版本组合下这条 IPC
-// 会让渲染进程在几百 ms 内自爆。把 audio service 拉回进程内是已知 workaround。
-app.commandLine.appendSwitch("disable-features", "AudioServiceOutOfProcess");
-// 部分硬件加速路径在带 ScriptProcessorNode 的页面上也会触雷,稳妥起见关掉
-app.disableHardwareAcceleration();
-
 const SIDECAR_PORT = 8765; // TODO Phase 5: pick random free port
 
 let sidecarProc: ChildProcess | null = null;
@@ -59,7 +50,6 @@ function spawnSidecar() {
 }
 
 function createWindow() {
-  console.log("[main] createWindow called");
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -90,27 +80,6 @@ ipcMain.handle("dialog:select-workspace", async () => {
 
 ipcMain.handle("sidecar:url", () => `http://127.0.0.1:${SIDECAR_PORT}`);
 
-// 诊断用:在独立 BrowserWindow 里打开 midi 测试页,看是否还崩
-ipcMain.handle("midi:open-popup", async (_e, src: string) => {
-  const popup = new BrowserWindow({
-    width: 900,
-    height: 600,
-    title: "MIDI Popup Diagnostic",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  const url = process.env.VITE_DEV_SERVER_URL
-    ? `${process.env.VITE_DEV_SERVER_URL.replace(/\/$/, "")}${src}?t=${Date.now()}`
-    : `file://${path.join(__dirname, "..", "dist", src)}`;
-  popup.loadURL(url);
-  popup.webContents.openDevTools({ mode: "right" });
-  popup.webContents.on("render-process-gone", (_evt, details) => {
-    console.error(`[midi-popup] render-process-gone:`, details);
-  });
-});
-
 app.whenReady().then(async () => {
   spawnSidecar();
   try {
@@ -128,7 +97,6 @@ app.whenReady().then(async () => {
 
 console.log("[main] window-all-closed registered");
 app.on("window-all-closed", () => {
-  console.log("[main] window-all-closed fired");
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();
   if (process.platform !== "darwin") app.quit();
 });
