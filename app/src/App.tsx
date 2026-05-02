@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
 import {
   selectWorkspace,
@@ -142,36 +142,30 @@ export default function App() {
         onPickWorkspace={handlePick}
         onScan={handleScan}
       />
-      <PanelGroup direction="vertical" className="flex-1">
-        <Panel minSize={30}>
-          <PanelGroup direction="horizontal" className="h-full">
-            <Panel defaultSize={20} minSize={12} maxSize={40}>
-              <Explorer
-                root={root}
-                songs={songs}
-                selected={selectedPath}
-                allErrors={allErrors}
-                onPickWorkspace={handlePick}
-                onSelect={handleSelect}
-              />
-            </Panel>
-            <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
-            <Panel minSize={30}>
-              <Center selectedPath={selectedPath} selectedIsDir={selectedIsDir} />
-            </Panel>
-            <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
-            <Panel defaultSize={22} minSize={15} maxSize={45}>
-              <AgentSidebar />
-            </Panel>
-          </PanelGroup>
+      <PanelGroup direction="horizontal" className="flex-1">
+        <Panel defaultSize={20} minSize={12} maxSize={40}>
+          <Explorer
+            root={root}
+            songs={songs}
+            selected={selectedPath}
+            allErrors={allErrors}
+            onPickWorkspace={handlePick}
+            onSelect={handleSelect}
+          />
         </Panel>
-        <PanelResizeHandle className="h-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
-        <Panel defaultSize={25} minSize={10} maxSize={60}>
-          <ProblemsPanel
+        <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
+        <Panel minSize={30}>
+          <CenterWithProblemsDrawer
+            selectedPath={selectedPath}
+            selectedIsDir={selectedIsDir}
             errorsBySong={errorsBySong}
             selectedSong={selectedSong}
             onJumpTo={handleJumpTo}
           />
+        </Panel>
+        <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
+        <Panel defaultSize={22} minSize={15} maxSize={45}>
+          <AgentSidebar />
         </Panel>
       </PanelGroup>
       <StatusBar
@@ -179,6 +173,90 @@ export default function App() {
         songCount={songs.length}
         errorCount={totalErrors}
       />
+    </div>
+  );
+}
+
+const PROBLEMS_HEIGHT_KEY = "audio_qc.problems_height";
+const PROBLEMS_MIN_PX = 80;
+
+function CenterWithProblemsDrawer({
+  selectedPath,
+  selectedIsDir,
+  errorsBySong,
+  selectedSong,
+  onJumpTo,
+}: {
+  selectedPath: string | null;
+  selectedIsDir: boolean;
+  errorsBySong: Record<string, CheckErrorOut[]>;
+  selectedSong: string | null;
+  onJumpTo: (path: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [drawerHeight, setDrawerHeight] = useState<number>(() => {
+    const saved = Number(localStorage.getItem(PROBLEMS_HEIGHT_KEY));
+    return Number.isFinite(saved) && saved >= PROBLEMS_MIN_PX ? saved : 220;
+  });
+  const dragRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  const onResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragRef.current = { startY: e.clientY, startH: drawerHeight };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      const containerH = containerRef.current?.clientHeight ?? 0;
+      const dy = ev.clientY - dragRef.current.startY;
+      // 拖把手向上 → drawer 变大;向下 → drawer 变小
+      const next = dragRef.current.startH - dy;
+      const max = Math.max(PROBLEMS_MIN_PX, containerH - 100);
+      const clamped = Math.max(PROBLEMS_MIN_PX, Math.min(max, next));
+      setDrawerHeight(clamped);
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      localStorage.setItem(PROBLEMS_HEIGHT_KEY, String(drawerHeight));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "ns-resize";
+  };
+
+  // 把手 release 时持久化最新值
+  useEffect(() => {
+    localStorage.setItem(PROBLEMS_HEIGHT_KEY, String(drawerHeight));
+  }, [drawerHeight]);
+
+  return (
+    <div ref={containerRef} className="relative h-full">
+      {/* Center 占据 drawer 之上的可视区,scrollbar 自动落在可见区内 */}
+      <div
+        className="absolute top-0 left-0 right-0"
+        style={{ bottom: `${drawerHeight}px` }}
+      >
+        <Center selectedPath={selectedPath} selectedIsDir={selectedIsDir} />
+      </div>
+      {/* ProblemsPanel 抽屉:贴底,顶部一根可拖把手 */}
+      <div
+        className="absolute left-0 right-0 bottom-0 flex flex-col"
+        style={{ height: `${drawerHeight}px` }}
+      >
+        <div
+          onMouseDown={onResizeStart}
+          className="h-1 -mb-px shrink-0 cursor-ns-resize bg-border hover:bg-accent transition-colors"
+          title="拖动调整问题面板高度"
+        />
+        <div className="flex-1 min-h-0">
+          <ProblemsPanel
+            errorsBySong={errorsBySong}
+            selectedSong={selectedSong}
+            onJumpTo={onJumpTo}
+          />
+        </div>
+      </div>
     </div>
   );
 }

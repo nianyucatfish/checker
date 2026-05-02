@@ -378,7 +378,7 @@ export function AudioViewer({ path }: Props) {
   }
 
   return (
-    <div className="flex-1 flex flex-col p-6 gap-5 overflow-auto">
+    <div className="flex-1 flex flex-col p-6 gap-5 overflow-auto scroll-stable">
       <div className="flex items-center gap-3 text-fg-muted">
         <FileAudio size={28} />
         <div className="flex flex-col flex-1">

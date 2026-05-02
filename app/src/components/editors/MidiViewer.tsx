@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, AlertCircle, Music3, Play } from "lucide-react";
+import { Loader2, AlertCircle } from "lucide-react";
 import { rawFileUrl } from "../../api";
 
 interface Props {
@@ -25,11 +25,6 @@ interface WebviewElement extends HTMLElement {
 }
 
 const BRIDGE_MARKER = "__MIDI_BRIDGE__";
-
-function basename(p: string) {
-  const m = p.split(/[\\/]/);
-  return m[m.length - 1] || p;
-}
 
 function MidiWebview({ path }: { path: string }) {
   const wvRef = useRef<WebviewElement | null>(null);
@@ -195,33 +190,5 @@ function MidiWebview({ path }: { path: string }) {
 }
 
 export function MidiViewer({ path }: Props) {
-  // 默认不挂 webview,首次手动触发,避免切到 MIDI 文件就开 magenta
-  const [enabled, setEnabled] = useState(false);
-
-  useEffect(() => {
-    setEnabled(false);
-  }, [path]);
-
-  if (!enabled) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-fg-muted p-6">
-        <Music3 size={32} />
-        <div className="flex flex-col items-center gap-1">
-          <span className="text-sm">MIDI 文件</span>
-          <span className="text-xs text-fg-subtle break-all max-w-md text-center">
-            {basename(path)}
-          </span>
-        </div>
-        <button
-          onClick={() => setEnabled(true)}
-          className="btn btn-primary inline-flex items-center gap-2 mt-2"
-        >
-          <Play size={14} />
-          加载多轨预览
-        </button>
-      </div>
-    );
-  }
-
   return <MidiWebview key={path} path={path} />;
 }

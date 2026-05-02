@@ -113,6 +113,13 @@
 
   .pane-body {
     @apply flex-1 overflow-auto py-1;
+    /* 预留滚动条槽位,避免内容在 scrollbar 出现/消失时左右抖动 */
+    scrollbar-gutter: stable;
+  }
+
+  /* 任意需要稳定滚动布局的容器都可以加这个类 */
+  .scroll-stable {
+    scrollbar-gutter: stable;
   }
 
   .row {

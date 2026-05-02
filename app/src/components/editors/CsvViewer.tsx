@@ -422,7 +422,7 @@ export function CsvViewer({ path }: Props) {
 
       {/* 主体 */}
       {mode === "table" ? (
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto scroll-stable">
           <table className="text-xs font-mono border-collapse">
             <tbody>
               {(rows ?? []).map((row, ri) => (

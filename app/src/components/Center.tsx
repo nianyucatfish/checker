@@ -61,7 +61,7 @@ export function Center({ selectedPath, selectedIsDir }: Props) {
     body = <MidiViewer key={selectedPath} path={selectedPath} />;
   } else {
     body = (
-      <div className="flex-1 flex flex-col items-start gap-3 p-6 text-fg-muted overflow-auto">
+      <div className="flex-1 flex flex-col items-start gap-3 p-6 text-fg-muted overflow-auto scroll-stable">
         <div className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-wide text-fg-subtle">类型</span>
           <span className="text-fg">{ext ? `.${ext} 文件` : "文件"}</span>
