@@ -14,8 +14,8 @@
 
 ## 编辑器内嵌功能
 
-- [ ] **音频波形「渲染结构」**:读同名 `_Structure.csv` 在波形上叠段落 marker(参考 `editors.py:911`)
-- [ ] **音频波形「渲染节奏」**:读同名 `_Beat.csv` 在波形上叠节拍线 + Web Audio 节拍器(参考 `editors.py:852`、`audio_player.py:_build_click_waveform`)
+- [x] **音频波形「渲染结构」**:读同名 `_Structure.csv` 在波形上叠段落 marker(参考 `editors.py:911`) — _本次_
+- [x] **音频波形「渲染节奏」**:读同名 `_Beat.csv` 在波形上叠节拍线 + Web Audio 节拍器(参考 `editors.py:852`、`audio_player.py:_build_click_waveform`) — _本次_
 - [ ] **MIDI 人声 WAV 对照轨道**:MIDI 预览里加载同名/同位置的 vocal WAV,在 magenta 多轨之外加一条波形轨,solo/mute,共播放头(参考 `editors.py:993` 的 MidiPreview)
 - [ ] **混音台**:多轨同步播放 + 增益 + solo/mute(参考 `mix_console.py`,可能要做成独立 window 或独立路由)
 
@@ -31,11 +31,11 @@
 ## 推进顺序(草案)
 
 **Round 1 — 高频小工程** ✅
-**Round 2 — QC 工作流核心**(下一步)
+**Round 2 — QC 工作流核心** ✅
 - 渲染结构(canvas 叠层,纯视觉,简单)
 - 渲染节奏(canvas 叠层 + Web Audio 节拍器,中等)
 
-**Round 3 — 中等工程**
+**Round 3 — 中等工程**(下一步)
 - MIDI 人声 WAV 对照轨
 - 混音台
 

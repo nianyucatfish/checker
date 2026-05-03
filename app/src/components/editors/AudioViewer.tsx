@@ -1,10 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, AlertCircle, FileAudio, ZoomIn, ZoomOut, RotateCcw } from "lucide-react";
-import { getAudioMetadata, getAudioPeaks, rawFileUrl } from "../../api";
+import { getAudioMetadata, getAudioPeaks, rawFileUrl, readCsv } from "../../api";
 import type { AudioMetadataOut, AudioPeaksOut } from "../../api";
+import { Metronome, type BeatMarker } from "../../lib/metronome";
+import { clsx } from "../../utils";
 
 interface Props {
   path: string;
+}
+
+interface StructureMarker {
+  t: number;
+  label: string;
+}
+
+interface SongPaths {
+  songFolder: string;
+  songName: string;
+  beatCsv: string;
+  structureCsv: string;
+  sep: string;
 }
 
 const MIN_ZOOM = 1;
@@ -12,6 +27,79 @@ const MAX_ZOOM = 200;
 const FOLLOW_RIGHT_RATIO = 0.9;       // 播放头超过窗口 90% 处时触发自动跟随
 const FOLLOW_PLACE_RATIO = 0.3;       // 跟随后把播放头放在窗口 30% 处
 const DRAG_PIXEL_THRESHOLD = 3;        // 拖动距离 < 3px 视为单击
+
+// 从 wav 路径推断歌曲文件夹和歌曲名,定位 csv 路径。
+// wav 路径形如 <root>/<扒谱师>_<歌曲名>_<其他>/<目录>/X.wav
+// 老版规则:song folder = parent of parent;name 取 song folder 名按 "_" split 的中间一组。
+// 不匹配返回 null(只露出按钮但 disable)。
+function inferSongPaths(wavPath: string): SongPaths | null {
+  if (!wavPath) return null;
+  const sep = wavPath.includes("\\") ? "\\" : "/";
+  const parts = wavPath.split(/[\\/]/);
+  if (parts.length < 3) return null;
+  const songFolderName = parts[parts.length - 3];
+  const m = songFolderName.match(/^(.+?)_(.+?)_(.+?)$/);
+  if (!m) return null;
+  const songName = m[2];
+  const songFolder = parts.slice(0, parts.length - 2).join(sep);
+  return {
+    songFolder,
+    songName,
+    beatCsv: `${songFolder}${sep}csv${sep}${songName}_Beat.csv`,
+    structureCsv: `${songFolder}${sep}csv${sep}${songName}_Structure.csv`,
+    sep,
+  };
+}
+
+// Beat.csv:第一行表头(必须含 TIME / LABEL),其余数据行;
+// LABEL 末尾为 ".1" 视为主拍(downbeat)。容错:大小写、前后空白、空行。
+function parseBeatRows(rows: string[][]): BeatMarker[] {
+  if (rows.length === 0) return [];
+  const header = rows[0].map((h) => (h ?? "").trim().toUpperCase());
+  const tIdx = header.indexOf("TIME");
+  const lIdx = header.indexOf("LABEL");
+  if (tIdx < 0 || lIdx < 0) {
+    throw new Error("Beat CSV 表头需要 TIME / LABEL 两列");
+  }
+  const out: BeatMarker[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || r.length === 0) continue;
+    const tStr = (r[tIdx] ?? "").trim();
+    if (!tStr) continue;
+    const t = parseFloat(tStr);
+    if (!Number.isFinite(t)) continue;
+    const label = (r[lIdx] ?? "").trim();
+    out.push({ t, isFirst: label.endsWith(".1") });
+  }
+  return out;
+}
+
+// Structure.csv:第 1 行 = 标签数组,第 2 行 = 时间戳数组(MM:SS 或 MM:SS.f)
+// 第 3 行起忽略(老版只读两行)。
+function parseStructureRows(rows: string[][]): StructureMarker[] {
+  if (rows.length < 2) return [];
+  const labels = rows[0];
+  const times = rows[1];
+  if (labels.length !== times.length) {
+    throw new Error(`Structure CSV 行长度不一致: 标签 ${labels.length} vs 时间 ${times.length}`);
+  }
+  const out: StructureMarker[] = [];
+  for (let i = 0; i < labels.length; i++) {
+    const ts = (times[i] ?? "").trim();
+    const label = (labels[i] ?? "").trim();
+    if (!ts || !label) continue;
+    const parts = ts.split(":");
+    if (parts.length !== 2) continue;
+    const mm = parseInt(parts[0], 10);
+    const ss = parseFloat(parts[1]);
+    if (!Number.isFinite(mm) || !Number.isFinite(ss)) continue;
+    out.push({ t: mm * 60 + ss, label });
+  }
+  // 时间排序兜底
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
 
 function formatDuration(sec: number): string {
   const total = Math.round(sec);
@@ -92,7 +180,7 @@ function drawWaveform(
   const i1 = Math.min(n - 1, Math.ceil((t1 / view.duration) * n));
   const slice = Math.max(1, i1 - i0);
 
-  // 播放头 X（限定在 [-1, width+1]）
+  // 播放头 X(限定在 [-1, width+1])
   let playheadX = -1;
   if (view.currentSec >= t0 && view.currentSec <= t1) {
     playheadX = Math.floor(((view.currentSec - t0) / view.visibleSec) * width);
@@ -132,6 +220,116 @@ function drawWaveform(
   }
 }
 
+// 节拍线叠层:主拍粗实线、副拍细半透明线。
+function drawBeatOverlay(
+  canvas: HTMLCanvasElement,
+  beats: BeatMarker[],
+  view: View,
+  dark: boolean,
+) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.width;
+  const height = canvas.height;
+  if (view.visibleSec <= 0) return;
+  const t0 = view.offsetSec;
+  const t1 = view.offsetSec + view.visibleSec;
+
+  // 副拍先画(底),主拍后画(顶)
+  ctx.save();
+  ctx.strokeStyle = dark ? "rgba(148,163,184,0.45)" : "rgba(100,116,139,0.55)";
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath();
+  for (const b of beats) {
+    if (b.isFirst) continue;
+    if (b.t < t0 || b.t > t1) continue;
+    const x = Math.floor(((b.t - t0) / view.visibleSec) * width);
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, height);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle = dark ? "#a78bfa" : "#7c3aed";
+  ctx.lineWidth = 2 * dpr;
+  ctx.beginPath();
+  for (const b of beats) {
+    if (!b.isFirst) continue;
+    if (b.t < t0 || b.t > t1) continue;
+    const x = Math.floor(((b.t - t0) / view.visibleSec) * width);
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, height);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// 段落 marker 叠层:绿色虚线 + 顶部标签条。
+function drawStructureOverlay(
+  canvas: HTMLCanvasElement,
+  markers: StructureMarker[],
+  view: View,
+  dark: boolean,
+) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.width;
+  const height = canvas.height;
+  if (view.visibleSec <= 0) return;
+  const t0 = view.offsetSec;
+  const t1 = view.offsetSec + view.visibleSec;
+
+  ctx.save();
+  ctx.font = `${11 * dpr}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.textBaseline = "top";
+
+  for (const m of markers) {
+    if (m.t < t0 || m.t > t1) continue;
+    const x = Math.floor(((m.t - t0) / view.visibleSec) * width);
+
+    // 竖虚线
+    ctx.strokeStyle = dark ? "rgba(52,211,153,0.95)" : "rgba(5,150,105,0.95)";
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.setLineDash([5 * dpr, 4 * dpr]);
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, height);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 顶部标签胶囊
+    if (m.label) {
+      const padX = 5 * dpr;
+      const padY = 3 * dpr;
+      const txtY = 4 * dpr;
+      const measure = ctx.measureText(m.label);
+      const txtW = measure.width;
+      const txtH = 11 * dpr;
+      const boxX = x + 2 * dpr;
+      const boxW = txtW + padX * 2;
+      const boxH = txtH + padY * 2;
+      ctx.fillStyle = dark ? "rgba(52,211,153,0.92)" : "rgba(5,150,105,0.92)";
+      ctx.beginPath();
+      const r = 3 * dpr;
+      // 圆角矩形(兼容老 Canvas API,用 path 拼)
+      ctx.moveTo(boxX + r, txtY);
+      ctx.lineTo(boxX + boxW - r, txtY);
+      ctx.quadraticCurveTo(boxX + boxW, txtY, boxX + boxW, txtY + r);
+      ctx.lineTo(boxX + boxW, txtY + boxH - r);
+      ctx.quadraticCurveTo(boxX + boxW, txtY + boxH, boxX + boxW - r, txtY + boxH);
+      ctx.lineTo(boxX + r, txtY + boxH);
+      ctx.quadraticCurveTo(boxX, txtY + boxH, boxX, txtY + boxH - r);
+      ctx.lineTo(boxX, txtY + r);
+      ctx.quadraticCurveTo(boxX, txtY, boxX + r, txtY);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(m.label, boxX + padX, txtY + padY);
+    }
+  }
+  ctx.restore();
+}
+
 function useDarkTheme() {
   const [dark, setDark] = useState(() =>
     document.documentElement.classList.contains("dark"),
@@ -161,6 +359,14 @@ export function AudioViewer({ path }: Props) {
   const [zoom, setZoom] = useState(1);
   const [offsetSec, setOffsetSec] = useState(0);
 
+  // 渲染节奏 / 结构
+  const [beatRender, setBeatRender] = useState(false);
+  const [beats, setBeats] = useState<BeatMarker[]>([]);
+  const [structureRender, setStructureRender] = useState(false);
+  const [structure, setStructure] = useState<StructureMarker[]>([]);
+  const [metronomeVolPct, setMetronomeVolPct] = useState(150);
+  const [renderToggleBusy, setRenderToggleBusy] = useState(false);
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragStateRef = useRef<{
@@ -168,7 +374,10 @@ export function AudioViewer({ path }: Props) {
     startOffset: number;
     moved: boolean;
   } | null>(null);
+  const metronomeRef = useRef<Metronome | null>(null);
   const dark = useDarkTheme();
+
+  const songPaths = useMemo(() => inferSongPaths(path), [path]);
 
   const visibleSec = useMemo(
     () => (duration > 0 ? duration / zoom : 0),
@@ -187,6 +396,15 @@ export function AudioViewer({ path }: Props) {
     setDuration(0);
     setZoom(1);
     setOffsetSec(0);
+    // 切文件时关掉渲染状态(节拍数据失效)
+    setBeatRender(false);
+    setBeats([]);
+    setStructureRender(false);
+    setStructure([]);
+    if (metronomeRef.current) {
+      metronomeRef.current.dispose();
+      metronomeRef.current = null;
+    }
     Promise.all([getAudioMetadata(path), rawFileUrl(path)])
       .then(([m, url]) => {
         if (cancelled) return;
@@ -225,18 +443,26 @@ export function AudioViewer({ path }: Props) {
     };
   }, [path]);
 
-  // 重绘波形
+  // 重绘波形 + overlays
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !peaks) return;
     const view: View = { duration, offsetSec, visibleSec, currentSec };
-    drawWaveform(canvas, peaks, view, dark);
-    const obs = new ResizeObserver(() => {
+    const draw = () => {
       drawWaveform(canvas, peaks, view, dark);
-    });
+      if (beatRender && beats.length > 0) drawBeatOverlay(canvas, beats, view, dark);
+      if (structureRender && structure.length > 0) {
+        drawStructureOverlay(canvas, structure, view, dark);
+      }
+    };
+    draw();
+    const obs = new ResizeObserver(draw);
     obs.observe(canvas);
     return () => obs.disconnect();
-  }, [peaks, duration, offsetSec, visibleSec, currentSec, dark]);
+  }, [
+    peaks, duration, offsetSec, visibleSec, currentSec, dark,
+    beatRender, beats, structureRender, structure,
+  ]);
 
   // 监听 audio 播放进度 + 自动跟随
   useEffect(() => {
@@ -267,7 +493,49 @@ export function AudioViewer({ path }: Props) {
     };
   }, [audioUrl, offsetSec, visibleSec, duration]);
 
-  // 滚轮缩放（以光标位置为锚点）
+  // metronome 与 audio 元素的生命周期同步
+  // beatRender 切 ON 时:已播放则立即 start,未播放则等 play 事件
+  // play / pause / seeked 事件路由到 metronome
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    const onPlay = () => {
+      if (beatRender && metronomeRef.current) {
+        metronomeRef.current.start(a);
+      }
+    };
+    const onPause = () => {
+      metronomeRef.current?.stop();
+    };
+    const onSeeked = () => {
+      metronomeRef.current?.onSeek(a.currentTime);
+    };
+    a.addEventListener("play", onPlay);
+    a.addEventListener("pause", onPause);
+    a.addEventListener("seeked", onSeeked);
+    a.addEventListener("ended", onPause);
+    return () => {
+      a.removeEventListener("play", onPlay);
+      a.removeEventListener("pause", onPause);
+      a.removeEventListener("seeked", onSeeked);
+      a.removeEventListener("ended", onPause);
+    };
+  }, [beatRender, audioUrl]);
+
+  // metronome 音量跟随 slider
+  useEffect(() => {
+    metronomeRef.current?.setVolume(metronomeVolPct / 100);
+  }, [metronomeVolPct]);
+
+  // 卸载时释放 metronome
+  useEffect(() => {
+    return () => {
+      metronomeRef.current?.dispose();
+      metronomeRef.current = null;
+    };
+  }, []);
+
+  // 滚轮缩放(以光标位置为锚点)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || duration <= 0) return;
@@ -358,6 +626,69 @@ export function AudioViewer({ path }: Props) {
     setOffsetSec(0);
   };
 
+  const toggleBeat = async () => {
+    if (renderToggleBusy) return;
+    if (beatRender) {
+      // OFF
+      setBeatRender(false);
+      setBeats([]);
+      metronomeRef.current?.stop();
+      // 不 dispose,留给下次 ON 复用 buffer
+      return;
+    }
+    if (!songPaths) return;
+    setRenderToggleBusy(true);
+    try {
+      const csv = await readCsv(songPaths.beatCsv);
+      const parsed = parseBeatRows(csv.rows);
+      if (parsed.length === 0) {
+        alert("Beat CSV 解析后无有效拍数据");
+        return;
+      }
+      setBeats(parsed);
+      setBeatRender(true);
+      // 准备 metronome
+      if (!metronomeRef.current) metronomeRef.current = new Metronome();
+      metronomeRef.current.setBeats(parsed);
+      metronomeRef.current.setVolume(metronomeVolPct / 100);
+      const a = audioRef.current;
+      if (a && !a.paused) {
+        metronomeRef.current.start(a);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`渲染节奏失败: ${msg}`);
+    } finally {
+      setRenderToggleBusy(false);
+    }
+  };
+
+  const toggleStructure = async () => {
+    if (renderToggleBusy) return;
+    if (structureRender) {
+      setStructureRender(false);
+      setStructure([]);
+      return;
+    }
+    if (!songPaths) return;
+    setRenderToggleBusy(true);
+    try {
+      const csv = await readCsv(songPaths.structureCsv);
+      const parsed = parseStructureRows(csv.rows);
+      if (parsed.length === 0) {
+        alert("Structure CSV 解析后无有效段落");
+        return;
+      }
+      setStructure(parsed);
+      setStructureRender(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`渲染结构失败: ${msg}`);
+    } finally {
+      setRenderToggleBusy(false);
+    }
+  };
+
   if (error) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center text-danger gap-2 px-6">
@@ -378,7 +709,7 @@ export function AudioViewer({ path }: Props) {
   }
 
   return (
-    <div className="flex-1 flex flex-col p-6 gap-5 overflow-auto scroll-stable">
+    <div className="flex-1 flex flex-col p-6 gap-4 overflow-auto scroll-stable">
       <div className="flex items-center gap-3 text-fg-muted">
         <FileAudio size={28} />
         <div className="flex flex-col flex-1">
@@ -416,6 +747,72 @@ export function AudioViewer({ path }: Props) {
             <RotateCcw size={12} />
           </button>
         </div>
+      </div>
+
+      {/* 渲染工具行:节奏 / 结构 toggle + 节拍器音量 */}
+      <div className="flex items-center gap-2 text-xs">
+        <button
+          onClick={toggleBeat}
+          disabled={!songPaths || renderToggleBusy}
+          title={
+            !songPaths
+              ? "需要 wav 位于 <扒谱师>_<歌曲名>_<其他>/<目录>/X.wav 形式才能定位 Beat.csv"
+              : beatRender
+                ? "关闭节奏渲染"
+                : "读取 Beat.csv 在波形上叠节拍线 + Web Audio 节拍器"
+          }
+          className={clsx(
+            "h-7 px-2.5 inline-flex items-center gap-1 rounded-sm",
+            beatRender
+              ? "bg-violet-500/20 text-violet-600 dark:text-violet-400"
+              : "text-fg-muted hover:text-fg hover:bg-bg-hover",
+            "disabled:opacity-40 disabled:cursor-not-allowed",
+          )}
+        >
+          {renderToggleBusy && beatRender === false && (
+            <Loader2 size={11} className="animate-spin" />
+          )}
+          {beatRender ? "取消节奏" : "渲染节奏"}
+        </button>
+        {beatRender && (
+          <div className="flex items-center gap-2 ml-1 pl-3 border-l border-border">
+            <span className="text-fg-subtle">节拍器</span>
+            <input
+              type="range"
+              min={0}
+              max={300}
+              step={1}
+              value={metronomeVolPct}
+              onChange={(e) => setMetronomeVolPct(Number(e.target.value))}
+              className="w-28 selectable"
+              title="节拍器音量"
+            />
+            <span className="font-mono text-fg-muted w-10 tabular-nums">
+              {metronomeVolPct}%
+            </span>
+          </div>
+        )}
+        <span className="flex-1" />
+        <button
+          onClick={toggleStructure}
+          disabled={!songPaths || renderToggleBusy}
+          title={
+            !songPaths
+              ? "需要 wav 位于 <扒谱师>_<歌曲名>_<其他>/<目录>/X.wav 形式才能定位 Structure.csv"
+              : structureRender
+                ? "关闭结构渲染"
+                : "读取 Structure.csv 在波形上叠段落 marker"
+          }
+          className={clsx(
+            "h-7 px-2.5 inline-flex items-center gap-1 rounded-sm",
+            structureRender
+              ? "bg-success/20 text-success"
+              : "text-fg-muted hover:text-fg hover:bg-bg-hover",
+            "disabled:opacity-40 disabled:cursor-not-allowed",
+          )}
+        >
+          {structureRender ? "取消结构" : "渲染结构"}
+        </button>
       </div>
 
       {/* 波形 */}
