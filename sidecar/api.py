@@ -8,6 +8,7 @@ Pydantic schemas in sidecar.schemas keep contracts stable for the renderer.
 import csv
 import mimetypes
 import os
+import shutil
 from typing import List
 
 from fastapi import FastAPI, HTTPException, Query
@@ -21,18 +22,25 @@ from sidecar.schemas import (
     ApplyRenamesOut,
     CheckErrorOut,
     CheckResult,
+    CopyPathsIn,
+    DeletePathsIn,
     DirEntry,
     DurationSummary,
     FileEntry,
+    FileOpResultOut,
+    GetAudioDurationsIn,
+    GetAudioDurationsOut,
     ListDirOut,
     ListSongFilesOut,
     ListWorkspaceOut,
+    MovePathsIn,
     PadResultOut,
     PadSongIn,
     ProposeRenamesOut,
     ReadCsvOut,
     ReadTextOut,
     RenameOpModel,
+    RenamePathIn,
     AudioPeaksOut,
     WriteCsvIn,
     WriteResultOut,
@@ -354,3 +362,144 @@ def tool_get_audio_peaks(path: str = Query(...), columns: int = 4000):
         duration_seconds=float(frames) / float(sr),
         columns=actual_cols, mins=mins, maxs=maxs,
     )
+
+
+# ====================================================
+#  音频时长批量查询(给文件树用)
+# ====================================================
+
+_AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a")
+
+
+@app.post("/tools/get_audio_durations", response_model=GetAudioDurationsOut)
+def tool_get_audio_durations(body: GetAudioDurationsIn):
+    """批量返回路径 → 时长(秒)。读不出的、非音频的为 None。前端按目录批量调一次。"""
+    import soundfile as sf
+    out: dict[str, float | None] = {}
+    for p in body.paths:
+        if not p or not os.path.isfile(p):
+            out[p] = None
+            continue
+        if not p.lower().endswith(_AUDIO_EXTS):
+            out[p] = None
+            continue
+        try:
+            with sf.SoundFile(p) as f:
+                sr = int(f.samplerate)
+                frames = int(f.frames)
+            out[p] = (frames / sr) if sr > 0 else None
+        except Exception:
+            out[p] = None
+    return GetAudioDurationsOut(durations=out)
+
+
+# ====================================================
+#  文件操作:rename / delete / copy / move
+# ====================================================
+
+
+def _ensure_isdir(p: str):
+    if not os.path.isdir(p):
+        raise HTTPException(status_code=400, detail=f"not a directory: {p}")
+
+
+def _ensure_exists(p: str):
+    if not os.path.exists(p):
+        raise HTTPException(status_code=400, detail=f"path not found: {p}")
+
+
+@app.post("/tools/rename_path", response_model=FileOpResultOut)
+def tool_rename_path(body: RenamePathIn):
+    """重命名/移动单个文件或目录。src 必须存在;dst 父目录必须存在;dst 不能已存在。"""
+    src = body.src
+    dst = body.dst
+    _ensure_exists(src)
+    parent = os.path.dirname(dst) or "."
+    _ensure_isdir(parent)
+    if os.path.exists(dst):
+        # 同名冲突;同名只是大小写不同的 case 在某些 FS 上(Windows)需要先改一个临时名
+        if os.path.normcase(os.path.normpath(src)) != os.path.normcase(os.path.normpath(dst)):
+            raise HTTPException(status_code=400, detail=f"destination exists: {dst}")
+    try:
+        if os.path.normcase(os.path.normpath(src)) == os.path.normcase(os.path.normpath(dst)):
+            # Windows 大小写改名:走两步
+            tmp = src + ".__rename_tmp__"
+            os.rename(src, tmp)
+            os.rename(tmp, dst)
+        else:
+            os.rename(src, dst)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"rename failed: {e}")
+    return FileOpResultOut(executed=[dst])
+
+
+@app.post("/tools/delete_paths", response_model=FileOpResultOut)
+def tool_delete_paths(body: DeletePathsIn):
+    """把若干路径送进系统回收站(send2trash)。失败的逐条收集到 errors 里。"""
+    from send2trash import send2trash
+    executed: List[str] = []
+    errors: List[str] = []
+    for p in body.paths:
+        if not os.path.exists(p):
+            errors.append(f"{p}: not found")
+            continue
+        try:
+            send2trash(p)
+            executed.append(p)
+        except Exception as e:
+            errors.append(f"{p}: {e}")
+    return FileOpResultOut(ok=not errors, executed=executed, errors=errors)
+
+
+def _resolve_copy_dst(dst_dir: str, src: str) -> str:
+    """目标 = dst_dir / basename(src)。若同名已存在,追加 ` (n)` 直到不冲突。"""
+    base = os.path.basename(src.rstrip("\\/"))
+    candidate = os.path.join(dst_dir, base)
+    if not os.path.exists(candidate):
+        return candidate
+    name, ext = os.path.splitext(base)
+    n = 2
+    while True:
+        candidate = os.path.join(dst_dir, f"{name} ({n}){ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
+@app.post("/tools/copy_paths", response_model=FileOpResultOut)
+def tool_copy_paths(body: CopyPathsIn):
+    _ensure_isdir(body.dst_dir)
+    executed: List[str] = []
+    errors: List[str] = []
+    for src in body.srcs:
+        if not os.path.exists(src):
+            errors.append(f"{src}: not found")
+            continue
+        try:
+            dst = _resolve_copy_dst(body.dst_dir, src)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+            executed.append(dst)
+        except Exception as e:
+            errors.append(f"{src}: {e}")
+    return FileOpResultOut(ok=not errors, executed=executed, errors=errors)
+
+
+@app.post("/tools/move_paths", response_model=FileOpResultOut)
+def tool_move_paths(body: MovePathsIn):
+    _ensure_isdir(body.dst_dir)
+    executed: List[str] = []
+    errors: List[str] = []
+    for src in body.srcs:
+        if not os.path.exists(src):
+            errors.append(f"{src}: not found")
+            continue
+        try:
+            dst = _resolve_copy_dst(body.dst_dir, src)
+            shutil.move(src, dst)
+            executed.append(dst)
+        except Exception as e:
+            errors.append(f"{src}: {e}")
+    return FileOpResultOut(ok=not errors, executed=executed, errors=errors)

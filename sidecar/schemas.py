@@ -230,3 +230,51 @@ class AudioPeaksOut(BaseModel):
     columns: int
     mins: List[float]
     maxs: List[float]
+
+
+# ====================================================
+#  get_audio_durations（批量取音频时长，供文件树渲染）
+# ====================================================
+
+
+class GetAudioDurationsIn(BaseModel):
+    paths: List[str]
+
+
+class GetAudioDurationsOut(BaseModel):
+    ok: bool = True
+    # 单位:秒;读不出的文件 / 非音频值为 None
+    durations: Dict[str, Optional[float]]
+
+
+# ====================================================
+#  rename_path / delete_paths / copy_paths / move_paths
+# ====================================================
+
+
+class RenamePathIn(BaseModel):
+    src: str
+    dst: str  # 完整目标绝对路径(同目录改名也走这条)
+
+
+class DeletePathsIn(BaseModel):
+    paths: List[str]
+
+
+class CopyPathsIn(BaseModel):
+    srcs: List[str]
+    dst_dir: str  # 目标父目录;源文件名保留
+
+
+class MovePathsIn(BaseModel):
+    srcs: List[str]
+    dst_dir: str
+
+
+class FileOpResultOut(BaseModel):
+    """通用文件操作结果。executed/errors 一一对应输入的 srcs 顺序。"""
+
+    ok: bool = True
+    executed: List[str] = Field(default_factory=list)  # 成功后的目标路径
+    errors: List[str] = Field(default_factory=list)    # "src: <error>" 形式
+
