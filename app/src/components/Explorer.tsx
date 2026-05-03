@@ -20,7 +20,7 @@ import {
   movePaths,
   revealInFolder,
 } from "../api";
-import type { DirEntryOut, CheckErrorOut } from "../api";
+import type { DirEntryOut, CheckErrorOut, AudioDurationItem } from "../api";
 import { clsx } from "../utils";
 
 interface Props {
@@ -29,8 +29,14 @@ interface Props {
   selected: string | null;
   selectedIsDir: boolean;
   allErrors: CheckErrorOut[];
+  refreshKey: number;               // 父级 bump 时,重拉所有已缓存目录的时长 + 条目
   onPickWorkspace: () => void;
   onSelect: (path: string, isDir: boolean) => void;
+  onAutofixSong: (songPath: string) => void;
+  onPadSong: (songPath: string) => void;
+  // 文件树内部任何写操作(rename / delete / paste)成功后回调
+  // 父层用它触发 listWorkspace + 重扫,保证错误同步。
+  onMutated: () => void;
 }
 
 const AUDIO_EXTS = new Set(["wav", "mp3", "flac", "ogg", "m4a"]);
@@ -87,7 +93,8 @@ interface NodeProps {
   expanded: Set<string>;
   childrenCache: Map<string, DirEntryOut[]>;
   loading: Set<string>;
-  durations: Map<string, number | null>;
+  durations: Map<string, AudioDurationItem | null>;
+  inconsistent: Set<string>;
   selected: string | null;
   editing: string | null;
   errorCountFor: (path: string, isDir: boolean) => number;
@@ -101,7 +108,7 @@ interface NodeProps {
 function TreeNode(props: NodeProps) {
   const {
     path, name, isDir, ext, depth,
-    expanded, childrenCache, loading, durations, selected, editing,
+    expanded, childrenCache, loading, durations, inconsistent, selected, editing,
     errorCountFor, onToggle, onSelect, onContextMenu, onRenameCommit, onRenameCancel,
   } = props;
 
@@ -114,6 +121,7 @@ function TreeNode(props: NodeProps) {
   const Icon = isDir ? (isExpanded ? FolderOpen : Folder) : fileIcon(ext);
   const padLeft = 8 + depth * 14;
   const dur = !isDir && AUDIO_EXTS.has(ext) ? durations.get(path) : undefined;
+  const isInconsistent = inconsistent.has(path);
 
   const handleClick = () => {
     if (isEditing) return;
@@ -151,8 +159,14 @@ function TreeNode(props: NodeProps) {
           <span className="truncate flex-1">{name}</span>
         )}
         {!isEditing && dur != null && (
-          <span className="text-xs text-fg-subtle shrink-0 font-mono">
-            {fmtDuration(dur)}
+          <span
+            className={clsx(
+              "text-xs shrink-0 font-mono",
+              isInconsistent ? "text-warning font-semibold" : "text-fg-subtle",
+            )}
+            title={isInconsistent ? "同目录内时长不一致" : undefined}
+          >
+            {fmtDuration(dur.duration_seconds)}
           </span>
         )}
         {!isEditing && errs > 0 && (
@@ -191,6 +205,7 @@ function TreeNode(props: NodeProps) {
                 childrenCache={childrenCache}
                 loading={loading}
                 durations={durations}
+                inconsistent={inconsistent}
                 selected={selected}
                 editing={editing}
                 errorCountFor={errorCountFor}
@@ -329,14 +344,29 @@ function ContextMenu({
   );
 }
 
-export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPickWorkspace, onSelect }: Props) {
+export function Explorer({
+  root,
+  songs,
+  selected,
+  selectedIsDir,
+  allErrors,
+  refreshKey,
+  onPickWorkspace,
+  onSelect,
+  onAutofixSong,
+  onPadSong,
+  onMutated,
+}: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [childrenCache, setChildrenCache] = useState<Map<string, DirEntryOut[]>>(new Map());
   const [loading, setLoading] = useState<Set<string>>(new Set());
-  const [durations, setDurations] = useState<Map<string, number | null>>(new Map());
+  const [durations, setDurations] = useState<Map<string, AudioDurationItem | null>>(new Map());
+  const [inconsistent, setInconsistent] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [clipboard, setClipboard] = useState<ClipboardEntry | null>(null);
+
+  const songsSet = useMemo(() => new Set(songs), [songs]);
 
   // 工作区切换:清空所有缓存
   useEffect(() => {
@@ -344,6 +374,7 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
     setChildrenCache(new Map());
     setLoading(new Set());
     setDurations(new Map());
+    setInconsistent(new Set());
     setContextMenu(null);
     setEditing(null);
     setClipboard(null);
@@ -367,7 +398,7 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
     [allErrors],
   );
 
-  // 拉指定目录的时长(只对其中的音频文件)
+  // 拉指定目录的时长(只对其中的音频文件)+ 检测同目录时长不一致
   const fetchDurationsForEntries = useCallback((entries: DirEntryOut[]) => {
     const audioPaths = entries
       .filter((e) => !e.is_dir && AUDIO_EXTS.has(e.ext))
@@ -378,6 +409,37 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
         setDurations((prev) => {
           const next = new Map(prev);
           Object.entries(out.durations).forEach(([k, v]) => next.set(k, v));
+          return next;
+        });
+        // 同目录时长一致性检测:与错误扫描同精度,按采样率分组,组内整数帧比较
+        // (项目规则下同 song folder 应该都是 96k,所以一般只有一个分组)
+        const groups = new Map<number, { path: string; frames: number }[]>();
+        for (const p of audioPaths) {
+          const item = out.durations[p];
+          if (!item) continue;
+          const arr = groups.get(item.samplerate) ?? [];
+          arr.push({ path: p, frames: item.frames });
+          groups.set(item.samplerate, arr);
+        }
+        const newOutliers: string[] = [];
+        for (const arr of groups.values()) {
+          if (arr.length < 2) continue;
+          const maxFrames = Math.max(...arr.map((a) => a.frames));
+          for (const a of arr) {
+            if (a.frames !== maxFrames) newOutliers.push(a.path);
+          }
+        }
+        // 跨采样率(同目录混 sr)是另一种错误,这里也整体标黄
+        if (groups.size >= 2) {
+          for (const p of audioPaths) {
+            if (out.durations[p]) newOutliers.push(p);
+          }
+        }
+        setInconsistent((prev) => {
+          // 把这一波的 audioPaths 全部清掉旧标记,然后只重新加 newOutliers
+          const next = new Set(prev);
+          for (const p of audioPaths) next.delete(p);
+          for (const p of newOutliers) next.add(p);
           return next;
         });
       })
@@ -438,6 +500,40 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
     [fetchDurationsForEntries],
   );
 
+  // 父级请求强制刷新(autofix / pad 后调用):清掉所有时长 + 不一致缓存,
+  // 然后对每个已展开目录重拉 listDir + 时长。
+  const childrenCacheRef = useRef(childrenCache);
+  useEffect(() => {
+    childrenCacheRef.current = childrenCache;
+  }, [childrenCache]);
+  useEffect(() => {
+    if (refreshKey === 0) return; // 初始挂载时跳过
+    const dirs = Array.from(childrenCacheRef.current.keys());
+    setDurations(new Map());
+    setInconsistent(new Set());
+    for (const d of dirs) refreshDir(d);
+  }, [refreshKey, refreshDir]);
+
+  // 订阅外部文件系统变化(chokidar via Electron main)
+  // - 已缓存目录:增量重拉 listDir
+  // - 任意变化:让父级触发 listWorkspace + 重扫(同步错误 + 顶层 song 增删)
+  // 注意:本组件自己的写操作(rename/delete/paste)也会触发这个回调,造成 onMutated
+  // 被调两次,可接受(check_workspace 是幂等的)。
+  const onMutatedRef = useRef(onMutated);
+  useEffect(() => {
+    onMutatedRef.current = onMutated;
+  }, [onMutated]);
+  useEffect(() => {
+    if (!root) return;
+    const off = window.electronAPI.onFsChanged((dirs) => {
+      for (const d of dirs) {
+        if (childrenCacheRef.current.has(d)) refreshDir(d);
+      }
+      onMutatedRef.current();
+    });
+    return () => off();
+  }, [root, refreshDir]);
+
   const onToggle = useCallback(
     (p: string) => {
       setExpanded((prev) => {
@@ -497,11 +593,12 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
         await renamePath(path, dst);
         await refreshDir(parent);
         onSelect(dst, isDir);
+        onMutated();
       } catch (e) {
         alert(`重命名失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
-    [refreshDir, onSelect],
+    [refreshDir, onSelect, onMutated],
   );
 
   const onRenameCancel = useCallback(() => setEditing(null), []);
@@ -518,6 +615,7 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
         const r = await deletePaths(paths);
         const parents = new Set(paths.map(dirname).filter(Boolean));
         for (const p of parents) await refreshDir(p);
+        onMutated();
         if (r.errors.length > 0) {
           alert(`部分删除失败:\n${r.errors.join("\n")}`);
         }
@@ -525,7 +623,7 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
         alert(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
-    [refreshDir],
+    [refreshDir, onMutated],
   );
 
   const doCopy = (paths: string[]) => setClipboard({ srcs: paths, mode: "copy" });
@@ -553,11 +651,12 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
           }
         }
         for (const d of dirs) await refreshDir(d);
+        onMutated();
       } catch (e) {
         alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
-    [clipboard, refreshDir],
+    [clipboard, refreshDir, onMutated],
   );
 
   const doReveal = (path: string) => {
@@ -616,7 +715,11 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
   const menuItems = useMemo<(MenuItem | "sep")[]>(() => {
     if (!contextMenu) return [];
     const { path, isDir } = contextMenu;
-    return [
+    const isSongFolder = songsSet.has(path);
+    const ext = path.match(/\.([^.\\/]+)$/)?.[1].toLowerCase() ?? "";
+    const isWav = !isDir && ext === "wav";
+
+    const items: (MenuItem | "sep")[] = [
       { label: "重命名", onClick: () => startRename(path) },
       { label: "删除", onClick: () => doDelete([path]), danger: true },
       "sep",
@@ -630,7 +733,32 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
       "sep",
       { label: "在资源管理器中显示", onClick: () => doReveal(path) },
     ];
-  }, [contextMenu, clipboard, doDelete, doPaste]);
+
+    // 项目级动作
+    if (isSongFolder) {
+      items.push("sep");
+      items.push({ label: "自动修复本项目命名", onClick: () => onAutofixSong(path) });
+      items.push({ label: "统一音频长度(尾部补空白)", onClick: () => onPadSong(path) });
+    }
+
+    if (isWav) {
+      items.push("sep");
+      items.push({
+        label: "添加到混音台",
+        onClick: () => alert("混音台尚未实现"),
+        disabled: true,
+      });
+    } else if (isDir && !isSongFolder) {
+      items.push("sep");
+      items.push({
+        label: "添加文件夹到混音台",
+        onClick: () => alert("混音台尚未实现"),
+        disabled: true,
+      });
+    }
+
+    return items;
+  }, [contextMenu, clipboard, songsSet, doDelete, doPaste, onAutofixSong, onPadSong]);
 
   return (
     <div className="pane">
@@ -665,6 +793,7 @@ export function Explorer({ root, songs, selected, selectedIsDir, allErrors, onPi
             childrenCache={childrenCache}
             loading={loading}
             durations={durations}
+            inconsistent={inconsistent}
             selected={selected}
             editing={editing}
             errorCountFor={errorCountFor}

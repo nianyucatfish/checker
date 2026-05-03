@@ -237,14 +237,20 @@ class AudioPeaksOut(BaseModel):
 # ====================================================
 
 
+class AudioDurationItem(BaseModel):
+    frames: int
+    samplerate: int
+    duration_seconds: float
+
+
 class GetAudioDurationsIn(BaseModel):
     paths: List[str]
 
 
 class GetAudioDurationsOut(BaseModel):
     ok: bool = True
-    # 单位:秒;读不出的文件 / 非音频值为 None
-    durations: Dict[str, Optional[float]]
+    # 读不出 / 非音频值为 None;前端用 frames+samplerate 做精确同帧对比
+    durations: Dict[str, Optional[AudioDurationItem]]
 
 
 # ====================================================

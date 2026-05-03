@@ -373,9 +373,11 @@ _AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a")
 
 @app.post("/tools/get_audio_durations", response_model=GetAudioDurationsOut)
 def tool_get_audio_durations(body: GetAudioDurationsIn):
-    """批量返回路径 → 时长(秒)。读不出的、非音频的为 None。前端按目录批量调一次。"""
+    """批量返回路径 → {frames, samplerate, duration_seconds}。读不出的、非音频的为 None。
+    前端拿 frames+samplerate 做整数级别同帧比较。"""
     import soundfile as sf
-    out: dict[str, float | None] = {}
+    from sidecar.schemas import AudioDurationItem
+    out: dict[str, AudioDurationItem | None] = {}
     for p in body.paths:
         if not p or not os.path.isfile(p):
             out[p] = None
@@ -387,7 +389,14 @@ def tool_get_audio_durations(body: GetAudioDurationsIn):
             with sf.SoundFile(p) as f:
                 sr = int(f.samplerate)
                 frames = int(f.frames)
-            out[p] = (frames / sr) if sr > 0 else None
+            if sr <= 0:
+                out[p] = None
+            else:
+                out[p] = AudioDurationItem(
+                    frames=frames,
+                    samplerate=sr,
+                    duration_seconds=frames / sr,
+                )
         except Exception:
             out[p] = None
     return GetAudioDurationsOut(durations=out)

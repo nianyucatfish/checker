@@ -4,6 +4,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as net from "node:net";
+import chokidar, { FSWatcher } from "chokidar";
 
 const SIDECAR_PORT = 8765; // TODO Phase 5: pick random free port
 
@@ -85,6 +86,106 @@ ipcMain.handle("shell:show-item-in-folder", (_e, p: string) => {
   if (typeof p === "string" && p) shell.showItemInFolder(p);
 });
 
+// 在系统默认浏览器/Finder 中打开外部链接 / 文件夹
+ipcMain.handle("shell:open-external", async (_e, url: string) => {
+  if (typeof url === "string" && url) await shell.openExternal(url);
+});
+
+// 在系统默认应用中打开文件 / 文件夹(用于"在资源管理器中显示根目录"这类)
+ipcMain.handle("shell:open-path", async (_e, p: string) => {
+  if (typeof p === "string" && p) await shell.openPath(p);
+});
+
+// ---------- 文件系统监听(外部修改同步) ----------
+// 用 chokidar 监视当前工作区目录的递归变化,300ms 节流批量推送 fs:changed 事件。
+// 渲染进程接到事件后:
+//   - 对已缓存目录调 listDir 重拉
+//   - 调 onMutated 触发 workspace 重扫(错误同步)
+let fsWatcher: FSWatcher | null = null;
+let watcherTarget: BrowserWindow | null = null;
+const pendingFsDirs = new Set<string>();
+let flushTimer: NodeJS.Timeout | null = null;
+
+function flushFsChanges() {
+  flushTimer = null;
+  if (pendingFsDirs.size === 0) return;
+  if (!watcherTarget || watcherTarget.isDestroyed()) {
+    pendingFsDirs.clear();
+    return;
+  }
+  const dirs = Array.from(pendingFsDirs);
+  pendingFsDirs.clear();
+  try {
+    watcherTarget.webContents.send("fs:changed", dirs);
+  } catch (e) {
+    console.warn("[fs-watch] send failed:", e);
+  }
+}
+
+function scheduleFsFlush() {
+  if (flushTimer) return;
+  flushTimer = setTimeout(flushFsChanges, 300);
+}
+
+function stopFsWatcher() {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  pendingFsDirs.clear();
+  if (fsWatcher) {
+    fsWatcher.close().catch(() => {});
+    fsWatcher = null;
+  }
+  watcherTarget = null;
+}
+
+function startFsWatcher(rootPath: string, win: BrowserWindow) {
+  stopFsWatcher();
+  watcherTarget = win;
+  // ignoreInitial: 启动时不为已存在文件触发 add 事件(避免初次扫描风暴)
+  // awaitWriteFinish: 大文件复制时等文件写完再触发,避免读到不完整的文件
+  fsWatcher = chokidar.watch(rootPath, {
+    ignored: [
+      /(^|[\\/])\../, // 隐藏文件 (.git / .DS_Store / .vscode 等)
+      /(^|[\\/])(Thumbs\.db|desktop\.ini)$/i,
+      /\.(bak|tmp|swp|crdownload|part)$/i,
+    ],
+    ignoreInitial: true,
+    persistent: true,
+    awaitWriteFinish: {
+      stabilityThreshold: 250,
+      pollInterval: 100,
+    },
+  });
+
+  fsWatcher.on("all", (event, p) => {
+    // event ∈ {add, change, unlink, addDir, unlinkDir}
+    // 改了哪个父目录就把它入队;dir 增删时祖父也算改了(影响其父的列表)
+    const parent = path.dirname(p);
+    pendingFsDirs.add(parent);
+    if (event === "addDir" || event === "unlinkDir") {
+      pendingFsDirs.add(path.dirname(parent));
+    }
+    scheduleFsFlush();
+  });
+
+  fsWatcher.on("error", (e) => {
+    console.warn("[fs-watch] error:", e);
+  });
+}
+
+ipcMain.handle("fs:watch", (e, rootPath: string) => {
+  if (typeof rootPath !== "string" || !rootPath) return;
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win) return;
+  startFsWatcher(rootPath, win);
+});
+
+ipcMain.handle("fs:unwatch", () => {
+  stopFsWatcher();
+});
+
 app.whenReady().then(async () => {
   spawnSidecar();
   try {
@@ -102,10 +203,12 @@ app.whenReady().then(async () => {
 
 console.log("[main] window-all-closed registered");
 app.on("window-all-closed", () => {
+  stopFsWatcher();
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
+  stopFsWatcher();
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();
 });

@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
+import { Loader2 } from "lucide-react";
 import {
   selectWorkspace,
   listWorkspace,
   checkWorkspace,
   pingSidecar,
+  proposeRenames,
+  applyRenames,
+  padSongToLongest,
 } from "./api";
 import type { CheckErrorOut } from "./api";
 
@@ -36,6 +40,15 @@ export default function App() {
   const [selectedIsDir, setSelectedIsDir] = useState<boolean>(false);
   const [errorsBySong, setErrorsBySong] = useState<Record<string, CheckErrorOut[]>>({});
   const [scanning, setScanning] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyTask, setApplyTask] = useState<{
+    label: string;
+    current: number;
+    total: number;
+    detail?: string;
+  } | null>(null);
+  const [treeRefreshKey, setTreeRefreshKey] = useState(0);
+  const [mixConsoleOpen, setMixConsoleOpen] = useState(false);
   const [sidecarReady, setSidecarReady] = useState<boolean | null>(null);
 
   const runScan = async (songsList: string[], rootPath: string) => {
@@ -93,6 +106,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 监听外部文件系统变化(对应工作区目录),工作区切换时自动迁移监听目标
+  useEffect(() => {
+    if (!root) {
+      window.electronAPI.fsUnwatch().catch(() => {});
+      return;
+    }
+    window.electronAPI.fsWatch(root).catch((e) => {
+      console.warn("[app] fs watch failed:", e);
+    });
+    return () => {
+      window.electronAPI.fsUnwatch().catch(() => {});
+    };
+  }, [root]);
+
   const handlePick = async () => {
     const picked = await selectWorkspace();
     if (!picked) return;
@@ -102,6 +129,90 @@ export default function App() {
   const handleScan = () => {
     if (!root) return;
     return runScan(songs, root);
+  };
+
+  // Explorer 内部写操作(rename / delete / paste)完成后回调,
+  // 用来触发错误同步:重新拉 songs + 重扫,保证错误列表与文件系统不脱节。
+  const handleWorkspaceMutated = async () => {
+    if (!root) return;
+    try {
+      const out = await listWorkspace(root);
+      setSongs(out.songs);
+      await runScan(out.songs, root);
+    } catch (e) {
+      console.warn("[app] mutation re-scan failed:", e);
+    }
+  };
+
+  const handleToggleMixConsole = () => {
+    setMixConsoleOpen((v) => !v);
+    alert("混音台尚未实现");
+  };
+
+  // 工作区批量自动修复命名:对所有歌依次 propose,合并 ops,统一 apply。
+  // 注意:这个 handler 只通过命令面板/agent 调用;工具栏没有按钮直接触发批量。
+  // 单首歌的修复在右键菜单(handleAutofixSong)。
+
+  // 单首歌(右键菜单触发)
+  const handleAutofixSong = async (songPath: string) => {
+    if (applying) return;
+    setApplying(true);
+    const name = songPath.split(/[\\/]/).pop() || "";
+    setApplyTask({ label: "自动修复命名", current: 0, total: 1, detail: name });
+    try {
+      const r = await proposeRenames(songPath);
+      if (r.ops.length === 0) {
+        alert(
+          r.conflicts.length > 0
+            ? `没有可自动修复的命名;冲突 ${r.conflicts.length} 项`
+            : "没有需要修复的命名",
+        );
+        return;
+      }
+      setApplyTask({
+        label: "自动修复命名",
+        current: 0,
+        total: 1,
+        detail: `应用 ${r.ops.length} 项重命名...`,
+      });
+      const ar = await applyRenames(r.ops);
+      const msg = [
+        `自动修复 "${name}": ${ar.executed.length}/${r.ops.length} 项`,
+        ar.errors.length > 0 ? `\n错误:\n${ar.errors.slice(0, 5).join("\n")}` : "",
+      ].join("");
+      alert(msg);
+      if (root) {
+        const out = await listWorkspace(root);
+        setSongs(out.songs);
+        await runScan(out.songs, root);
+        setTreeRefreshKey((k) => k + 1);
+      }
+    } finally {
+      setApplying(false);
+      setApplyTask(null);
+    }
+  };
+
+  const handlePadSong = async (songPath: string) => {
+    if (applying) return;
+    setApplying(true);
+    const name = songPath.split(/[\\/]/).pop() || "";
+    setApplyTask({ label: "统一时长", current: 0, total: 1, detail: name });
+    try {
+      const r = await padSongToLongest(songPath);
+      if (!r.ok) {
+        alert(`补静音失败 (${name}): ${r.error || "未知错误"}`);
+      } else {
+        alert(`已补静音 ${r.padded} 个 WAV (${name})`);
+      }
+      if (root) {
+        await runScan(songs, root);
+        setTreeRefreshKey((k) => k + 1);
+      }
+    } finally {
+      setApplying(false);
+      setApplyTask(null);
+    }
   };
 
   const allErrors = useMemo<CheckErrorOut[]>(
@@ -139,8 +250,12 @@ export default function App() {
       <Toolbar
         hasWorkspace={!!root}
         scanning={scanning}
+        applying={applying}
+        rootDir={root}
+        mixConsoleOpen={mixConsoleOpen}
         onPickWorkspace={handlePick}
         onScan={handleScan}
+        onToggleMixConsole={handleToggleMixConsole}
       />
       <PanelGroup direction="horizontal" className="flex-1">
         <Panel defaultSize={20} minSize={12} maxSize={40}>
@@ -150,8 +265,12 @@ export default function App() {
             selected={selectedPath}
             selectedIsDir={selectedIsDir}
             allErrors={allErrors}
+            refreshKey={treeRefreshKey}
             onPickWorkspace={handlePick}
             onSelect={handleSelect}
+            onAutofixSong={handleAutofixSong}
+            onPadSong={handlePadSong}
+            onMutated={handleWorkspaceMutated}
           />
         </Panel>
         <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
@@ -174,6 +293,34 @@ export default function App() {
         songCount={songs.length}
         errorCount={totalErrors}
       />
+      {applyTask && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">
+          <div className="bg-bg-sidebar border border-border rounded-md p-6 flex flex-col items-center gap-3 min-w-[320px] max-w-[480px]">
+            <Loader2 size={28} className="animate-spin text-accent" />
+            <div className="text-sm text-fg font-medium">{applyTask.label}</div>
+            <div className="text-xs text-fg-muted font-mono">
+              {applyTask.current} / {applyTask.total}
+            </div>
+            {applyTask.detail && (
+              <div className="text-xs text-fg-subtle text-center break-all max-w-md">
+                {applyTask.detail}
+              </div>
+            )}
+            <div className="w-full h-1 bg-bg rounded overflow-hidden">
+              <div
+                className="h-full bg-accent transition-all duration-200"
+                style={{
+                  width: `${
+                    applyTask.total === 0
+                      ? 0
+                      : Math.round((applyTask.current / applyTask.total) * 100)
+                  }%`,
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

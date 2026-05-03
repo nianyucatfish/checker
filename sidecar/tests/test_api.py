@@ -332,8 +332,11 @@ def test_get_audio_durations_batch(workspace):
     )
     assert r.status_code == 200
     durs = r.json()["durations"]
-    assert abs(durs[p1] - 1.0) < 1e-6
-    assert abs(durs[p2] - 1.0) < 1e-6
+    assert durs[p1]["frames"] == 96000
+    assert durs[p1]["samplerate"] == 96000
+    assert abs(durs[p1]["duration_seconds"] - 1.0) < 1e-6
+    assert durs[p2]["frames"] == 48000
+    assert durs[p2]["samplerate"] == 48000
     assert durs[p3] is None
     assert durs["/nope/missing.wav"] is None
 

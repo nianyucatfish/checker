@@ -72,15 +72,54 @@ export interface AudioPeaksOut {
   maxs: number[];
 }
 
+export interface AudioDurationItem {
+  frames: number;
+  samplerate: number;
+  duration_seconds: number;
+}
+
 export interface GetAudioDurationsOut {
   ok: boolean;
-  durations: Record<string, number | null>;
+  durations: Record<string, AudioDurationItem | null>;
 }
 
 export interface FileOpResultOut {
   ok: boolean;
   executed: string[];
   errors: string[];
+}
+
+export interface RenameOp {
+  src: string;
+  dst: string;
+  kind: string; // "song_folder" | "managed_dir" | "file"
+}
+
+export interface ProposeRenamesOut {
+  ok: boolean;
+  ops: RenameOp[];
+  conflicts: string[];
+}
+
+export interface ApplyRenamesOut {
+  ok: boolean;
+  executed: RenameOp[];
+  errors: string[];
+  path_updates: Record<string, string>;
+}
+
+export interface PadResultOut {
+  ok: boolean;
+  padded: number;
+  max_duration: number | null;
+  error: string | null;
+}
+
+export interface DurationSummaryOut {
+  ok: boolean;
+  folder: string;
+  inconsistent: boolean;
+  summary: string | null;
 }
 
 export interface CheckResult {
@@ -97,6 +136,11 @@ declare global {
       selectWorkspace: () => Promise<string | null>;
       getSidecarUrl: () => Promise<string>;
       revealInFolder: (path: string) => Promise<void>;
+      openExternal: (url: string) => Promise<void>;
+      openPath: (path: string) => Promise<void>;
+      fsWatch: (root: string) => Promise<void>;
+      fsUnwatch: () => Promise<void>;
+      onFsChanged: (cb: (dirs: string[]) => void) => () => void;
     };
   }
 }
@@ -191,6 +235,22 @@ export async function movePaths(srcs: string[], dst_dir: string): Promise<FileOp
 
 export async function revealInFolder(path: string): Promise<void> {
   return window.electronAPI.revealInFolder(path);
+}
+
+export async function proposeRenames(songPath: string): Promise<ProposeRenamesOut> {
+  return getJson("/tools/propose_renames", { song_path: songPath });
+}
+
+export async function applyRenames(ops: RenameOp[]): Promise<ApplyRenamesOut> {
+  return postJson("/tools/apply_renames", { ops });
+}
+
+export async function padSongToLongest(songPath: string): Promise<PadResultOut> {
+  return postJson("/tools/pad_song_to_longest", { song_path: songPath });
+}
+
+export async function getDurationSummary(folder: string): Promise<DurationSummaryOut> {
+  return getJson("/tools/get_duration_summary", { folder });
 }
 
 export async function checkWorkspace(root: string): Promise<CheckResult> {
