@@ -1,6 +1,6 @@
 // Electron main process: spawn sidecar, manage window lifecycle.
 
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as net from "node:net";
@@ -79,6 +79,11 @@ ipcMain.handle("dialog:select-workspace", async () => {
 });
 
 ipcMain.handle("sidecar:url", () => `http://127.0.0.1:${SIDECAR_PORT}`);
+
+// 在系统资源管理器/Finder 中选中并显示文件
+ipcMain.handle("shell:show-item-in-folder", (_e, p: string) => {
+  if (typeof p === "string" && p) shell.showItemInFolder(p);
+});
 
 app.whenReady().then(async () => {
   spawnSidecar();

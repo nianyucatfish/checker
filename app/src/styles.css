@@ -67,6 +67,22 @@
     line-height: 18px;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
+    /* 默认禁用文本选中,像 VS Code 那样;只有可编辑/带 .selectable 的才允许 */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  input,
+  textarea,
+  select,
+  [contenteditable="true"],
+  [contenteditable=""],
+  .monaco-editor,
+  .monaco-editor *,
+  .selectable,
+  .selectable * {
+    user-select: text;
+    -webkit-user-select: text;
   }
 
   * {

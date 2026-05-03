@@ -148,6 +148,7 @@ export default function App() {
             root={root}
             songs={songs}
             selected={selectedPath}
+            selectedIsDir={selectedIsDir}
             allErrors={allErrors}
             onPickWorkspace={handlePick}
             onSelect={handleSelect}

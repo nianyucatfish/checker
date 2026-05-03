@@ -72,6 +72,17 @@ export interface AudioPeaksOut {
   maxs: number[];
 }
 
+export interface GetAudioDurationsOut {
+  ok: boolean;
+  durations: Record<string, number | null>;
+}
+
+export interface FileOpResultOut {
+  ok: boolean;
+  executed: string[];
+  errors: string[];
+}
+
 export interface CheckResult {
   ok: boolean;
   scope: string;
@@ -85,6 +96,7 @@ declare global {
     electronAPI: {
       selectWorkspace: () => Promise<string | null>;
       getSidecarUrl: () => Promise<string>;
+      revealInFolder: (path: string) => Promise<void>;
     };
   }
 }
@@ -155,6 +167,30 @@ export async function writeCsv(path: string, rows: string[][]): Promise<WriteRes
 
 export async function writeText(path: string, content: string): Promise<WriteResultOut> {
   return postJson("/tools/write_text", { path, content });
+}
+
+export async function getAudioDurations(paths: string[]): Promise<GetAudioDurationsOut> {
+  return postJson("/tools/get_audio_durations", { paths });
+}
+
+export async function renamePath(src: string, dst: string): Promise<FileOpResultOut> {
+  return postJson("/tools/rename_path", { src, dst });
+}
+
+export async function deletePaths(paths: string[]): Promise<FileOpResultOut> {
+  return postJson("/tools/delete_paths", { paths });
+}
+
+export async function copyPaths(srcs: string[], dst_dir: string): Promise<FileOpResultOut> {
+  return postJson("/tools/copy_paths", { srcs, dst_dir });
+}
+
+export async function movePaths(srcs: string[], dst_dir: string): Promise<FileOpResultOut> {
+  return postJson("/tools/move_paths", { srcs, dst_dir });
+}
+
+export async function revealInFolder(path: string): Promise<void> {
+  return window.electronAPI.revealInFolder(path);
 }
 
 export async function checkWorkspace(root: string): Promise<CheckResult> {
