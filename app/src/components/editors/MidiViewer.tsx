@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, AlertCircle } from "lucide-react";
-import { rawFileUrl } from "../../api";
+import { rawFileUrl, listDir } from "../../api";
 
 interface Props {
   path: string;
@@ -26,6 +26,44 @@ interface WebviewElement extends HTMLElement {
 
 const BRIDGE_MARKER = "__MIDI_BRIDGE__";
 
+interface CompareWavPayload {
+  files: string[];
+  default: string | null;
+  dir: string | null;
+  urls: Record<string, string>;
+}
+
+// midi_player.html 期望的对比 WAV 数据(原 MidiExportBridge.getCompareWavList 的返回)。
+// 老版从 <midi_parent>/../分轨wav 找 WAV 列表;默认选 *_vocal_a.wav,缺省取首项。
+async function buildCompareWavPayload(midiPath: string): Promise<CompareWavPayload> {
+  const empty: CompareWavPayload = { files: [], default: null, dir: null, urls: {} };
+  if (!midiPath) return empty;
+  const sep = midiPath.includes("\\") ? "\\" : "/";
+  const parts = midiPath.split(/[\\/]/);
+  if (parts.length < 3) return empty;
+  // <song>/midi/X.mid → wav 目录在 <song>/分轨wav
+  const wavDir = parts.slice(0, parts.length - 2).join(sep) + sep + "分轨wav";
+  let entries;
+  try {
+    entries = await listDir(wavDir);
+  } catch {
+    return empty;
+  }
+  const files = entries.entries
+    .filter((e) => !e.is_dir && e.ext.toLowerCase() === "wav")
+    .map((e) => e.name)
+    .sort();
+  if (files.length === 0) return { ...empty, dir: wavDir };
+  const vocal = files.find((n) => n.toLowerCase().endsWith("_vocal_a.wav"));
+  const def = vocal || files[0];
+  const urlEntries = await Promise.all(
+    files.map(async (name) => [name, await rawFileUrl(wavDir + sep + name)] as const),
+  );
+  const urls: Record<string, string> = {};
+  for (const [n, u] of urlEntries) urls[n] = u;
+  return { files, default: def, dir: wavDir, urls };
+}
+
 function MidiWebview({ path }: { path: string }) {
   const wvRef = useRef<WebviewElement | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -44,6 +82,8 @@ function MidiWebview({ path }: { path: string }) {
     let bridgeInstalled = false;
     let injected = false;
     let pendingUrl: string | null = null;
+    let pendingComparePayload: CompareWavPayload | null = null;
+    let comparePayloadInjected = false;
 
     // Webview → host:用 console-message 当回传通道
     const onConsole = (e: { message: string }) => {
@@ -68,9 +108,45 @@ function MidiWebview({ path }: { path: string }) {
       }
     };
 
-    const tryInjectMidi = () => {
+    // 把对比 WAV 数据注成 window.exportBridge,让 midi_player.html 里
+    // QWebChannel 那条路径走不通时也能拉到列表(老版 MidiExportBridge 的 JS 替身)。
+    // saveMidi* 暂不支持,返回错误字串。
+    const injectExportBridge = async (payload: CompareWavPayload) => {
+      if (cancelled || comparePayloadInjected) return;
+      comparePayloadInjected = true;
+      const json = JSON.stringify(payload);
+      const code = `(function(){
+        var payload = ${json};
+        var urls = payload.urls || {};
+        window.exportBridge = {
+          getCompareWavList: function(cb){
+            try { cb(JSON.stringify(payload)); } catch(e) {}
+          },
+          getCompareWavUrl: function(name, cb){
+            try {
+              var u = urls[name];
+              if (u) cb(JSON.stringify({ok:true, name:name, mime:'audio/wav', url:u}));
+              else   cb(JSON.stringify({ok:false, error:'文件不在列表中'}));
+            } catch(e) {}
+          },
+          saveMidiBase64: function(){ return 'ERROR: 保存功能在新版尚未接入'; },
+          saveMidiToCurrentPath: function(){ return 'ERROR: 保存功能在新版尚未接入'; },
+        };
+      })();`;
+      try {
+        await wv.executeJavaScript(code);
+      } catch (e) {
+        console.warn("[midi] inject exportBridge failed:", e);
+      }
+    };
+
+    const tryInjectMidi = async () => {
       if (cancelled || injected || !bridgeInstalled || !pendingUrl) return;
       injected = true;
+      // 在 load_midi_url 前先注 exportBridge,确保页内 WAV 列表加载逻辑有数据
+      if (pendingComparePayload) {
+        await injectExportBridge(pendingComparePayload);
+      }
       const code = `window.postMessage({type:'load_midi_url', url: ${JSON.stringify(
         pendingUrl,
       )}}, '*');`;
@@ -134,11 +210,21 @@ function MidiWebview({ path }: { path: string }) {
     wv.addEventListener("did-fail-load", onFailLoad);
     wv.addEventListener("crashed", onCrashed);
 
-    (async () => {
+    // 并发拉 MIDI URL + 对比 WAV 列表
+    void (async () => {
       try {
-        const url = await rawFileUrl(path);
+        const [midiUrl, comparePayload] = await Promise.all([
+          rawFileUrl(path),
+          buildCompareWavPayload(path).catch(() => ({
+            files: [],
+            default: null,
+            dir: null,
+            urls: {},
+          } as CompareWavPayload)),
+        ]);
         if (cancelled) return;
-        pendingUrl = url;
+        pendingUrl = midiUrl;
+        pendingComparePayload = comparePayload;
         tryInjectMidi();
       } catch (e) {
         if (cancelled) return;

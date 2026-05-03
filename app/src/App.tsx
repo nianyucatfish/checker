@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import {
   selectWorkspace,
   listWorkspace,
+  listDir,
   checkWorkspace,
   pingSidecar,
   proposeRenames,
@@ -144,10 +145,43 @@ export default function App() {
     }
   };
 
-  const handleToggleMixConsole = () => {
+  const handleToggleMixConsole = (rect: { x: number; y: number; w: number; h: number }) => {
+    // 乐观更新 toolbar 高亮态;主进程动画完成后会通过 visibility-changed 回正
     setMixConsoleOpen((v) => !v);
-    alert("混音台尚未实现");
+    void window.electronAPI.mixToggle(rect);
   };
+
+  // 右键"添加到混音台":主进程是 tracks 真值,本端只发 IPC,主进程会自动开窗 + 广播
+  const handleAddToMix = (paths: string[]) => {
+    if (paths.length === 0) return;
+    void window.electronAPI.mixAddTracks(paths);
+    setMixConsoleOpen(true);
+  };
+
+  // 右键"添加文件夹到混音台":展开 wavs 后批量加
+  const handleAddFolderToMix = async (folderPath: string) => {
+    try {
+      const out = await listDir(folderPath);
+      const wavs = out.entries
+        .filter((e) => !e.is_dir && e.ext.toLowerCase() === "wav")
+        .map((e) => e.path);
+      if (wavs.length === 0) {
+        alert(`目录 ${folderPath} 下没有 WAV 文件`);
+        return;
+      }
+      handleAddToMix(wavs);
+    } catch (e) {
+      alert(`列举目录失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // 主进程对混音窗可见性的权威通知,覆盖乐观更新
+  useEffect(() => {
+    const off = window.electronAPI.onMixVisibilityChanged((visible) => {
+      setMixConsoleOpen(visible);
+    });
+    return () => off();
+  }, []);
 
   // 工作区批量自动修复命名:对所有歌依次 propose,合并 ops,统一 apply。
   // 注意:这个 handler 只通过命令面板/agent 调用;工具栏没有按钮直接触发批量。
@@ -271,6 +305,8 @@ export default function App() {
             onAutofixSong={handleAutofixSong}
             onPadSong={handlePadSong}
             onMutated={handleWorkspaceMutated}
+            onAddToMixConsole={(p) => handleAddToMix([p])}
+            onAddFolderToMixConsole={handleAddFolderToMix}
           />
         </Panel>
         <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />

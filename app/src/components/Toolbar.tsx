@@ -10,7 +10,8 @@ interface Props {
   mixConsoleOpen: boolean;
   onPickWorkspace: () => void;
   onScan: () => void;
-  onToggleMixConsole: () => void;
+  // 传按钮的 client rect,让主进程把混音窗动画从这个位置展开/收缩
+  onToggleMixConsole: (rect: { x: number; y: number; w: number; h: number }) => void;
 }
 
 interface MenuItem {
@@ -224,7 +225,10 @@ export function Toolbar({
       />
       <ToolbarBtn
         label="混音台"
-        onClick={onToggleMixConsole}
+        onClick={(e) => {
+          const r = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+          onToggleMixConsole({ x: r.left, y: r.top, w: r.width, h: r.height });
+        }}
         disabled={!hasWorkspace}
         active={mixConsoleOpen}
       />

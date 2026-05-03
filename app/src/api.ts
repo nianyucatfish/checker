@@ -141,6 +141,16 @@ declare global {
       fsWatch: (root: string) => Promise<void>;
       fsUnwatch: () => Promise<void>;
       onFsChanged: (cb: (dirs: string[]) => void) => () => void;
+      mixToggle: (
+        rect: { x: number; y: number; w: number; h: number } | null,
+      ) => Promise<void>;
+      mixClose: () => Promise<void>;
+      mixHide: () => Promise<void>;
+      mixAddTracks: (paths: string[]) => Promise<void>;
+      mixRemoveTrack: (path: string) => Promise<void>;
+      mixGetTracks: () => Promise<string[]>;
+      onMixTracksChanged: (cb: (paths: string[]) => void) => () => void;
+      onMixVisibilityChanged: (cb: (visible: boolean) => void) => () => void;
     };
   }
 }

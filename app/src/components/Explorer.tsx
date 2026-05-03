@@ -37,6 +37,8 @@ interface Props {
   // 文件树内部任何写操作(rename / delete / paste)成功后回调
   // 父层用它触发 listWorkspace + 重扫,保证错误同步。
   onMutated: () => void;
+  onAddToMixConsole: (path: string) => void;
+  onAddFolderToMixConsole: (folderPath: string) => void;
 }
 
 const AUDIO_EXTS = new Set(["wav", "mp3", "flac", "ogg", "m4a"]);
@@ -356,6 +358,8 @@ export function Explorer({
   onAutofixSong,
   onPadSong,
   onMutated,
+  onAddToMixConsole,
+  onAddFolderToMixConsole,
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [childrenCache, setChildrenCache] = useState<Map<string, DirEntryOut[]>>(new Map());
@@ -745,20 +749,18 @@ export function Explorer({
       items.push("sep");
       items.push({
         label: "添加到混音台",
-        onClick: () => alert("混音台尚未实现"),
-        disabled: true,
+        onClick: () => onAddToMixConsole(path),
       });
     } else if (isDir && !isSongFolder) {
       items.push("sep");
       items.push({
         label: "添加文件夹到混音台",
-        onClick: () => alert("混音台尚未实现"),
-        disabled: true,
+        onClick: () => onAddFolderToMixConsole(path),
       });
     }
 
     return items;
-  }, [contextMenu, clipboard, songsSet, doDelete, doPaste, onAutofixSong, onPadSong]);
+  }, [contextMenu, clipboard, songsSet, doDelete, doPaste, onAutofixSong, onPadSong, onAddToMixConsole, onAddFolderToMixConsole]);
 
   return (
     <div className="pane">

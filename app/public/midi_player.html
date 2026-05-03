@@ -499,7 +499,7 @@
         </div>
 
         <div id="tracks-scroll-area">
-            <div id="compare-track-row" class="track-row compare-track-row" style="display:none !important;">
+            <div id="compare-track-row" class="track-row compare-track-row">
                 <div class="track-sidebar">
                     <div class="track-name">🎧 WAV 对照</div>
                     <div class="track-controls">
@@ -543,7 +543,9 @@
         let pauseOffset = 0;
         let totalDuration = 0;
         let totalDurationForDisplay = 0;
-        let exportBridge = null;
+        // 用 var 而非 let,这样脚本顶层的 exportBridge 与 window.exportBridge
+        // 是同一绑定;Electron 端外部可通过 window.exportBridge = {...} 注入桥替身。
+        var exportBridge = null;
         let defaultExportFilename = "export_修改.mid";
         let isMoveMode = false;
         let compareAudioEl = null;
@@ -2044,6 +2046,10 @@
                 stopBtn.disabled = false;
                 moveModeBtn.disabled = false;
                 exportBtn.disabled = false;
+                compareTrackLoaded = false;
+                ensureCompareTrackLoaded().catch((e) => {
+                    statusLabel.innerText = `对照WAV初始化失败: ${e.message || e}`;
+                });
                 setMoveMode(false);
 
                 // 显示播放头在起始位置
