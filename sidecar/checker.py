@@ -177,12 +177,98 @@ def _parse_error_string(path: str, msg: str) -> CheckError:
     )
 
 
+# 哪些 code 在同 path 内适合聚合。这些都是按"行 / 项"逐条 add_error 的高频
+# 报错点(参考 logic_checker.py:670/710/717/781),原样转发会让前端面板被几百条
+# 同质消息刷屏。其他 code(多余文件、命名错误等)每条都是不同信息,不聚合。
+_AGGREGATABLE_CODES = frozenset({
+    ErrorCode.CSV_COLUMN_COUNT_WRONG,
+    ErrorCode.CSV_TIME_FORMAT_WRONG,
+})
+
+
+def _format_line_summary(line_nos: List[int]) -> str:
+    """把行号列表压成简短摘要。
+
+    1 处   -> '第 3 行'
+    2-4 处 -> '第 3、5、7 行'
+    ≥5 处  -> '第 3、5、7 行...等共 N 处'
+    """
+    n = len(line_nos)
+    if n == 0:
+        return ""
+    if n == 1:
+        return f"第 {line_nos[0]} 行"
+    if n <= 4:
+        return f"第 {'、'.join(str(x) for x in line_nos)} 行"
+    head = '、'.join(str(x) for x in line_nos[:3])
+    return f"第 {head} 行...等共 {n} 处"
+
+
+def _aggregate(errs: List[CheckError]) -> List[CheckError]:
+    """同一 path 内把高频按行报错聚合成一条;其他 code 原样保留。
+
+    聚合产物的 expected 带 line_nos[]/total 等字段,agent 仍可据此修复。
+    """
+    if not errs:
+        return errs
+    keep: List[CheckError] = []
+    buckets: Dict[str, List[CheckError]] = {}
+    for e in errs:
+        if e.code in _AGGREGATABLE_CODES:
+            buckets.setdefault(e.code, []).append(e)
+        else:
+            keep.append(e)
+
+    for code, group in buckets.items():
+        if len(group) == 1:
+            keep.append(group[0])
+            continue
+        line_nos = sorted({
+            ln for g in group
+            if (ln := g.expected.get("line_no")) is not None
+        })
+        summary = _format_line_summary(line_nos)
+        if code == ErrorCode.CSV_COLUMN_COUNT_WRONG:
+            ec = group[0].expected.get("expected_columns", 2)
+            tail = "不是 2 列" if ec == 2 else f"应为 {ec} 列"
+            msg = f"[列数错误] {summary}{tail}"
+            expected = {
+                "line_nos": line_nos,
+                "expected_columns": ec,
+                "total": len(group),
+            }
+        elif code == ErrorCode.CSV_TIME_FORMAT_WRONG:
+            msg = f"[时间格式错误] {summary}不符 mm:ss 格式"
+            values = [g.expected.get("value") for g in group if g.expected.get("value")]
+            expected = {
+                "line_nos": line_nos,
+                "values": values,
+                "pattern": r"^\d{2}:\d{2}$",
+                "total": len(group),
+            }
+        else:
+            # 防御:新增 code 进 _AGGREGATABLE_CODES 但忘了写聚合分支时退化为原样。
+            keep.extend(group)
+            continue
+        keep.append(CheckError(
+            code=code,
+            path=group[0].path,
+            message=msg,
+            severity=group[0].severity,
+            expected=expected,
+            fix_hints=group[0].fix_hints,
+            machine_fixable=group[0].machine_fixable,
+        ))
+    return keep
+
+
 def check_song_folder(song_path: str) -> Dict[str, List[CheckError]]:
     """对单首歌做全量检查，返回结构化错误。"""
     raw = LogicChecker.check_song_folder(song_path)
     out: Dict[str, List[CheckError]] = {}
     for path, msgs in raw.items():
-        out[path] = [_parse_error_string(path, m) for m in msgs]
+        parsed = [_parse_error_string(path, m) for m in msgs]
+        out[path] = _aggregate(parsed)
     return out
 
 

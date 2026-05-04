@@ -18,6 +18,19 @@ function basename(p: string) {
   return m[m.length - 1] || p;
 }
 
+// errPath 相对 song 的展示路径:
+//   errPath == song          -> 显示 song 名(顶层 song 文件夹本身的错误)
+//   errPath 在 song 之下       -> 显示去掉 song 前缀后的相对路径,正斜杠
+//   不在 song 之下(异常)        -> 直接显示绝对路径
+function relPathFromSong(errPath: string, song: string): string {
+  if (errPath === song) return basename(song);
+  let rel: string | null = null;
+  if (errPath.startsWith(song + "\\")) rel = errPath.slice(song.length + 1);
+  else if (errPath.startsWith(song + "/")) rel = errPath.slice(song.length + 1);
+  if (rel == null) return errPath;
+  return rel.replace(/\\/g, "/");
+}
+
 // errPath 是否在 dir 之下(含 dir 本身)
 function inDir(errPath: string, dir: string) {
   return (
@@ -130,6 +143,12 @@ export function ProblemsPanel({ errorsBySong, selectedDir, onJumpTo }: Props) {
                           )}
                         </div>
                         <div>{e.message}</div>
+                        <div
+                          className="text-xs text-fg-subtle font-mono truncate mt-0.5"
+                          title={e.path}
+                        >
+                          {relPathFromSong(e.path, song)}
+                        </div>
                       </div>
                     </div>
                   </div>
