@@ -28,7 +28,9 @@ function inDir(errPath: string, dir: string) {
 }
 
 export function ProblemsPanel({ errorsBySong, selectedDir, onJumpTo }: Props) {
-  const [mode, setMode] = useState<Mode>("all");
+  // 默认 'current' = 选中时直接过滤当前目录;没选中时 filter 直接返回 errorsBySong
+  // 所以即使一开始没选中也只是显示全部,选了什么就跟着过滤,符合大部分使用场景。
+  const [mode, setMode] = useState<Mode>("current");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const visible = useMemo<Record<string, CheckErrorOut[]>>(() => {
@@ -73,16 +75,18 @@ export function ProblemsPanel({ errorsBySong, selectedDir, onJumpTo }: Props) {
           )}
         >
           <span>仅查看当前目录问题</span>
-          {/* 药丸轨道 + 圆点旋钮(off=灰底,on=accent 蓝底);旋钮在轨道里左右滑 */}
+          {/* 药丸轨道 + 圆点旋钮(off=实色 fg-subtle 灰底,on=accent 蓝底);
+              旋钮带浅灰边框,light 模式白圆点也能看清 */}
           <span
             className={clsx(
               "relative inline-block w-7 h-4 rounded-full transition-colors shrink-0",
-              isCurrent ? "bg-accent" : "bg-fg-subtle/40",
+              isCurrent ? "bg-accent" : "bg-fg-subtle",
             )}
           >
             <span
               className={clsx(
-                "absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow-sm transition-transform",
+                "absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow-sm",
+                "border border-black/10 transition-transform",
                 isCurrent ? "translate-x-3" : "translate-x-0",
               )}
             />
