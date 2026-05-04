@@ -402,6 +402,8 @@ export function Explorer({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [clipboard, setClipboard] = useState<ClipboardEntry | null>(null);
+  // 右键菜单弹出时异步查一次 OS 剪贴板,决定"粘贴"是否 disable。menu 关闭就忽略。
+  const [osClipHasFiles, setOsClipHasFiles] = useState(false);
 
   // 多选状态:以 selectedSet 为主,primary 由父级 selected prop 同步驱动 Center 渲染。
   // anchor 用于 Shift+Click 范围选(从 anchor 到当前 click 点的可见行区间)。
@@ -716,9 +718,31 @@ export function Explorer({
 
   const doPaste = useCallback(
     async (target: string, targetIsDir: boolean) => {
-      if (!clipboard) return;
       const dstDir = targetIsDir ? target : dirname(target);
       if (!dstDir) return;
+
+      // 1. 优先读 OS 剪贴板:用户从 Windows 资源管理器 / Finder 复制的文件
+      //    在外部复制 = 始终 copy(系统层面剪贴板没有"剪切"语义,Windows
+      //    所谓的剪切只是高亮显示,实际仍是拷贝;粘贴到我们这里就当复制处理)
+      let osPaths: string[] = [];
+      try {
+        osPaths = (await window.electronAPI.clipboardReadFiles()) || [];
+      } catch {
+        /* ignore */
+      }
+      if (osPaths.length > 0) {
+        try {
+          await copyPaths(osPaths, dstDir);
+          await refreshDir(dstDir);
+          onMutated();
+        } catch (e) {
+          alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        return;
+      }
+
+      // 2. 内部剪贴板(Explorer 自己 Ctrl+C / Ctrl+X 写入)
+      if (!clipboard) return;
       try {
         if (clipboard.mode === "copy") {
           await copyPaths(clipboard.srcs, dstDir);
@@ -815,7 +839,26 @@ export function Explorer({
     [selectedSet],
   );
 
-  // ---- 键盘快捷键 ----
+  // 菜单弹出时异步查 OS 剪贴板;菜单关时清回 false,避免下次旧值闪一下
+  useEffect(() => {
+    if (!contextMenu) {
+      setOsClipHasFiles(false);
+      return;
+    }
+    let cancelled = false;
+    void window.electronAPI
+      .clipboardReadFiles()
+      .then((paths) => {
+        if (cancelled) return;
+        setOsClipHasFiles((paths || []).length > 0);
+      })
+      .catch(() => {
+        /* ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [contextMenu]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -1081,7 +1124,7 @@ export function Explorer({
       {
         label: "粘贴",
         onClick: () => doPaste(path, isDir),
-        disabled: !clipboard || multi,
+        disabled: multi || (!clipboard && !osClipHasFiles),
       },
       "sep",
       { label: "在资源管理器中显示", onClick: () => doReveal(path), disabled: multi },
@@ -1122,7 +1165,7 @@ export function Explorer({
 
     return items;
   }, [
-    contextMenu, selectedSet, clipboard, songsSet,
+    contextMenu, selectedSet, clipboard, osClipHasFiles, songsSet,
     doDelete, doPaste, onAutofixSong, onPadSong, onAddToMixConsole, onAddFolderToMixConsole,
   ]);
 

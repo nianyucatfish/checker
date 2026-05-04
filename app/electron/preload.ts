@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   fsWatch: (root: string) => ipcRenderer.invoke("fs:watch", root),
   fsUnwatch: () => ipcRenderer.invoke("fs:unwatch"),
+  // 读 OS 剪贴板上"复制的文件"列表(Win CF_HDROP / macOS NSFilenamesPboardType);
+  // 没文件返回 []。给 Explorer Ctrl+V 跨进程粘贴用。
+  clipboardReadFiles: () =>
+    ipcRenderer.invoke("clipboard:read-files") as Promise<string[]>,
   // 注意:返回 unsubscribe 函数,在 useEffect cleanup 里调用避免重复订阅
   onFsChanged: (cb: (dirs: string[]) => void) => {
     const listener = (_e: unknown, dirs: string[]) => cb(dirs);

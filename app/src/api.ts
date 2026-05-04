@@ -142,6 +142,7 @@ declare global {
       fsWatch: (root: string) => Promise<void>;
       fsUnwatch: () => Promise<void>;
       onFsChanged: (cb: (dirs: string[]) => void) => () => void;
+      clipboardReadFiles: () => Promise<string[]>;
       mixToggle: (
         rect: { x: number; y: number; w: number; h: number } | null,
       ) => Promise<void>;

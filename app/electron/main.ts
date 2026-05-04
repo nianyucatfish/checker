@@ -1,6 +1,6 @@
 // Electron main process: spawn sidecar, manage window lifecycle.
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as net from "node:net";
@@ -206,6 +206,63 @@ ipcMain.handle("fs:watch", (e, rootPath: string) => {
 
 ipcMain.handle("fs:unwatch", () => {
   stopFsWatcher();
+});
+
+// ---------- 系统剪贴板:读"复制的文件"列表 ----------
+// 用户在 Windows 资源管理器 / macOS Finder 里 Ctrl+C/Cmd+C 一个文件,然后切到本 app
+// 按 Ctrl+V 粘贴。Electron contextIsolation 下 renderer 拿不到 native clipboard,
+// 让主进程读出文件路径列表交给 Explorer.doPaste。
+//
+// Windows: clipboard 的 CF_HDROP 是文件列表标准格式;先 readBuffer 再 parse
+// macOS: NSFilenamesPboardType (deprecated 但仍被多数应用写入) 是 plist XML,正则抽
+// 其他: 暂不支持
+
+function parseHdropBuffer(buf: Buffer): string[] {
+  // DROPFILES struct (Windows):
+  //   DWORD pFiles    offset to file list (typically 20)
+  //   POINT pt        (8 bytes, ignored)
+  //   BOOL  fNC       (4 bytes, ignored)
+  //   BOOL  fWide     (4 bytes;非零 = UTF-16LE,零 = ANSI)
+  // 之后是 double-null 结尾的路径列表
+  if (buf.length < 20) return [];
+  const pFiles = buf.readUInt32LE(0);
+  const fWide = buf.readUInt32LE(16) !== 0;
+  if (pFiles >= buf.length) return [];
+  const data = buf.subarray(pFiles);
+  const raw = fWide ? data.toString("utf16le") : data.toString("latin1");
+  return raw.split("\0").filter((s) => s.length > 0);
+}
+
+ipcMain.handle("clipboard:read-files", () => {
+  try {
+    if (process.platform === "win32") {
+      const formats = clipboard.availableFormats();
+      if (formats.includes("CF_HDROP")) {
+        const buf = clipboard.readBuffer("CF_HDROP");
+        return parseHdropBuffer(buf);
+      }
+      // 单文件 fallback(罕见)
+      const single = clipboard.readBuffer("FileNameW");
+      if (single && single.length >= 2) {
+        const s = single.toString("utf16le").replace(/\0+$/, "");
+        if (s) return [s];
+      }
+      return [];
+    }
+    if (process.platform === "darwin") {
+      // NSFilenamesPboardType: plist XML <array><string>/path/a</string>...
+      const xml = clipboard.read("NSFilenamesPboardType");
+      if (xml) {
+        return Array.from(xml.matchAll(/<string>([^<]+)<\/string>/g)).map(
+          (m) => m[1],
+        );
+      }
+      return [];
+    }
+  } catch (e) {
+    console.warn("[clipboard] read-files failed:", e);
+  }
+  return [];
 });
 
 // ---------- 混音台独立窗口 ----------
