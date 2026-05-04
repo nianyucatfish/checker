@@ -138,6 +138,7 @@ declare global {
       revealInFolder: (path: string) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
       openPath: (path: string) => Promise<void>;
+      getPathForFile: (file: File) => string;
       fsWatch: (root: string) => Promise<void>;
       fsUnwatch: () => Promise<void>;
       onFsChanged: (cb: (dirs: string[]) => void) => () => void;

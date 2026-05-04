@@ -151,4 +151,17 @@
   .row.has-errors {
     @apply text-danger;
   }
+
+  /* 拖放高亮:被拖目标(dir 行,或文件行的 parent dir 行)。
+     用 inset 实蓝边 + 半透明蓝底,既不影响行高也跟 selected 区分得开。 */
+  .row.drop-target {
+    background: rgba(14, 99, 156, 0.25);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  /* 整个 pane 在拖外部文件 / 内部节点时的虚线轮廓,空白处也能 drop 到 root */
+  .pane-body.dragging {
+    outline: 2px dashed var(--accent);
+    outline-offset: -4px;
+  }
 }

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   selectWorkspace: () => ipcRenderer.invoke("dialog:select-workspace"),
@@ -6,6 +6,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
   revealInFolder: (path: string) => ipcRenderer.invoke("shell:show-item-in-folder", path),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
   openPath: (path: string) => ipcRenderer.invoke("shell:open-path", path),
+  // 把 dataTransfer.files 里的 File 对象解成本地绝对路径(Electron 32+ 的官方做法,
+  // 替代之前 contextIsolation 下被禁的 file.path)。OS 拖来的临时 / blob 文件
+  // 没有本地路径时返回空字符串。
+  getPathForFile: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  },
   fsWatch: (root: string) => ipcRenderer.invoke("fs:watch", root),
   fsUnwatch: () => ipcRenderer.invoke("fs:unwatch"),
   // 注意:返回 unsubscribe 函数,在 useEffect cleanup 里调用避免重复订阅

@@ -305,7 +305,7 @@ export default function App() {
             onAutofixSong={handleAutofixSong}
             onPadSong={handlePadSong}
             onMutated={handleWorkspaceMutated}
-            onAddToMixConsole={(p) => handleAddToMix([p])}
+            onAddToMixConsole={handleAddToMix}
             onAddFolderToMixConsole={handleAddFolderToMix}
           />
         </Panel>
