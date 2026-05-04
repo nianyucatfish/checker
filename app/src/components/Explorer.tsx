@@ -866,11 +866,22 @@ export function Explorer({
       if (editing) return;
 
       const sel = Array.from(selectedSet);
+      const mod = e.ctrlKey || e.metaKey;
 
-      if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+      if (mod && (e.key === "a" || e.key === "A")) {
         // Ctrl+A:全选当前可见行(已展开范围)
         e.preventDefault();
         setSelectedSet(new Set(flatRows.map((r) => r.path)));
+        return;
+      }
+
+      // Ctrl+V:即使没选中也允许(退化到 root),让"外部 Ctrl+C 文件 → 切到 app
+      // → Ctrl+V"在用户没在树里点过任何项时也能直接粘到工作区根目录
+      if (mod && (e.key === "v" || e.key === "V")) {
+        e.preventDefault();
+        const target = selected ?? root;
+        const targetIsDir = selected ? selectedIsDir : true;
+        if (target) doPaste(target, targetIsDir);
         return;
       }
 
@@ -884,21 +895,17 @@ export function Explorer({
       } else if (e.key === "Delete") {
         e.preventDefault();
         doDelete(sel);
-      } else if (e.ctrlKey && (e.key === "c" || e.key === "C")) {
+      } else if (mod && (e.key === "c" || e.key === "C")) {
         e.preventDefault();
         doCopy(sel);
-      } else if (e.ctrlKey && (e.key === "x" || e.key === "X")) {
+      } else if (mod && (e.key === "x" || e.key === "X")) {
         e.preventDefault();
         doCut(sel);
-      } else if (e.ctrlKey && (e.key === "v" || e.key === "V")) {
-        // 粘贴目标:primary(props.selected),用其 isDir 决定是否进入它本身
-        e.preventDefault();
-        if (selected) doPaste(selected, selectedIsDir);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedSet, selected, selectedIsDir, editing, flatRows, doDelete, doPaste]);
+  }, [selectedSet, selected, selectedIsDir, root, editing, flatRows, doDelete, doPaste]);
 
   // ---- 拖放 ----
 
