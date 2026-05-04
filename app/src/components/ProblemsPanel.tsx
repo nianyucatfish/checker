@@ -37,22 +37,22 @@ export function ProblemsPanel({ errorsBySong, selectedSong, onJumpTo }: Props) {
     <div className="pane">
       <div className="pane-header flex justify-between gap-2">
         <span>问题{totalCount > 0 && <span className="ml-1 text-danger">({totalCount})</span>}</span>
-        <div className="flex items-center gap-2 normal-case tracking-normal text-xs">
-          <button
-            className={clsx("hover:text-fg", mode === "all" ? "text-fg" : "text-fg-muted")}
-            onClick={() => setMode("all")}
-          >
-            全部
-          </button>
-          <span className="text-fg-subtle">·</span>
-          <button
-            className={clsx("hover:text-fg", mode === "current" ? "text-fg" : "text-fg-muted")}
-            onClick={() => setMode("current")}
-            disabled={!selectedSong}
-          >
-            当前歌曲
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => setMode((m) => (m === "current" ? "all" : "current"))}
+          disabled={!selectedSong}
+          aria-pressed={mode === "current"}
+          title={selectedSong ? "切换是否仅显示当前目录所属歌曲的问题" : "先在左侧选中一项"}
+          className={clsx(
+            "px-2.5 h-6 rounded-full border text-[11px] normal-case tracking-normal",
+            "transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+            mode === "current"
+              ? "bg-accent text-accent-fg border-accent"
+              : "border-border text-fg-muted hover:text-fg hover:bg-bg-hover",
+          )}
+        >
+          仅查看当前目录问题
+        </button>
       </div>
       <div className="pane-body">
         {totalCount === 0 && (

@@ -37,8 +37,14 @@ export default function App() {
 
   const [root, setRoot] = useState<string | null>(null);
   const [songs, setSongs] = useState<string[]>([]);
+  // selectedPath:左键命中的"行"(可以是 dir 也可以是 file),用于:
+  //   - Explorer 内部 selectedSet 同步 + 自动展开祖先
+  //   - ProblemsPanel 派生 selectedSong(当前歌曲过滤)
+  // editorPath:Center 显示的"文件",仅在选中 file 时更新。点 dir 不动,这样
+  //   左键展开目录不会把编辑器切走。
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedIsDir, setSelectedIsDir] = useState<boolean>(false);
+  const [editorPath, setEditorPath] = useState<string | null>(null);
   const [errorsBySong, setErrorsBySong] = useState<Record<string, CheckErrorOut[]>>({});
   const [scanning, setScanning] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -75,6 +81,7 @@ export default function App() {
     setRoot(picked);
     setSelectedPath(null);
     setSelectedIsDir(false);
+    setEditorPath(null);
     setErrorsBySong({});
     const out = await listWorkspace(picked);
     setSongs(out.songs);
@@ -272,11 +279,14 @@ export default function App() {
     const isDir = songs.includes(path) || !/\.[^.\\/]+$/.test(path);
     setSelectedPath(path);
     setSelectedIsDir(isDir);
+    if (!isDir) setEditorPath(path);
   };
 
   const handleSelect = (path: string, isDir: boolean) => {
     setSelectedPath(path);
     setSelectedIsDir(isDir);
+    // 仅 file 命中才切 Center;dir 命中保留之前文件
+    if (!isDir) setEditorPath(path);
   };
 
   return (
@@ -312,8 +322,7 @@ export default function App() {
         <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
         <Panel minSize={30}>
           <CenterWithProblemsDrawer
-            selectedPath={selectedPath}
-            selectedIsDir={selectedIsDir}
+            editorPath={editorPath}
             errorsBySong={errorsBySong}
             selectedSong={selectedSong}
             onJumpTo={handleJumpTo}
@@ -365,14 +374,12 @@ const PROBLEMS_HEIGHT_KEY = "audio_qc.problems_height";
 const PROBLEMS_MIN_PX = 80;
 
 function CenterWithProblemsDrawer({
-  selectedPath,
-  selectedIsDir,
+  editorPath,
   errorsBySong,
   selectedSong,
   onJumpTo,
 }: {
-  selectedPath: string | null;
-  selectedIsDir: boolean;
+  editorPath: string | null;
   errorsBySong: Record<string, CheckErrorOut[]>;
   selectedSong: string | null;
   onJumpTo: (path: string) => void;
@@ -421,7 +428,7 @@ function CenterWithProblemsDrawer({
         className="absolute top-0 left-0 right-0"
         style={{ bottom: `${drawerHeight}px` }}
       >
-        <Center selectedPath={selectedPath} selectedIsDir={selectedIsDir} />
+        <Center selectedPath={editorPath} selectedIsDir={false} />
       </div>
       {/* ProblemsPanel 抽屉:贴底,顶部一根可拖把手 */}
       <div

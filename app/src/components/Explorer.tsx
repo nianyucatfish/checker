@@ -785,14 +785,13 @@ export function Explorer({
         return;
       }
 
-      // 普通 click:重置选区 + dir 仅展开/收起 + 仅 file 才切 Center
+      // 普通 click:重置选区 + dir 展开/收起 + 通知父级(父级决定 Center 是否切;
+      // 当前实现是 dir click 让父级 selectedPath 走但 editorPath 不动,所以
+      // Center 保留之前文件,ProblemsPanel 跟随切到该 dir 所属歌曲)
       setSelectedSet(new Set([path]));
       setAnchor(path);
-      if (isDir) {
-        onToggle(path);
-      } else {
-        onSelect(path, false);
-      }
+      onSelect(path, isDir);
+      if (isDir) onToggle(path);
     },
     [editing, anchor, flatRows, onSelect, onToggle],
   );
