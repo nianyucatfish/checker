@@ -263,16 +263,15 @@ export default function App() {
 
   const totalErrors = allErrors.length;
 
-  // 当前选中所属的歌曲（用于 ProblemsPanel "当前歌曲" 模式）
-  const selectedSong = useMemo<string | null>(() => {
+  // 当前选中所属"目录":file 取 parent dir,dir 取自身。
+  // ProblemsPanel "仅查看当前目录" 模式按此过滤(含子目录)。
+  const selectedDir = useMemo<string | null>(() => {
     if (!selectedPath) return null;
-    const songPaths = [...songs].sort((a, b) => b.length - a.length);
-    return (
-      songPaths.find(
-        (sp) => selectedPath === sp || selectedPath.startsWith(sp + "\\") || selectedPath.startsWith(sp + "/"),
-      ) || null
-    );
-  }, [selectedPath, songs]);
+    if (selectedIsDir) return selectedPath;
+    const idx = Math.max(selectedPath.lastIndexOf("\\"), selectedPath.lastIndexOf("/"));
+    if (idx <= 0) return null;
+    return selectedPath.slice(0, idx);
+  }, [selectedPath, selectedIsDir]);
 
   const handleJumpTo = (path: string) => {
     // 启发式：歌曲文件夹/子目录无扩展名，文件有扩展名
@@ -324,7 +323,7 @@ export default function App() {
           <CenterWithProblemsDrawer
             editorPath={editorPath}
             errorsBySong={errorsBySong}
-            selectedSong={selectedSong}
+            selectedDir={selectedDir}
             onJumpTo={handleJumpTo}
           />
         </Panel>
@@ -376,12 +375,12 @@ const PROBLEMS_MIN_PX = 80;
 function CenterWithProblemsDrawer({
   editorPath,
   errorsBySong,
-  selectedSong,
+  selectedDir,
   onJumpTo,
 }: {
   editorPath: string | null;
   errorsBySong: Record<string, CheckErrorOut[]>;
-  selectedSong: string | null;
+  selectedDir: string | null;
   onJumpTo: (path: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -443,7 +442,7 @@ function CenterWithProblemsDrawer({
         <div className="flex-1 min-h-0">
           <ProblemsPanel
             errorsBySong={errorsBySong}
-            selectedSong={selectedSong}
+            selectedDir={selectedDir}
             onJumpTo={onJumpTo}
           />
         </div>
