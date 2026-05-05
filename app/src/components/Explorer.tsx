@@ -184,21 +184,22 @@ function TreeNode(props: NodeProps) {
         ) : (
           <span className="truncate flex-1">{name}</span>
         )}
+        {!isEditing && errs > 0 && (
+          <span className="text-xs px-1 rounded bg-danger/20 text-danger shrink-0 inline-flex items-center gap-0.5">
+            <AlertCircle size={10} />
+            {errs}
+          </span>
+        )}
         {!isEditing && dur != null && (
+          // 时长固定贴最右,徽章在其左边,这样徽章长度变化不影响时长列对齐
           <span
             className={clsx(
-              "text-xs shrink-0 font-mono",
+              "text-xs shrink-0 font-mono tabular-nums",
               isInconsistent ? "text-warning font-semibold" : "text-fg-subtle",
             )}
             title={isInconsistent ? "同目录内时长不一致" : undefined}
           >
             {fmtDuration(dur.duration_seconds)}
-          </span>
-        )}
-        {!isEditing && errs > 0 && (
-          <span className="text-xs px-1 rounded bg-danger/20 text-danger shrink-0 inline-flex items-center gap-0.5">
-            <AlertCircle size={10} />
-            {errs}
           </span>
         )}
       </div>
@@ -719,7 +720,11 @@ export function Explorer({
   const doPaste = useCallback(
     async (target: string, targetIsDir: boolean) => {
       const dstDir = targetIsDir ? target : dirname(target);
-      if (!dstDir) return;
+      console.log("[explorer] doPaste invoked", { target, targetIsDir, dstDir });
+      if (!dstDir) {
+        console.warn("[explorer] doPaste aborted: empty dstDir");
+        return;
+      }
 
       // 1. 优先读 OS 剪贴板:用户从 Windows 资源管理器 / Finder 复制的文件
       //    在外部复制 = 始终 copy(系统层面剪贴板没有"剪切"语义,Windows
@@ -727,12 +732,14 @@ export function Explorer({
       let osPaths: string[] = [];
       try {
         osPaths = (await window.electronAPI.clipboardReadFiles()) || [];
-      } catch {
-        /* ignore */
+        console.log("[explorer] OS clipboard files:", osPaths);
+      } catch (e) {
+        console.warn("[explorer] clipboardReadFiles failed:", e);
       }
       if (osPaths.length > 0) {
         try {
-          await copyPaths(osPaths, dstDir);
+          const r = await copyPaths(osPaths, dstDir);
+          console.log("[explorer] copyPaths result:", r);
           await refreshDir(dstDir);
           onMutated();
         } catch (e) {
@@ -742,7 +749,10 @@ export function Explorer({
       }
 
       // 2. 内部剪贴板(Explorer 自己 Ctrl+C / Ctrl+X 写入)
-      if (!clipboard) return;
+      if (!clipboard) {
+        console.log("[explorer] doPaste: no OS files and no internal clipboard");
+        return;
+      }
       try {
         if (clipboard.mode === "copy") {
           await copyPaths(clipboard.srcs, dstDir);
@@ -867,6 +877,18 @@ export function Explorer({
 
       const sel = Array.from(selectedSet);
       const mod = e.ctrlKey || e.metaKey;
+
+      // 临时调试:看到底事件有没有进来,谁是 target
+      if (mod && (e.key === "v" || e.key === "V")) {
+        console.log("[explorer] keydown Ctrl/Cmd+V", {
+          target: (e.target as HTMLElement | null)?.tagName,
+          editing,
+          selSize: sel.length,
+          selected,
+          selectedIsDir,
+          root,
+        });
+      }
 
       if (mod && (e.key === "a" || e.key === "A")) {
         // Ctrl+A:全选当前可见行(已展开范围)
