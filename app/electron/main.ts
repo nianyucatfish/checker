@@ -1,9 +1,12 @@
 // Electron main process: spawn sidecar, manage window lifecycle.
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
-import { spawn, ChildProcess } from "node:child_process";import * as path from "node:path";
+import { spawn, ChildProcess } from "node:child_process";
+import * as path from "node:path";
 import * as net from "node:net";
 import chokidar, { FSWatcher } from "chokidar";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const SIDECAR_PORT = 8765; // TODO Phase 5: pick random free port
 
@@ -63,6 +66,68 @@ function spawnSidecar() {
   sidecarProc.stdout?.on("data", (b) => process.stdout.write(`[sidecar] ${b}`));
   sidecarProc.stderr?.on("data", (b) => process.stderr.write(`[sidecar] ${b}`));
   sidecarProc.on("exit", (code) => console.log(`[sidecar] exited with ${code}`));
+}
+
+
+// ============================================================
+//  MCP client (Phase 4: agent 工具通道)
+//
+//  跟 FastAPI sidecar 并行存在,各管各的:
+//    - FastAPI(SIDECAR_PORT 8765):renderer 走 HTTP 调 /tools/* /dev/*
+//    - MCP server (stdio 子进程):agent 通过 MCP 协议调工具
+//
+//  本切片只做"连通性证明":拉子进程、连上、列出工具、打日志,不接 UI / agent。
+//  后续切片把 mcpClient 暴露给 IPC handler 供未来 agent loop 使用。
+// ============================================================
+
+// MCP client。子进程由 StdioClientTransport 内部 spawn,我们不握 ChildProcess
+// 句柄;close() 会关 transport 并把子进程一并带走。
+let mcpClient: Client | null = null;
+
+async function startMcpClient(): Promise<void> {
+  const projectRoot = path.resolve(__dirname, "..", "..");
+  const py = process.platform === "win32"
+    ? path.join(projectRoot, "venv", "Scripts", "python.exe")
+    : path.join(projectRoot, "venv", "bin", "python");
+
+  // StdioClientTransport 自己 spawn 子进程并接管 stdin/stdout 做 JSON-RPC,
+  // 我们不另起 spawn —— 否则 transport 拿不到正确的句柄。但子进程的 stderr
+  // 仍能被父进程拿到(SDK 默认透传 stderr),用来打 sidecar 内部 log。
+  const transport = new StdioClientTransport({
+    command: py,
+    args: ["-X", "utf8", "-m", "sidecar.mcp_server"],
+    cwd: projectRoot,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" } as Record<string, string>,
+    // stderr 走 inherit,sidecar logging.basicConfig 的输出能直接到主进程控制台
+    stderr: "inherit",
+  });
+
+  mcpClient = new Client(
+    { name: "audio-qc-electron", version: "0.1.0" },
+    { capabilities: {} }
+  );
+
+  await mcpClient.connect(transport);
+  console.log("[mcp] connected to sidecar.mcp_server");
+
+  const { tools } = await mcpClient.listTools();
+  console.log(`[mcp] ${tools.length} tools available:`);
+  for (const t of tools) {
+    console.log(`  - ${t.name}: ${(t.description ?? "").split("\n")[0]}`);
+  }
+
+  // 暴露给后续 IPC handler / agent loop 用,这一切片先不写调用方。
+}
+
+async function stopMcpClient(): Promise<void> {
+  if (mcpClient) {
+    try {
+      await mcpClient.close();
+    } catch (e) {
+      console.warn("[mcp] close failed:", e);
+    }
+    mcpClient = null;
+  }
 }
 
 function createWindow() {
@@ -590,6 +655,12 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.error(`[main] ${e}`);
   }
+
+  // MCP 子进程并行启动,失败不阻塞主流程(agent 还没接,FastAPI 路径仍工作)
+  startMcpClient().catch((e) => {
+    console.error("[mcp] startMcpClient failed:", e);
+  });
+
   createWindow();
 
   app.on("activate", () => {
@@ -603,6 +674,7 @@ app.on("window-all-closed", () => {
   stopFsWatcher();
   if (mixWindow && !mixWindow.isDestroyed()) mixWindow.destroy();
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();
+  void stopMcpClient();
   if (process.platform !== "darwin") app.quit();
 });
 
@@ -611,4 +683,5 @@ app.on("before-quit", () => {
   stopFsWatcher();
   if (mixWindow && !mixWindow.isDestroyed()) mixWindow.destroy();
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();
+  void stopMcpClient();
 });
