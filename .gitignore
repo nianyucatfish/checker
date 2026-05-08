@@ -25,9 +25,10 @@ dist/
 .DS_Store
 Thumbs.db
 
-# 6. 忽略本地的敏感配置 (如果有)
-# 比如包含密码的 config.ini，如果不想公开就加上
-# config.ini
+# 6. 忽略本地的敏感配置
+# config.toml 包含凭证(腾讯文档 access_token、Anthropic API key 等),不进 git
+# 模板见 config.example.toml(已提交)
+config.toml
 
 *.mid
 piano_roll_test.py
@@ -44,3 +45,6 @@ app/dist/
 app/dist-electron/
 app/tsconfig.*.tsbuildinfo
 *.log
+
+# 7. 腾讯文档表数据 disk cache (开发期手动管理, 不进 git)
+cache/

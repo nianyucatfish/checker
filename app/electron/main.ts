@@ -1,8 +1,7 @@
 // Electron main process: spawn sidecar, manage window lifecycle.
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
-import { spawn, ChildProcess } from "node:child_process";
-import * as path from "node:path";
+import { spawn, ChildProcess } from "node:child_process";import * as path from "node:path";
 import * as net from "node:net";
 import chokidar, { FSWatcher } from "chokidar";
 
@@ -78,6 +77,19 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  // setApplicationMenu(null) 把默认 F12 / Ctrl+Shift+I 一起带走了,这里手动补回
+  // 确保 dev / 排查问题时能开 DevTools
+  win.webContents.on("before-input-event", (e, input) => {
+    if (input.type !== "keyDown") return;
+    const isF12 = input.key === "F12";
+    const isCtrlShiftI =
+      (input.control || input.meta) && input.shift &&
+      (input.key === "I" || input.key === "i");
+    if (isF12 || isCtrlShiftI) {
+      win.webContents.toggleDevTools();
+      e.preventDefault();
+    }
+  });
   win.on("closed", () => {
     if (mainWindow === win) mainWindow = null;
     // 主窗关 → 混音窗也带走,避免 orphan(走 destroy 跳过 close 拦截)
@@ -233,24 +245,78 @@ function parseHdropBuffer(buf: Buffer): string[] {
   return raw.split("\0").filter((s) => s.length > 0);
 }
 
-ipcMain.handle("clipboard:read-files", () => {
+// Windows: 读 OS 剪贴板上"复制的文件"列表。
+//
+// 历史教训:Electron 的 clipboard.readBuffer("CF_HDROP") 在 Win 上是把字符串
+// 喂给 RegisterClipboardFormat 注册一个"自定义"格式 id,而非走系统 CF_HDROP=15,
+// 因此空 buffer 永远拿不到。换 PowerShell 的 Get-Clipboard 走 OLE 接口最可靠
+// (PyQt QClipboard 也是走 OLE,行为一致)。慢点(每次 ~200ms)但只在 Ctrl+V 时调,
+// 用户不会有感。
+async function readClipboardFilesWindows(): Promise<string[]> {
+  try {
+    const paths = await new Promise<string[]>((resolve) => {
+      const proc = spawn(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "[Console]::OutputEncoding = [Text.Encoding]::UTF8;" +
+            " Get-Clipboard -Format FileDropList | ForEach-Object { $_.FullName }",
+        ],
+        { windowsHide: true },
+      );
+      let stdout = "";
+      proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf-8")));
+      let resolved = false;
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        const out = stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        resolve(out);
+      };
+      proc.on("error", () => {
+        if (!resolved) {
+          resolved = true;
+          resolve([]);
+        }
+      });
+      proc.on("close", finish);
+      setTimeout(() => {
+        if (resolved) return;
+        try { proc.kill(); } catch { /* ignore */ }
+        finish();
+      }, 3000);
+    });
+    if (paths.length > 0) return paths;
+  } catch (e) {
+    console.warn("[clipboard] powershell read failed:", e);
+  }
+
+  // 兜底:native single-file format(用户对单文件 Ctrl+C 时偶尔有效)
+  try {
+    const buf = clipboard.readBuffer("FileNameW");
+    if (buf.length >= 2) {
+      const s = buf.toString("utf16le").replace(/\0+$/, "");
+      if (s) return [s];
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
+
+ipcMain.handle("clipboard:read-files", async () => {
   try {
     if (process.platform === "win32") {
-      const formats = clipboard.availableFormats();
-      if (formats.includes("CF_HDROP")) {
-        const buf = clipboard.readBuffer("CF_HDROP");
-        return parseHdropBuffer(buf);
-      }
-      // 单文件 fallback(罕见)
-      const single = clipboard.readBuffer("FileNameW");
-      if (single && single.length >= 2) {
-        const s = single.toString("utf16le").replace(/\0+$/, "");
-        if (s) return [s];
-      }
-      return [];
+      const paths = await readClipboardFilesWindows();
+      console.log("[clipboard] read-files (win):", paths);
+      return paths;
     }
     if (process.platform === "darwin") {
-      // NSFilenamesPboardType: plist XML <array><string>/path/a</string>...
       const xml = clipboard.read("NSFilenamesPboardType");
       if (xml) {
         return Array.from(xml.matchAll(/<string>([^<]+)<\/string>/g)).map(
