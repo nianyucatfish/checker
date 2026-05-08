@@ -11,6 +11,9 @@ pydantic>=2.7
 # 文件操作（移到回收站，跨平台）
 send2trash>=1.8
 
+# MCP server(agent 工具暴露;stdio transport,Electron main 起 client subprocess spawn）
+mcp>=1.0
+
 # 测试
 pytest>=8
 httpx>=0.27
