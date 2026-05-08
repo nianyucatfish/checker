@@ -62,6 +62,31 @@ class PendingSong:
     owner: str  # 扒曲负责人
 
 
+@dataclass
+class SongMeta:
+    """get_song_meta 返回:本歌在分工表中的关键 meta + 缺字段清单。
+
+    1.1 用,验证扒曲负责人是不是把必要信息填齐了。LLM 不需要知道列号,
+    sidecar 内部把列映射到字段名。
+    """
+    row_index: int
+    song_name: str
+    owner: str                # 扒曲负责人
+    original_singer: str      # 原唱
+    backing: str              # 伴唱
+    backing_gender: str       # 伴唱性别
+    pan_owner_link: str       # 扒曲提交链接位置
+    pan_mix_link: str         # 录混提交链接位置
+    missing_required_fields: list[str]  # 必填但空的字段名(按业务定义)
+
+
+# 1.1 必填字段定义(暂按业务讨论结果初拟,后续可调)。
+# 注意:不含 owner —— 扒曲负责人是分配的元字段,空了得找学姐而不是扒曲方;
+# 也不含 pan_owner_link / pan_mix_link —— 提交链接到分工表的不同 phase
+# (扒曲完成 / 录混完成),phase 1 不一定齐。
+_REQUIRED_META_FIELDS = ["original_singer"]
+
+
 # ============================================================
 #  helpers
 # ============================================================
@@ -137,6 +162,57 @@ def list_my_pending() -> list[PendingSong]:
             owner=_cell(row, COL_OWNER),
         ))
     return out
+
+
+def get_song_meta(song_name: str) -> SongMeta:
+    """拉本歌的分工表 meta + 必填字段缺失清单(1.1 验收用)。
+
+    工具签名不带 reviewer 参数,但**仅在当前用户负责验收的歌中查找** ——
+    身份隐藏边界仍成立(LLM 不知道当前 reviewer 是谁,但只能查到自己应验收的歌)。
+
+    Raises:
+        TencentSheetError:如果配置缺 reviewer_name,或 song_name 不在当前用户
+            的待验收 / 已验收范围内。后者是有意的安全边界 —— 不要让 LLM 通过此
+            工具枚举其他人负责的歌的 meta。
+    """
+    reviewer = get_config().user.reviewer_name.strip()
+    if not reviewer:
+        raise TencentSheetError(
+            "user.reviewer_name not configured in config.toml; "
+            "cannot determine current user"
+        )
+
+    rows = get_client().fetch_all()
+    if not rows:
+        raise TencentSheetError(f"分工表为空,无法定位歌 '{song_name}'")
+    _validate_headers(rows[0])
+
+    target_name = song_name.strip()
+    for row_index, row in enumerate(rows[1:], start=2):
+        if _cell(row, COL_REVIEWER) != reviewer:
+            continue
+        if _cell(row, COL_SONG_NAME) != target_name:
+            continue
+
+        meta = SongMeta(
+            row_index=row_index,
+            song_name=_cell(row, COL_SONG_NAME),
+            owner=_cell(row, COL_OWNER),
+            original_singer=_cell(row, COL_ORIGINAL_SINGER),
+            backing=_cell(row, COL_BACKING),
+            backing_gender=_cell(row, COL_BACKING_GENDER),
+            pan_owner_link=_cell(row, COL_PAN_OWNER_LINK),
+            pan_mix_link=_cell(row, COL_PAN_MIX_LINK),
+            missing_required_fields=[],
+        )
+        meta.missing_required_fields = [
+            f for f in _REQUIRED_META_FIELDS if not getattr(meta, f, "").strip()
+        ]
+        return meta
+
+    raise TencentSheetError(
+        f"歌 '{song_name}' 不在当前用户的验收范围;无法返回 meta"
+    )
 
 
 def _list_my_rows(*, accepted: bool) -> tuple[list[str], list[dict]]:

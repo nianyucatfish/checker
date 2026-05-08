@@ -86,6 +86,42 @@ def audit_run_check(song_path: str) -> dict[str, Any]:
 # ============================================================
 
 @mcp.tool()
+def sheet_get_song_meta(song_name: str) -> dict[str, Any]:
+    """Fetch one song's metadata + missing-required-fields from the assignment sheet.
+
+    Used by state 1.1 to verify the song's row is filled in (扒曲信息 / 风格标签等).
+    Only finds songs assigned to the current reviewer (身份隐藏 boundary preserved
+    via internal config; 不允许通过此工具枚举他人负责的歌).
+
+    Returns:
+        {
+          "meta": {row_index, song_name, owner, original_singer, backing,
+                   backing_gender, pan_owner_link, pan_mix_link},
+          "missing_required_fields": [str, ...]   # 必填但空的字段名
+        }
+
+    Failure modes:
+        - song not found / not in scope → {"ok": false, "code": "SONG_NOT_FOUND"}
+        - tencent docs api down → {"ok": false, "code": "SHEET_FETCH_FAILED"}
+    """
+    try:
+        meta = assignment_sheet.get_song_meta(song_name)
+    except TencentSheetError as e:
+        msg = str(e)
+        # 区分 "不在范围" 与 "API 挂"
+        if "不在当前用户的验收范围" in msg or "分工表为空" in msg:
+            return {"ok": False, "code": "SONG_NOT_FOUND", "message": msg}
+        return {
+            "ok": False,
+            "code": "SHEET_FETCH_FAILED",
+            "message": f"{e} (http_status={e.http_status}, api_code={e.api_code})",
+        }
+    d = asdict(meta)
+    missing = d.pop("missing_required_fields")
+    return {"meta": d, "missing_required_fields": missing}
+
+
+@mcp.tool()
 def sheet_list_my_pending() -> dict[str, Any]:
     """List songs assigned to the current reviewer that are not yet accepted.
 

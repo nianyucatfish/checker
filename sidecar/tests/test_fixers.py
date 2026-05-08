@@ -217,3 +217,166 @@ def test_pad_song_to_longest_end_to_end(tmp_workspace):
     assert result.error is None
     assert result.padded == 1
     assert result.max_duration == pytest.approx(3.0, abs=1e-6)
+
+
+# -----------------------------
+#  execute_ops:agent 自构造 dict-style ops 写路径
+# -----------------------------
+
+
+def test_execute_ops_rename(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.txt")
+    Path(src).write_text("hi", encoding="utf-8")
+    dst = os.path.join(tmp_workspace, "b.txt")
+    result = fixers.execute_ops(
+        [{"type": "rename", "src": src, "dst": dst}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    assert os.path.exists(dst)
+    assert not os.path.exists(src)
+    assert result.executed[0]["type"] == "rename"
+
+
+def test_execute_ops_delete_uses_trash(tmp_workspace):
+    """delete 走 send2trash 不是 os.remove,源路径应消失。"""
+    p = os.path.join(tmp_workspace, "trash_me.txt")
+    Path(p).write_text("x", encoding="utf-8")
+    result = fixers.execute_ops(
+        [{"type": "delete", "path": p}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    assert not os.path.exists(p)
+    assert result.executed[0] == {"type": "delete", "path": p}
+
+
+def test_execute_ops_delete_missing_path_records_error_not_raises(tmp_workspace):
+    """删一个不存在的路径不该抛,只该在 errors 里记一笔(可能上一 op 已删)。"""
+    p = os.path.join(tmp_workspace, "nonexistent.txt")
+    result = fixers.execute_ops(
+        [{"type": "delete", "path": p}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("路径不存在" in e for e in result.errors)
+
+
+def test_execute_ops_move_creates_dst_dir_if_missing(tmp_workspace):
+    src = os.path.join(tmp_workspace, "orphan.mid")
+    Path(src).write_text("midi", encoding="utf-8")
+    dst_dir = os.path.join(tmp_workspace, "song", "midi")  # 还不存在
+
+    result = fixers.execute_ops(
+        [{"type": "move", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    expected = os.path.join(dst_dir, "orphan.mid")
+    assert os.path.exists(expected)
+    assert not os.path.exists(src)
+    assert result.path_updates[src] == expected
+
+
+def test_execute_ops_move_rejects_when_dst_exists(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.txt")
+    Path(src).write_text("src", encoding="utf-8")
+    dst_dir = os.path.join(tmp_workspace, "sub")
+    os.makedirs(dst_dir)
+    Path(os.path.join(dst_dir, "a.txt")).write_text("blocker", encoding="utf-8")
+
+    result = fixers.execute_ops(
+        [{"type": "move", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("目标已存在" in e for e in result.errors)
+    assert os.path.exists(src)  # 源应保留
+
+
+def test_execute_ops_create_dir_idempotent(tmp_workspace):
+    target = os.path.join(tmp_workspace, "midi")
+    os.makedirs(target)  # 已存在
+    result = fixers.execute_ops(
+        [{"type": "create_dir", "path": target}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    assert os.path.isdir(target)
+
+
+def test_execute_ops_path_outside_workspace_rejects_whole_batch(tmp_workspace):
+    """快失败:任一 op 越界,整批拒绝,不做任何写操作。"""
+    inside = os.path.join(tmp_workspace, "ok.txt")
+    Path(inside).write_text("safe", encoding="utf-8")
+    bad_path = "/etc/passwd" if os.name != "nt" else "C:/Windows/System32/cmd.exe"
+
+    result = fixers.execute_ops(
+        [
+            {"type": "rename", "src": inside, "dst": inside + ".renamed"},
+            {"type": "delete", "path": bad_path},  # 越界
+        ],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("路径越界" in e for e in result.errors)
+    assert os.path.exists(inside)  # 第一个 op 也没执行
+
+
+def test_execute_ops_unknown_type_rejects_whole_batch(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.txt")
+    Path(p).write_text("x", encoding="utf-8")
+    result = fixers.execute_ops(
+        [{"type": "frobnicate", "path": p}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("未知 op 类型" in e for e in result.errors)
+    assert os.path.exists(p)
+
+
+def test_execute_ops_mixed_batch(tmp_workspace):
+    """rename + delete + create_dir + move 混合一批,顺序执行。"""
+    a = os.path.join(tmp_workspace, "a.txt")
+    Path(a).write_text("a", encoding="utf-8")
+    extra = os.path.join(tmp_workspace, "extra.txt")
+    Path(extra).write_text("rm me", encoding="utf-8")
+    orphan = os.path.join(tmp_workspace, "orphan.mid")
+    Path(orphan).write_text("m", encoding="utf-8")
+    midi_dir = os.path.join(tmp_workspace, "midi")
+
+    ops = [
+        {"type": "rename", "src": a, "dst": os.path.join(tmp_workspace, "a_normalized.txt")},
+        {"type": "delete", "path": extra},
+        {"type": "create_dir", "path": midi_dir},
+        {"type": "move", "src": orphan, "dst_dir": midi_dir},
+    ]
+    result = fixers.execute_ops(ops, workspace_root=tmp_workspace)
+    assert result.errors == []
+    assert len(result.executed) == 4
+    assert os.path.exists(os.path.join(tmp_workspace, "a_normalized.txt"))
+    assert not os.path.exists(extra)
+    assert os.path.isdir(midi_dir)
+    assert os.path.exists(os.path.join(midi_dir, "orphan.mid"))
+
+
+def test_execute_ops_rename_cascade_child_then_parent(tmp_workspace):
+    """子路径先改、父目录后改:文件系统层自然带过去,两步都成功。
+
+    cascade 顺序由 build_autofix_plan 排序保证;agent 自构造 ops 时也应遵守同样
+    顺序(propose_rename_plan 输出已经排好)。
+    """
+    parent = os.path.join(tmp_workspace, "old_parent")
+    os.makedirs(parent)
+    child = os.path.join(parent, "old_child.txt")
+    Path(child).write_text("c", encoding="utf-8")
+    renamed_child = os.path.join(parent, "new_child.txt")
+    new_parent = os.path.join(tmp_workspace, "new_parent")
+
+    ops = [
+        {"type": "rename", "src": child, "dst": renamed_child},
+        {"type": "rename", "src": parent, "dst": new_parent},
+    ]
+    result = fixers.execute_ops(ops, workspace_root=tmp_workspace)
+    assert result.errors == []
+    assert os.path.exists(os.path.join(new_parent, "new_child.txt"))
