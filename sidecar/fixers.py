@@ -5,11 +5,13 @@ sidecar.fixers — 把 main_window.py 里的写操作核心逻辑剥离出来，
 - 异常以返回值/exception 形式表达
 """
 import os
+import shutil
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
+from send2trash import send2trash
 
 from logic_checker import LogicChecker
 
@@ -184,6 +186,156 @@ def execute_autofix_plan(ops):
             )
 
     return result
+
+
+# ============================================================
+#  Agent 写路径:接受 LLM 自构造的 dict-style ops,统一执行
+#
+#  Op 类型(对应 doc/工具清单.md fix.* schema):
+#    {"type": "rename",     "src": str, "dst": str}
+#    {"type": "delete",     "path": str}                 # send2trash,文件/目录皆可
+#    {"type": "move",       "src": str, "dst_dir": str}
+#    {"type": "create_dir", "path": str}
+#
+#  路径白名单:所有路径必须在 workspace_root 下;否则整批拒绝(快失败,
+#  避免半执行后 LLM 拿到 partial state 难收拾)。
+#
+#  precondition 哈希校验:不在本层。confirm 卡哈希校验是 Electron main 的事,
+#  这里只负责"批准后的纯执行"。
+# ============================================================
+
+
+class PathOutsideWorkspaceError(ValueError):
+    """有 op 引用了 workspace_root 之外的路径,整批拒绝。"""
+
+    def __init__(self, path: str, workspace_root: str):
+        self.path = path
+        self.workspace_root = workspace_root
+        super().__init__(
+            f"路径越界:{path} 不在工作区 {workspace_root} 下"
+        )
+
+
+def _is_within(path: str, root: str) -> bool:
+    """path 是否在 root 目录树内(normpath + commonpath 双保险,Win 大小写容忍)。"""
+    try:
+        p = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        r = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+        return p == r or p.startswith(r + os.sep)
+    except Exception:
+        return False
+
+
+def _validate_op_paths(op: dict, workspace_root: str) -> None:
+    """检查单个 op 引用的所有路径都在工作区内。越界即抛 PathOutsideWorkspaceError。"""
+    op_type = op.get("type")
+    paths_to_check: list[str] = []
+    if op_type == "rename":
+        paths_to_check = [op["src"], op["dst"]]
+    elif op_type == "delete":
+        paths_to_check = [op["path"]]
+    elif op_type == "move":
+        # dst_dir 是目标目录;移动后新路径 = dst_dir/basename(src),也要在工作区
+        paths_to_check = [op["src"], op["dst_dir"]]
+    elif op_type == "create_dir":
+        paths_to_check = [op["path"]]
+    else:
+        raise ValueError(f"未知 op 类型:{op_type}")
+
+    for p in paths_to_check:
+        if not _is_within(p, workspace_root):
+            raise PathOutsideWorkspaceError(p, workspace_root)
+
+
+def execute_ops(ops: list, workspace_root: str) -> AutofixResult:
+    """执行 agent 自构造或 propose_* 产出的 ops 列表。
+
+    所有 op 用 dict 表达(LLM friendly),内部按 `type` 分派。Rename 复用
+    `safe_rename` + 路径级联(`path_updates`)逻辑;其余三种是无级联的简单操作。
+
+    工作区白名单**先行整批校验**,任一 op 越界整批拒绝,result.errors 里报具体路径。
+    哈希校验不在这里(由 Electron main IPC 层做)。
+    """
+    result = AutofixResult()
+
+    # --- 整批先校验路径白名单 ---
+    for i, op in enumerate(ops):
+        try:
+            _validate_op_paths(op, workspace_root)
+        except PathOutsideWorkspaceError as e:
+            result.errors.append(f"op #{i} ({op.get('type')}): {e}")
+            return result  # 快失败,不执行任何 op
+        except ValueError as e:
+            result.errors.append(f"op #{i}: {e}")
+            return result
+
+    # --- 逐 op 执行 ---
+    for op in ops:
+        op_type = op["type"]
+        try:
+            if op_type == "rename":
+                _exec_rename(op, result)
+            elif op_type == "delete":
+                _exec_delete(op, result)
+            elif op_type == "move":
+                _exec_move(op, result)
+            elif op_type == "create_dir":
+                _exec_create_dir(op, result)
+        except Exception as e:
+            result.errors.append(f"{op_type} 失败 {op}: {e}")
+
+    return result
+
+
+def _exec_rename(op: dict, result: AutofixResult) -> None:
+    """rename 复用既有 safe_rename + path_updates 级联(execute_autofix_plan 同款)。"""
+    original_src = op["src"]
+    current_src = result.path_updates.get(original_src, original_src)
+    original_dst = op["dst"]
+    current_dst = result.path_updates.get(original_dst, original_dst)
+    if current_src == current_dst:
+        return
+    safe_rename(current_src, current_dst)
+    result.executed.append({
+        "type": "rename",
+        "src": current_src,
+        "dst": current_dst,
+    })
+    for old, mapped in list(result.path_updates.items()):
+        if mapped == current_src:
+            result.path_updates[old] = current_dst
+    result.path_updates[original_src] = current_dst
+
+
+def _exec_delete(op: dict, result: AutofixResult) -> None:
+    """delete 走 send2trash(可恢复,符合"agent 操作可逆"原则)。文件/目录皆可。"""
+    path = result.path_updates.get(op["path"], op["path"])
+    if not os.path.exists(path):
+        # 不抛错(可能已被前面的 op 顺手处理),记一下让上层知道
+        result.errors.append(f"delete: 路径不存在(可能已删除){path}")
+        return
+    send2trash(path)
+    result.executed.append({"type": "delete", "path": path})
+
+
+def _exec_move(op: dict, result: AutofixResult) -> None:
+    """move = shutil.move,目标是目录,保留原 basename。"""
+    src = result.path_updates.get(op["src"], op["src"])
+    dst_dir = op["dst_dir"]
+    os.makedirs(dst_dir, exist_ok=True)  # 目标目录不存在就建,符合"拖放到不存在的目录"直觉
+    dst_path = os.path.join(dst_dir, os.path.basename(src))
+    if os.path.exists(dst_path):
+        raise FileExistsError(f"目标已存在:{dst_path}")
+    shutil.move(src, dst_path)
+    result.executed.append({"type": "move", "src": src, "dst": dst_path})
+    result.path_updates[op["src"]] = dst_path
+
+
+def _exec_create_dir(op: dict, result: AutofixResult) -> None:
+    """create_dir = os.makedirs(exist_ok=True);幂等。"""
+    path = op["path"]
+    os.makedirs(path, exist_ok=True)
+    result.executed.append({"type": "create_dir", "path": path})
 
 
 def _read_wav_metas(wav_files):

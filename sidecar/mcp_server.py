@@ -34,7 +34,7 @@ except ImportError as e:  # pragma: no cover
         f"原始错误:{e}"
     )
 
-from sidecar import assignment_sheet, checker
+from sidecar import assignment_sheet, checker, fixers
 from sidecar.tencent_sheet import TencentSheetError
 
 logger = logging.getLogger("sidecar.mcp")
@@ -110,6 +110,65 @@ def sheet_list_my_pending() -> dict[str, Any]:
             "message": f"{e} (http_status={e.http_status}, api_code={e.api_code})",
         }
     return {"songs": [asdict(r) for r in rows]}
+
+
+# ============================================================
+#  fix.* (改文件)
+# ============================================================
+
+@mcp.tool()
+def fix_propose_rename_plan(song_path: str) -> dict[str, Any]:
+    """Propose rule-driven batch renames for one song folder.
+
+    Output is a *suggestion list* the agent can take whole / partial / discard;
+    not a forced batch. Agent typically combines this with self-authored ops.
+
+    Returns:
+        {
+          "ops": [{"type": "rename", "src": str, "dst": str, "kind": str}, ...],
+          "conflicts": [str, ...]   # 目标重名 / 已存在等冲突描述
+        }
+    """
+    plan = fixers.build_autofix_plan([song_path])
+    return {
+        "ops": [
+            {"type": "rename", "src": op.src, "dst": op.dst, "kind": op.kind}
+            for op in plan.ops
+        ],
+        "conflicts": plan.conflicts,
+    }
+
+
+@mcp.tool()
+def fix_execute_plan(approved_ops: list[dict], workspace_root: str) -> dict[str, Any]:
+    """Execute a list of file-system ops approved by the user via confirm card.
+
+    Op types(see doc/工具清单.md fix.* schema):
+      - rename:     {"type": "rename",     "src": str, "dst": str}
+      - delete:     {"type": "delete",     "path": str}        # send2trash
+      - move:       {"type": "move",       "src": str, "dst_dir": str}
+      - create_dir: {"type": "create_dir", "path": str}
+
+    Path whitelist: every src/dst/path/dst_dir must be inside `workspace_root`;
+    any out-of-workspace ref → whole batch rejected (fail-fast).
+
+    NOTE: confirm-card hash gating is enforced by Electron main IPC layer
+    before this tool is called; sidecar trusts the caller. When agent talks
+    directly to MCP without the IPC bridge (dev only), there is no human gate.
+
+    Returns:
+        {
+          "executed": [...],         # 成功执行的 ops(rename 后是真实落盘路径)
+          "errors": [...],           # 失败 op 描述(包括路径越界)
+          "path_updates": {old: new} # rename / move 引发的路径变更映射
+        }
+    """
+    result = fixers.execute_ops(approved_ops, workspace_root=workspace_root)
+    return {
+        "executed": result.executed,
+        "errors": result.errors,
+        "path_updates": result.path_updates,
+    }
 
 
 # ============================================================
