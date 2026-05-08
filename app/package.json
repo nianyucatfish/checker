@@ -31,6 +31,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@monaco-editor/react": "^4.7.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.9.0",
     "chokidar": "^3.6.0",
     "lucide-react": "^1.14.0",
     "monaco-editor": "^0.55.1",

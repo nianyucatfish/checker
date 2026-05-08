@@ -7,6 +7,7 @@ import * as net from "node:net";
 import chokidar, { FSWatcher } from "chokidar";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { initDb, closeDb } from "./db";
 
 const SIDECAR_PORT = 8765; // TODO Phase 5: pick random free port
 
@@ -648,6 +649,15 @@ ipcMain.handle("mix:remove-track", (_e, p: unknown) => {
 ipcMain.handle("mix:get-tracks", () => Array.from(mixTracks));
 
 app.whenReady().then(async () => {
+  // chat 持久化 DB(SQLite)。dataDir 走 Electron userData,跨平台标准位置。
+  // Win:%APPDATA%/audio-qc-app/  macOS:~/Library/Application Support/audio-qc-app/
+  try {
+    initDb(app.getPath("userData"));
+    console.log(`[db] chat DB initialized at ${app.getPath("userData")}/chats.db`);
+  } catch (e) {
+    console.error("[db] init failed:", e);
+  }
+
   spawnSidecar();
   try {
     await waitForPort(SIDECAR_PORT);
@@ -684,4 +694,5 @@ app.on("before-quit", () => {
   if (mixWindow && !mixWindow.isDestroyed()) mixWindow.destroy();
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();
   void stopMcpClient();
+  closeDb();
 });
