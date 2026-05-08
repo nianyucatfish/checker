@@ -1,6 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { clsx } from "../utils";
+import {
+  devSheetStatus,
+  devRefreshSheet,
+  devListMyPending,
+  devListMyAccepted,
+} from "../api";
 
 interface Props {
   hasWorkspace: boolean;
@@ -141,10 +147,63 @@ export function Toolbar({
   onScan,
   onToggleMixConsole,
 }: Props) {
-  const [openMenu, setOpenMenu] = useState<"file" | "help" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"file" | "help" | "dev" | null>(null);
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const fileBtnRef = useRef<HTMLButtonElement | null>(null);
   const helpBtnRef = useRef<HTMLButtonElement | null>(null);
+  const devBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  // ⚠️ 临时:开发者菜单结果弹窗 —— 工具齐了删除整段
+  // text 模式: JSON dump,简单状态/错误用;
+  // table 模式: list_my_pending 这种条目类结果用,看起来像缩小版分工表。
+  type DevResult =
+    | { kind: "text"; title: string; body: string; error: boolean }
+    | { kind: "table"; title: string; columns: string[]; rows: string[][] };
+  const [devResult, setDevResult] = useState<DevResult | null>(null);
+  const [devBusy, setDevBusy] = useState(false);
+
+  const runDev = async (title: string, fn: () => Promise<unknown>) => {
+    if (devBusy) return;
+    setDevBusy(true);
+    try {
+      const out = await fn();
+      setDevResult({
+        kind: "text",
+        title,
+        body: JSON.stringify(out, null, 2),
+        error: false,
+      });
+    } catch (e) {
+      setDevResult({
+        kind: "text",
+        title,
+        body: e instanceof Error ? e.message : String(e),
+        error: true,
+      });
+    } finally {
+      setDevBusy(false);
+    }
+  };
+
+  const runDevAsync = async (
+    errorTitle: string,
+    build: () => Promise<DevResult>,
+  ) => {
+    if (devBusy) return;
+    setDevBusy(true);
+    try {
+      setDevResult(await build());
+    } catch (e) {
+      setDevResult({
+        kind: "text",
+        title: errorTitle,
+        body: e instanceof Error ? e.message : String(e),
+        error: true,
+      });
+    } finally {
+      setDevBusy(false);
+    }
+  };
 
   // F5 全量扫描快捷键
   useEffect(() => {
@@ -160,6 +219,16 @@ export function Toolbar({
     return () => window.removeEventListener("keydown", onKey);
   }, [hasWorkspace, scanning, applying, onScan]);
 
+  // ⚠️ 临时:dev 弹窗 Esc 关闭
+  useEffect(() => {
+    if (!devResult) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDevResult(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [devResult]);
+
   const showFileMenu = (e: React.MouseEvent) => {
     setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
     setOpenMenu("file");
@@ -167,6 +236,10 @@ export function Toolbar({
   const showHelpMenu = (e: React.MouseEvent) => {
     setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
     setOpenMenu("help");
+  };
+  const showDevMenu = (e: React.MouseEvent) => {
+    setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
+    setOpenMenu("dev");
   };
   const closeMenu = () => {
     setOpenMenu(null);
@@ -200,6 +273,49 @@ export function Toolbar({
     {
       label: "分工登记表",
       onClick: () => window.electronAPI.openExternal(FILE_LINKS.work_registration),
+    },
+  ];
+
+  // ⚠️ 临时开发者菜单 —— 工具齐了删掉
+  const devMenuItems: (MenuItem | "sep")[] = [
+    {
+      label: "查看缓存状态",
+      onClick: () => runDev("缓存状态", devSheetStatus),
+      disabled: devBusy,
+    },
+    {
+      label: "我的待验收歌曲 (整行)",
+      onClick: () =>
+        runDevAsync("我的待验收歌曲", async () => {
+          const out = await devListMyPending();
+          return {
+            kind: "table",
+            title: `我的待验收歌曲 (共 ${out.count} 条)`,
+            columns: ["行号", ...out.headers],
+            rows: out.items.map((it) => [String(it.row_index), ...it.cells]),
+          };
+        }),
+      disabled: devBusy,
+    },
+    {
+      label: "我的已验收歌曲 (整行)",
+      onClick: () =>
+        runDevAsync("我的已验收歌曲", async () => {
+          const out = await devListMyAccepted();
+          return {
+            kind: "table",
+            title: `我的已验收歌曲 (共 ${out.count} 条)`,
+            columns: ["行号", ...out.headers],
+            rows: out.items.map((it) => [String(it.row_index), ...it.cells]),
+          };
+        }),
+      disabled: devBusy,
+    },
+    "sep",
+    {
+      label: "强制刷新整表 (~30s)",
+      onClick: () => runDev("强制刷新整表", devRefreshSheet),
+      disabled: devBusy,
     },
   ];
 
@@ -243,6 +359,20 @@ export function Toolbar({
       >
         帮助
       </button>
+      {/* ⚠️ 临时开发者菜单 —— 工具齐了删除 */}
+      <button
+        ref={devBtnRef}
+        onClick={showDevMenu}
+        title="临时开发者测试菜单"
+        className={clsx(
+          "h-7 px-2.5 inline-flex items-center gap-1 rounded-sm",
+          "text-yellow-600 dark:text-yellow-500 hover:bg-bg-hover",
+          openMenu === "dev" && "bg-bg-hover",
+        )}
+      >
+        {devBusy && <Loader2 size={12} className="animate-spin" />}
+        <span>开发者</span>
+      </button>
 
       {/* 占位 */}
       <div className="flex-1" />
@@ -257,6 +387,87 @@ export function Toolbar({
       )}
       {openMenu === "help" && anchor && (
         <DropdownMenu anchorRect={anchor} items={helpMenuItems} onClose={closeMenu} />
+      )}
+      {openMenu === "dev" && anchor && (
+        <DropdownMenu anchorRect={anchor} items={devMenuItems} onClose={closeMenu} />
+      )}
+      {/* ⚠️ 临时:开发者结果弹窗 (text=JSON / table=表格) */}
+      {devResult && (
+        <div
+          className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-8"
+          onClick={() => setDevResult(null)}
+        >
+          <div
+            className="bg-bg-sidebar border border-border rounded-md flex flex-col max-w-5xl w-full max-h-[85vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-2 border-b border-border">
+              <div
+                className={clsx(
+                  "text-sm font-medium",
+                  devResult.kind === "text" && devResult.error
+                    ? "text-red-500"
+                    : "text-fg",
+                )}
+              >
+                {devResult.kind === "text" && devResult.error ? "✗ " : "✓ "}
+                {devResult.title}
+              </div>
+              <button
+                onClick={() => setDevResult(null)}
+                className="text-xs text-fg-muted hover:text-fg px-2 py-0.5 rounded hover:bg-bg-hover"
+              >
+                关闭 (Esc)
+              </button>
+            </div>
+            {devResult.kind === "text" ? (
+              <pre className="flex-1 overflow-auto p-3 text-xs font-mono text-fg whitespace-pre-wrap break-all">
+                {devResult.body}
+              </pre>
+            ) : devResult.rows.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center text-sm text-fg-muted p-8">
+                没有数据
+              </div>
+            ) : (
+              <div className="flex-1 overflow-auto">
+                <table className="w-full text-xs border-collapse">
+                  <thead className="sticky top-0 bg-bg-sidebar border-b border-border">
+                    <tr>
+                      {devResult.columns.map((c, i) => (
+                        <th
+                          key={i}
+                          className="text-left font-medium text-fg-muted px-3 py-2 whitespace-nowrap"
+                        >
+                          {c}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {devResult.rows.map((row, ri) => (
+                      <tr
+                        key={ri}
+                        className="border-b border-border-subtle hover:bg-bg-hover"
+                      >
+                        {row.map((cell, ci) => (
+                          <td
+                            key={ci}
+                            className={clsx(
+                              "px-3 py-1.5 text-fg align-top",
+                              ci === 0 && "font-mono text-fg-muted tabular-nums",
+                            )}
+                          >
+                            {cell}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

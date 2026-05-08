@@ -282,3 +282,52 @@ export async function pingSidecar(): Promise<boolean> {
     return false;
   }
 }
+
+// ====================================================
+// ⚠️ 临时开发者端点(/dev/*)— 工具齐了改走 /tools/* 后删除
+// ====================================================
+
+export interface DevSheetStatus {
+  mem_cached: boolean;
+  mem_rows: number;
+  fetched_at: string | null;
+  disk_cached: boolean;
+  disk_path: string;
+  disk_size_kb: number | null;
+  spreadsheet_id: string;
+  sheet_id: string;
+}
+
+export interface DevRefreshResult {
+  rows: number;
+  elapsed_ms: number;
+  fetched_at: string | null;
+}
+
+// 整行版:headers = 表头(列名),items = 当前用户未验收的整行数据。
+export interface DevPendingItem {
+  row_index: number;
+  cells: string[];
+}
+
+export interface DevPendingResult {
+  count: number;
+  headers: string[];
+  items: DevPendingItem[];
+}
+
+export async function devSheetStatus(): Promise<DevSheetStatus> {
+  return getJson("/dev/sheet_status");
+}
+
+export async function devRefreshSheet(): Promise<DevRefreshResult> {
+  return postJson("/dev/refresh_sheet", {});
+}
+
+export async function devListMyPending(): Promise<DevPendingResult> {
+  return getJson("/dev/list_my_pending");
+}
+
+export async function devListMyAccepted(): Promise<DevPendingResult> {
+  return getJson("/dev/list_my_accepted");
+}
