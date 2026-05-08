@@ -1,0 +1,72 @@
+# Audio QC 配置文件 — 外部服务凭证 + 应用偏好
+#
+# 用法:
+#   1. 把本文件复制为 config.toml(同目录)
+#   2. 把你自己的凭证填到下面对应字段
+#   3. config.toml 不进 git(已在 .gitignore),凭证不会被提交
+#
+# sidecar 启动时按以下顺序查找配置:
+#   1. 环境变量 CHECKER_CONFIG 指定的路径
+#   2. 仓库根目录 config.toml(开发期)
+#   3. app_config_dir/config.toml(打包后,Win 是 %APPDATA%\AudioQC,Mac 是 ~/Library/Application Support/AudioQC)
+#
+# 字段全部留空也能跑(只有用到对应工具时才校验)。
+
+
+# ============================================================
+# Anthropic API (Phase 4 接 agent 时用)
+# ============================================================
+[anthropic]
+# 从 https://console.anthropic.com 控制台拿
+api_key = ""
+# 默认模型;复杂诊断可换 claude-opus-4-7
+model = "claude-sonnet-4-6"
+# 可选:通过代理访问时填,留空走官方 https://api.anthropic.com
+base_url = ""
+
+
+# ============================================================
+# 腾讯文档(分工表读写)
+# ============================================================
+[tencent_docs]
+# 从 https://docs.qq.com/open 开发者后台拿到的"个人开发者直接 token"
+# 三个字段对应 API 请求头 Client-Id / Access-Token / Open-Id
+client_id = ""
+access_token = ""
+open_id = ""
+
+# 可选:access_token 过期时间(ISO 8601 格式),sidecar 用来提前提醒
+# 例: "2026-06-05T09:00:04+08:00"
+# 30 天后过期前去开放平台点"重置"换新的,然后更新这两行
+access_token_expires_at = ""
+
+# 分工表的 ID(从 URL https://docs.qq.com/sheet/{spreadsheet_id} 里抠)
+spreadsheet_id = ""
+# 子 sheet 的 ID(URL ?tab=xxx);单 sheet 表格可省略
+sheet_id = ""
+
+
+# ============================================================
+# 飞书(预留,目前未使用)
+# ============================================================
+[feishu]
+# 从 https://open.feishu.cn/app 自建应用 -> 凭证与基础信息 拿
+app_id = ""
+app_secret = ""
+
+
+# ============================================================
+# 应用偏好
+# ============================================================
+[preferences]
+# Agent 写操作模式: "auto"(自动执行)| "confirm"(每次弹卡片让用户批准)
+execution_mode = "confirm"
+
+
+# ============================================================
+# 当前用户身份(仅本机使用,不会进 agent prompt / API)
+# ============================================================
+[user]
+# 你在分工表"验收负责人"列里的姓名。sidecar 用它过滤"我的"待办,
+# LLM 看不到也不需要知道这个字段。
+reviewer_name = ""

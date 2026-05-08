@@ -512,3 +512,96 @@ def tool_move_paths(body: MovePathsIn):
         except Exception as e:
             errors.append(f"{src}: {e}")
     return FileOpResultOut(ok=not errors, executed=executed, errors=errors)
+
+
+# ====================================================
+#  ⚠️ 开发者临时测试端点 (TODO: 工具齐了之后删掉,接 agent 走 /tools/*)
+#
+#  路由前缀 /dev/* 区别于正式 /tools/*。
+#  - 不写 Pydantic schema,返回 dict 即可,降低改接口的成本。
+#  - 不进 OpenAPI 工具列表(给 agent 暴露的是 /tools/*)。
+#  - 错误统一捕成 HTTP 400 + 文本 message,给前端 alert 显示。
+# ====================================================
+
+
+def _dev_error(e: Exception) -> HTTPException:
+    """把 sidecar 各种异常包成 400 + 可读文本,前端直接 alert。"""
+    from sidecar.tencent_sheet import TencentSheetError
+    if isinstance(e, TencentSheetError):
+        return HTTPException(
+            status_code=400,
+            detail=f"{type(e).__name__}: {e} "
+                   f"(http_status={e.http_status}, api_code={e.api_code})",
+        )
+    return HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}")
+
+
+@app.get("/dev/sheet_status")
+def dev_sheet_status():
+    """看缓存当前状态 —— 不触发任何 API 调用。
+
+    返回内存 cache + 磁盘 cache 两层状态,方便确认"现在到底从哪读"。
+    """
+    from sidecar.tencent_sheet import get_client, _disk_cache_path
+    try:
+        client = get_client()
+    except Exception as e:
+        raise _dev_error(e)
+    cache = client._cache  # 仅 dev 端点直读私有属性
+    disk_path = _disk_cache_path()
+    disk_exists = disk_path.is_file()
+    disk_size_kb = round(disk_path.stat().st_size / 1024, 1) if disk_exists else None
+    return {
+        "mem_cached": cache is not None,
+        "mem_rows": len(cache) if cache is not None else 0,
+        "fetched_at": client.fetched_at.isoformat() if client.fetched_at else None,
+        "disk_cached": disk_exists,
+        "disk_path": str(disk_path),
+        "disk_size_kb": disk_size_kb,
+        "spreadsheet_id": client.spreadsheet_id,
+        "sheet_id": client.sheet_id,
+    }
+
+
+@app.post("/dev/refresh_sheet")
+def dev_refresh_sheet():
+    """强制重拉整表,刷新缓存。返回行数 + 耗时。"""
+    import time
+    from sidecar.tencent_sheet import get_client
+    try:
+        client = get_client()
+        t0 = time.monotonic()
+        rows = client.fetch_all(force=True)
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+    except Exception as e:
+        raise _dev_error(e)
+    return {
+        "rows": len(rows),
+        "elapsed_ms": elapsed_ms,
+        "fetched_at": client.fetched_at.isoformat() if client.fetched_at else None,
+    }
+
+
+@app.get("/dev/list_my_pending")
+def dev_list_my_pending():
+    """列出当前用户未验收的歌 —— 整行 37 列 + 表头,给开发者直接看原始数据。
+
+    身份在 sidecar 内部读取,不接收任何参数 —— 与正式工具的隐私边界一致。
+    """
+    from sidecar.assignment_sheet import list_my_pending_rows
+    try:
+        headers, items = list_my_pending_rows()
+    except Exception as e:
+        raise _dev_error(e)
+    return {"count": len(items), "headers": headers, "items": items}
+
+
+@app.get("/dev/list_my_accepted")
+def dev_list_my_accepted():
+    """列出当前用户已验收的歌(col 34 == "1") —— 整行 37 列 + 表头。"""
+    from sidecar.assignment_sheet import list_my_accepted_rows
+    try:
+        headers, items = list_my_accepted_rows()
+    except Exception as e:
+        raise _dev_error(e)
+    return {"count": len(items), "headers": headers, "items": items}
