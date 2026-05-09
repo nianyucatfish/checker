@@ -28,6 +28,20 @@ Thumbs.db
 # 6. 忽略本地的敏感配置 (如果有)
 # 比如包含密码的 config.ini，如果不想公开就加上
 # config.ini
+config.toml
+
+# 7. node / electron 产物
+node_modules/
+dist-electron/
+*.tsbuildinfo
+*.log
+
+# 8. 运行时 / 临时
+cache/
+tmp/
+
+# 9. 第三方独立项目目录
+GenericAgent/
 
 *.mid
 piano_roll_test.py
