@@ -48,3 +48,7 @@ app/tsconfig.*.tsbuildinfo
 
 # 7. 腾讯文档表数据 disk cache (开发期手动管理, 不进 git)
 cache/
+
+# 8. 本地参考资料(不进 git)
+doc/v2_验收清单.md
+doc/音乐学院数据要求.md
