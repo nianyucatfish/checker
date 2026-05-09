@@ -417,7 +417,7 @@ exit_message = {
 
 | | Claude Code plan | 本项目 workflow 节点 |
 |---|---|---|
-| 步骤来源 | LLM 临时草拟 | 14 态状态机模板,固定 |
+| 步骤来源 | LLM 临时草拟 | 18 态状态机模板,固定 |
 | 持久化 | 当前对话 in-memory | 落盘(`review_log.jsonl`),跨 session 可恢复 |
 | 用户介入 | 批准 / 改 / 拒 | 看进度,中途 cancel,fail 后可重试单态 |
 | 显示载体 | chat 内的一段渲染 | agent 侧栏常驻面板 |
@@ -465,3 +465,8 @@ exit_message = {
   - 新增 `state` 字段(状态机态 ID),让 review_log 与 §10.9 进度面板能定位
   - `ui_state` 走 discriminated union(`panel` 决定 `preload` schema),mcp_server 硬校验,部分答 §7 第 5 个 open question
   - `items` 长度 1 退化为单项 check 卡,1.1 / 1.5 / 2.2 等单项场景不变形
+- **测试 LLM endpoint(2026-05-09):**
+  - 当前测试用 **MiniMax-M2.7**,走 OpenAI 兼容代理(endpoint 形如 `http://<host>:<port>`,key 为 `sk-...` 风格),具体凭证见用户本机 `config.toml` 不入 git
+  - 跟 §1 "直接上 MCP + Anthropic SDK" 的产线选型有差异,因为 OpenAI 兼容协议的 tool use schema 与 Anthropic native 略不同(Anthropic 用 `input_schema`,OpenAI 用 `function.parameters`,且工具回调 message role 形式不一致)
+  - 多 provider 适配定为**后续课题**,设计阶段不动 §1 结论;真要动时参考 GA / opencode 的 provider 抽象层(例如 `BaseLLMClient` 接口 + 各 provider 实现)
+  - 短期内若用 MiniMax 跑 agent loop,可先走"OpenAI 兼容协议手写客户端 + 把 §3 schema 翻成 OpenAI tools 格式"的过渡方案,**不引入 LangChain 等抽象层**(脑暴 §1 已否决)
