@@ -216,6 +216,13 @@ class PathOutsideWorkspaceError(ValueError):
         )
 
 
+# write_text op 允许的扩展名(脑暴 §8 边界:agent 仅写 CSV/文本,不写音频/MIDI 二进制)。
+# 用 allow-list 比 deny-list 安全 —— 新增 audio 扩展时不需要回头改这里。
+_WRITE_TEXT_ALLOWED_EXTS = frozenset({
+    ".csv", ".txt", ".md", ".json", ".log", ".toml", ".yaml", ".yml",
+})
+
+
 def _is_within(path: str, root: str) -> bool:
     """path 是否在 root 目录树内(normpath + commonpath 双保险,Win 大小写容忍)。"""
     try:
@@ -239,6 +246,14 @@ def _validate_op_paths(op: dict, workspace_root: str) -> None:
         paths_to_check = [op["src"], op["dst_dir"]]
     elif op_type == "create_dir":
         paths_to_check = [op["path"]]
+    elif op_type == "write_text":
+        paths_to_check = [op["path"]]
+        ext = os.path.splitext(op["path"])[1].lower()
+        if ext not in _WRITE_TEXT_ALLOWED_EXTS:
+            raise ValueError(
+                f"write_text 拒绝扩展名 {ext!r}: 仅允许 "
+                f"{sorted(_WRITE_TEXT_ALLOWED_EXTS)}(脑暴 §8 边界)"
+            )
     else:
         raise ValueError(f"未知 op 类型:{op_type}")
 
@@ -281,6 +296,8 @@ def execute_ops(ops: list, workspace_root: str) -> AutofixResult:
                 _exec_move(op, result)
             elif op_type == "create_dir":
                 _exec_create_dir(op, result)
+            elif op_type == "write_text":
+                _exec_write_text(op, result)
         except Exception as e:
             result.errors.append(f"{op_type} 失败 {op}: {e}")
 
@@ -336,6 +353,41 @@ def _exec_create_dir(op: dict, result: AutofixResult) -> None:
     path = op["path"]
     os.makedirs(path, exist_ok=True)
     result.executed.append({"type": "create_dir", "path": path})
+
+
+def _exec_write_text(op: dict, result: AutofixResult) -> None:
+    """write_text = 全文原子写(tmp + os.replace)。
+
+    扩展名白名单已由 _validate_op_paths 整批校验;路径越界已拒。本函数只管写。
+    覆盖既有文件不预 backup —— send2trash 不适用(文件还在原路径,只是内容换了),
+    回滚靠 review_log + agent 重新生成内容。
+
+    UTF-8 写,不强制 BOM。CRLF 不保留(content 写啥就写啥)—— 跟 api.py /tools/write_text
+    现行行为一致。
+    """
+    path = result.path_updates.get(op["path"], op["path"])
+    content = op["content"]
+    parent = os.path.dirname(path) or "."
+    if not os.path.isdir(parent):
+        raise FileNotFoundError(f"父目录不存在:{parent}")
+    tmp = path + ".__write_tmp__"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except Exception:
+        # 失败时清 tmp,别留 .__write_tmp__ 在工作区污染文件树
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
+    result.executed.append({
+        "type": "write_text",
+        "path": path,
+        "bytes_written": os.path.getsize(path),
+    })
 
 
 def _read_wav_metas(wav_files):
