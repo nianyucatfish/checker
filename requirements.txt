@@ -8,3 +8,4 @@ pyqtgraph
 plotly
 pandas
 PyQt6-WebEngine
+mido
