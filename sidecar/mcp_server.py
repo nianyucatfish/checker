@@ -151,18 +151,34 @@ def audit_get_prior_review(song_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def sheet_get_song_meta(song_name: str) -> dict[str, Any]:
-    """Fetch one song's metadata + missing-required-fields from the assignment sheet.
+    """Fetch one song's full meta with PII masked at sidecar layer (1.1 验收用).
 
-    Used by state 1.1 to verify the song's row is filled in (扒曲信息 / 风格标签等).
-    Only finds songs assigned to the current reviewer (身份隐藏 boundary preserved
-    via internal config; 不允许通过此工具枚举他人负责的歌).
+    *** PII 边界(2026-05-09 修订)***
+    返回所有字段(28 项 raw + missing/invalid/derived),其中 PII 字段值由 sidecar
+    后端**打码**:
+    - 人名(owner / transcribe_reviewer / mix_owner / mentor / vocal_a / vocal_b /
+      backing) → "首字 + xx" (例:张xx)
+    - 链接(pan_review_link / pan_mix_link) → "前 30 字符 + ***"
+    - 例外:original_singer(公开艺人)与所有非 PII 字段(性别 / 评分 / 风格 / 设备等)
+      不打码,直接返
+    LLM 看到打码值,**不应试图还原**。给用户写消息直接用打码版,用户从分工表 UI 自己看真名。
 
-    Returns:
-        {
-          "meta": {row_index, song_name, owner, original_singer, backing,
-                   backing_gender, pan_owner_link, pan_mix_link},
-          "missing_required_fields": [str, ...]   # 必填但空的字段名
-        }
+    Only finds songs assigned to the current reviewer (身份隐藏 boundary).
+    不允许通过此工具枚举他人负责的歌。
+
+    Returns(成功): SongMeta 全 dataclass 序列化(asdict),完整 schema 见
+    `sidecar/assignment_sheet.py::SongMeta`。关键字段:
+        - row_index, song_name
+        - 角色(打码):owner, transcribe_reviewer, mix_owner, mentor, vocal_a,
+          vocal_b, backing
+        - 公开/非 PII:original_singer, *_gender, a_score, b_score, genre,
+          emotion, era, transcribe_type, difficulty, tempo_changes, four_pieces,
+          microphone, sound_card, recording_software, mixer, monitoring
+        - 链接(打码):pan_review_link, pan_mix_link
+        - missing_required_fields: list[str]   (23 项必填中空的)
+        - invalid_format_fields: [{"field": str, "reason": str}, ...]
+              reason ∈ {name_format_unusual, not_url, not_baidu_pan, more_than_two_persons}
+        - derived: {backing_count, expected_backing_files, has_pan_review_link, has_pan_mix_link}
 
     Failure modes:
         - song not found / not in scope → {"ok": false, "code": "SONG_NOT_FOUND"}
@@ -180,9 +196,7 @@ def sheet_get_song_meta(song_name: str) -> dict[str, Any]:
             "code": "SHEET_FETCH_FAILED",
             "message": f"{e} (http_status={e.http_status}, api_code={e.api_code})",
         }
-    d = asdict(meta)
-    missing = d.pop("missing_required_fields")
-    return {"meta": d, "missing_required_fields": missing}
+    return asdict(meta)
 
 
 @mcp.tool()
