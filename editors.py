@@ -47,6 +47,7 @@ import librosa
 
 # 已移除图形 MIDI 预览依赖 (mido, pyqtgraph)。
 from audio_player import MediaPlayer
+from midi_shifter import shift_midi_bytes_per_magenta_instrument
 from paths import resource_path, user_documents_dir
 
 
@@ -1078,60 +1079,31 @@ class MidiExportBridge(QObject):
         super().__init__()
         self.preview = preview
 
-    @pyqtSlot(str, str, result=str)
-    def saveMidiBase64(self, midi_base64: str, suggested_name: str) -> str:
-        if not midi_base64:
-            return "ERROR: Empty MIDI data"
-
-        default_name = (
-            suggested_name.strip()
-            if suggested_name and suggested_name.strip()
-            else self.preview.default_export_filename
-        )
-        if not default_name.lower().endswith((".mid", ".midi")):
-            default_name = f"{default_name}.mid"
-
-        if self.preview.current_midi_path:
-            default_dir = os.path.dirname(self.preview.current_midi_path)
-        else:
-            default_dir = user_documents_dir()
-
-        default_path = os.path.join(default_dir, default_name)
-
-        save_path, _ = QFileDialog.getSaveFileName(
-            self.preview,
-            "导出 MIDI",
-            default_path,
-            "MIDI Files (*.mid *.midi)",
-        )
-        if not save_path:
-            return "CANCELLED"
-
-        try:
-            midi_bytes = base64.b64decode(midi_base64)
-            with open(save_path, "wb") as f:
-                f.write(midi_bytes)
-            return save_path
-        except Exception as e:
-            return f"ERROR: {e}"
-
     @pyqtSlot(str, result=str)
-    def saveMidiToCurrentPath(self, midi_base64: str) -> str:
-        if not midi_base64:
-            return "ERROR: Empty MIDI data"
-
+    def saveShiftedMidiPerTrackToCurrentPath(self, shifts_json: str) -> str:
+        """按 mido track index 平移并覆盖原文件。shifts_json: [{"instrument": 0, "shift": 1.5}, ...]"""
         target_path = self.preview.current_midi_path
-        if not target_path:
-            return "ERROR: 当前未打开MIDI文件"
+        if not target_path or not os.path.exists(target_path):
+            return "ERROR: 当前未打开 MIDI 文件"
+        try:
+            shifts_list = json.loads(shifts_json)
+            shifts = {
+                int(item["instrument"]): float(item["shift"])
+                for item in shifts_list
+            }
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as e:
+            return f"ERROR: 无效的 shifts 参数: {e}"
 
         target_dir = os.path.dirname(target_path) or user_documents_dir()
         try:
-            midi_bytes = base64.b64decode(midi_base64)
+            with open(target_path, "rb") as f:
+                src_bytes = f.read()
+            shifted = shift_midi_bytes_per_magenta_instrument(src_bytes, shifts)
 
             with tempfile.NamedTemporaryFile(
                 mode="wb", delete=False, dir=target_dir, suffix=".mid"
             ) as tmp:
-                tmp.write(midi_bytes)
+                tmp.write(shifted)
                 tmp_path = tmp.name
 
             os.replace(tmp_path, target_path)
@@ -1142,6 +1114,45 @@ class MidiExportBridge(QObject):
                     os.remove(tmp_path)
             except Exception:
                 pass
+            return f"ERROR: {e}"
+
+    @pyqtSlot(str, str, result=str)
+    def saveShiftedMidiPerTrackBase64(self, shifts_json: str, suggested_name: str) -> str:
+        """按 mido track index 平移并另存为。"""
+        src_path = self.preview.current_midi_path
+        if not src_path or not os.path.exists(src_path):
+            return "ERROR: 当前未打开 MIDI 文件"
+        try:
+            shifts_list = json.loads(shifts_json)
+            shifts = {
+                int(item["instrument"]): float(item["shift"])
+                for item in shifts_list
+            }
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as e:
+            return f"ERROR: 无效的 shifts 参数: {e}"
+
+        default_name = (
+            suggested_name.strip()
+            if suggested_name and suggested_name.strip()
+            else self.preview.default_export_filename
+        )
+        if not default_name.lower().endswith((".mid", ".midi")):
+            default_name = f"{default_name}.mid"
+        default_dir = os.path.dirname(src_path) or user_documents_dir()
+        default_path = os.path.join(default_dir, default_name)
+        save_path, _ = QFileDialog.getSaveFileName(
+            self.preview, "导出 MIDI", default_path, "MIDI Files (*.mid *.midi)"
+        )
+        if not save_path:
+            return "CANCELLED"
+        try:
+            with open(src_path, "rb") as f:
+                src_bytes = f.read()
+            shifted = shift_midi_bytes_per_magenta_instrument(src_bytes, shifts)
+            with open(save_path, "wb") as f:
+                f.write(shifted)
+            return save_path
+        except Exception as e:
             return f"ERROR: {e}"
 
     @pyqtSlot(result=str)
