@@ -56,10 +56,30 @@ app_secret = ""
 
 
 # ============================================================
+# 测试 LLM(OpenAI 兼容代理,sidebar 聊天用)
+# Production 切回 Anthropic SDK 时本节可清空,用上面 [anthropic]
+# ============================================================
+[test_llm]
+endpoint = "http://127.0.0.1:8765"
+api_key = ""
+model = "claude-opus-4-7"
+
+
+[agent_sandbox]
+# 可选:agent 测试时使用本地 fixture 替代腾讯文档读取,避免碰真实分工表。
+# 为空则正常走腾讯文档。
+sheet_fixture_path = ""
+
+
+# ============================================================
 # 应用偏好
 # ============================================================
 [preferences]
-# Agent 写操作模式: "auto"(自动执行)| "confirm"(每次弹卡片让用户批准)
+# Agent 写操作模式:
+#   "confirm" (默认) — 每次写文件弹 confirm 卡,用户勾选/批准后才执行
+#   "auto"          — 不弹卡,但 agent 必须先调 fix_execute_plan(..., simulate=True)
+#                    干跑,服务端校验"同 ops 已 simulate 过"才放行真执行;
+#                    每次执行额外返 by_code_delta(错误增减明细)给 agent 自反馈
 execution_mode = "confirm"
 
 

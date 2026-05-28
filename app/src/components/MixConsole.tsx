@@ -408,6 +408,23 @@ export function MixConsole({ tracks, onRemove, onMinimize, onClose }: Props) {
     }
   };
 
+  // 空格 = play/pause(混音台窗口聚焦时)。窗口本身已经 isolate,不会跟主窗冲突。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (t.isContentEditable) return;
+      }
+      e.preventDefault();
+      handlePlayPause();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [playing]);
+
   const handleStop = () => {
     const engine = engineRef.current;
     if (!engine) return;

@@ -1,22 +1,19 @@
 """
 sidecar.checker — 在 logic_checker 之上加一层结构化错误适配。
 
-老的 LogicChecker 输出 dict[path -> list[str]]，本模块提供：
+LogicChecker 输出 dict[path -> list[str]]，本模块提供:
 - check_song_folder(song_path) -> dict[path -> list[CheckError]]
 - check_workspace(root) -> dict[path -> list[CheckError]]
 
-实现方式：先调老接口拿字符串，再用 _parse_error_string 解析回 CheckError。
-保持 logic_checker.py 本身不变（避免影响老 PyQt UI），过渡期单文件适配。
-
-后续阶段（plan 里的 Phase 0 后段）会让 logic_checker 直接发 CheckError，本文件届时可缩成
-一个再导出。
+实现方式:先调 LogicChecker 拿字符串,再用 _parse_error_string 解析回 CheckError。
+后续可让 logic_checker 直接发 CheckError,本文件届时可缩成一个再导出。
 """
 
 import os
 import re
 from typing import Dict, List
 
-from logic_checker import LogicChecker
+from sidecar.logic_checker import LogicChecker
 from sidecar.errors import CheckError, ErrorCode, FixHint
 
 
@@ -33,6 +30,7 @@ _TAG_TO_CODE = {
     "音频格式错误": ErrorCode.WAV_FORMAT_WRONG,
     "无法读取WAV": ErrorCode.WAV_READ_FAILED,
     "音频时长过短": ErrorCode.WAV_DURATION_TOO_SHORT,
+    "总轨/分轨/混音工程原文件之间音频时长不一致": ErrorCode.CROSS_DIR_DURATION_INCONSISTENT,
     "时长不一致": ErrorCode.WAV_DURATION_INCONSISTENT,
     "伴唱文件错误": ErrorCode.BG_COMBO_INVALID,
     "内容错误": ErrorCode.FILE_EMPTY,
@@ -163,9 +161,12 @@ def _parse_error_string(path: str, msg: str) -> CheckError:
     elif code == ErrorCode.FOLDER_NAME_PATTERN:
         expected = _expected_folder_name_pattern()
     elif code == ErrorCode.WAV_DURATION_INCONSISTENT:
-        expected = {"tolerance_seconds": 0.02}
+        expected = {"tolerance": "exact_frames"}
     elif code == ErrorCode.CROSS_DIR_DURATION_INCONSISTENT:
-        expected = {"folders": ["分轨wav", "总轨wav", "混音工程原文件"]}
+        expected = {
+            "folders": ["分轨wav", "总轨wav", "混音工程原文件"],
+            "tolerance": "exact_frames",
+        }
 
     return CheckError(
         code=code,

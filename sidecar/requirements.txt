@@ -1,7 +1,8 @@
 # Sidecar 运行时依赖（Python 3.11+）
-# 沿用旧 PyQt 版的核心音频栈
+# 音频核心栈
 numpy>=1.26
 soundfile>=0.12
+mido>=1.3       # midi tick 平移(midi_shifter.py)
 
 # 新增：sidecar HTTP / agent 层
 fastapi>=0.115

@@ -3,13 +3,22 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import * as path from "node:path";
+import * as fs from "node:fs";
 import * as net from "node:net";
 import chokidar, { FSWatcher } from "chokidar";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { initDb, closeDb } from "./db";
+import {
+  initDb,
+  closeDb,
+  listSessions,
+  createSession,
+  renameSession,
+  deleteSession,
+} from "./db";
+import { AgentRunner, type UiTools, setDumpLlmContext, isDumpLlmContextOn } from "./agent";
 
-const SIDECAR_PORT = 8765; // TODO Phase 5: pick random free port
+const SIDECAR_PORT = 8775; // TODO Phase 5: pick random free port
 
 // 这是个工具型应用,不需要 Electron 默认的 File / Edit / View / Window / Help 菜单。
 // 在所有窗口创建之前就置空,主窗和 mix 窗都不会再画菜单条。
@@ -74,7 +83,7 @@ function spawnSidecar() {
 //  MCP client (Phase 4: agent 工具通道)
 //
 //  跟 FastAPI sidecar 并行存在,各管各的:
-//    - FastAPI(SIDECAR_PORT 8765):renderer 走 HTTP 调 /tools/* /dev/*
+//    - FastAPI(SIDECAR_PORT 8775):renderer 走 HTTP 调 /tools/* /dev/*
 //    - MCP server (stdio 子进程):agent 通过 MCP 协议调工具
 //
 //  本切片只做"连通性证明":拉子进程、连上、列出工具、打日志,不接 UI / agent。
@@ -84,6 +93,22 @@ function spawnSidecar() {
 // MCP client。子进程由 StdioClientTransport 内部 spawn,我们不握 ChildProcess
 // 句柄;close() 会关 transport 并把子进程一并带走。
 let mcpClient: Client | null = null;
+let agentRunner: AgentRunner | null = null;
+// 当前工作区(同步给 sidecar / mcp 子进程,做相对路径解析用)。
+// 渲染层每次切根都会推一次;mcp 子进程晚启 / 重启时也用它回灌。
+let currentWorkspaceRoot: string | null = null;
+
+async function pushWorkspaceToMcp(root: string | null): Promise<void> {
+  if (!mcpClient) return;
+  try {
+    await mcpClient.callTool({
+      name: "system_set_workspace",
+      arguments: { root: root ?? "" },
+    });
+  } catch (e) {
+    console.warn("[mcp] system_set_workspace failed:", e);
+  }
+}
 
 async function startMcpClient(): Promise<void> {
   const projectRoot = path.resolve(__dirname, "..", "..");
@@ -117,8 +142,160 @@ async function startMcpClient(): Promise<void> {
     console.log(`  - ${t.name}: ${(t.description ?? "").split("\n")[0]}`);
   }
 
-  // 暴露给后续 IPC handler / agent loop 用,这一切片先不写调用方。
+  // workflow.md 从仓库根加载;sidecar baseUrl 注入,避免常量在 agent.ts 重写一遍
+  const projectRoot2 = path.resolve(__dirname, "..", "..");
+  // UI 工具实现:闭包到 main 这边的 mainWindow / mixTracks / showMixWindowAnimated 等。
+  // agent.ts 只看签名(UiTools 接口),不知道这些细节,保跨进程边界干净。
+  const uiTools: UiTools = {
+    openFile: async (filePath: string) => {
+      const w = mainWindow;
+      if (!w || w.isDestroyed()) return { ok: false, code: "NO_MAIN_WINDOW", message: "主窗口不可用" };
+      try {
+        await fs.promises.access(filePath);
+      } catch {
+        return { ok: false, code: "FILE_NOT_FOUND", message: `文件不存在: ${filePath}` };
+      }
+      if (w.isMinimized()) w.restore();
+      w.show();
+      w.focus();
+      w.webContents.send("ui:open-file", filePath);
+      return { ok: true };
+    },
+    loadSongMix: async (songPath, mode) => {
+      const stemsLike = mode === "stems_plus_master" ? "分轨wav" : "混音工程原文件";
+      const stemsDir = path.join(songPath, stemsLike);
+      const masterDir = path.join(songPath, "总轨wav");
+      const listWavs = async (dir: string): Promise<string[]> => {
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+        return entries
+          .filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".wav"))
+          .map((e) => path.join(dir, e.name))
+          .sort();
+      };
+      let stems: string[];
+      try {
+        stems = await listWavs(stemsDir);
+      } catch (e) {
+        return { ok: false, code: "STEMS_DIR_MISSING", message: `读取 ${stemsLike} 失败: ${e}` };
+      }
+      let master: string[];
+      try {
+        master = await listWavs(masterDir);
+      } catch (e) {
+        return { ok: false, code: "MASTER_DIR_MISSING", message: `读取 总轨wav 失败: ${e}` };
+      }
+      const all = [...stems, ...master];
+      if (all.length === 0) {
+        return { ok: false, code: "NO_WAVS", message: `${stemsLike} 和 总轨wav 都没找到 .wav 文件` };
+      }
+      mixTracks.clear();
+      for (const p of all) mixTracks.add(p);
+      await showMixWindowAnimated(lastToolbarButtonRect);
+      broadcastMixTracks();
+      return { ok: true, loaded: all };
+    },
+    togglePlayback: async (kind, on) => {
+      const w = mainWindow;
+      if (!w || w.isDestroyed()) return { ok: false, code: "NO_MAIN_WINDOW", message: "主窗口不可用" };
+      w.webContents.send("playback:toggle", kind, on);
+      return { ok: true };
+    },
+  };
+  agentRunner = new AgentRunner(
+    mcpClient,
+    () => mainWindow,
+    path.join(projectRoot2, "doc", "agent_workflow.md"),
+    `http://127.0.0.1:${SIDECAR_PORT}`,
+    uiTools,
+  );
+  console.log("[agent] runner ready");
+
+  // 若 renderer 在 AgentRunner / MCP 起来之前就推过 workspace,这里补一次让
+  // runner.workspaceRoot 和 mcp 子进程都拿到。否则首调 start_qc 会拿到
+  // WORKSPACE_NOT_SET。
+  if (currentWorkspaceRoot) {
+    agentRunner.setWorkspace(currentWorkspaceRoot);
+    await pushWorkspaceToMcp(currentWorkspaceRoot);
+  }
 }
+
+// agent IPC 入口。chatId 由 renderer 生成并管理。
+ipcMain.handle("agent:send", async (_e, chatId: string, text: string) => {
+  if (!agentRunner) throw new Error("agent runner not ready");
+  await agentRunner.send(chatId, text);
+});
+
+// 开发者菜单:每次 LLM 调用前把 messages + tools dump 到 tmp/agent_contexts/。
+// 用 IPC 而非环境变量,renderer 端可热切。
+ipcMain.handle("agent:get-dump-llm", () => isDumpLlmContextOn());
+ipcMain.handle("agent:set-dump-llm", (_e, on: unknown) => {
+  setDumpLlmContext(!!on);
+});
+ipcMain.handle("agent:start-qc", async (_e, chatId: string, song: string) => {
+  if (!agentRunner) throw new Error("agent runner not ready");
+  await agentRunner.startQc(chatId, song);
+});
+ipcMain.handle("agent:cancel", (_e, chatId: string) => {
+  agentRunner?.cancel(chatId);
+});
+ipcMain.handle("agent:hydrate", async (_e, chatId: string) => {
+  if (!agentRunner) throw new Error("agent runner not ready");
+  return agentRunner.hydrate(chatId);
+});
+ipcMain.handle(
+  "agent:human-check-resolve",
+  (
+    _e,
+    chatId: string,
+    payload: { answers: { choice: string; note?: string }[]; cancelled?: boolean },
+  ) => {
+    agentRunner?.resolveHumanCheck(chatId, payload);
+  },
+);
+// 会话管理:列表 / 新建 / 重命名 / 删除。chatId 由 renderer 持有,db 是真相源。
+ipcMain.handle("agent:list-sessions", () => {
+  return listSessions().map((s) => ({
+    id: s.id,
+    title: s.title,
+    phase: s.phase,
+    song: s.song,
+    updated_at: s.updated_at,
+  }));
+});
+ipcMain.handle("agent:new-session", (_e, title?: string) => {
+  const row = createSession(title || "新会话");
+  return {
+    id: row.id,
+    title: row.title,
+    phase: row.phase,
+    song: row.song,
+    updated_at: row.updated_at,
+  };
+});
+ipcMain.handle("agent:rename-session", (_e, chatId: string, title: string) => {
+  renameSession(chatId, title);
+});
+ipcMain.handle("agent:delete-session", (_e, chatId: string) => {
+  // 先 drop 内存 ChatState(顺手 cancel in-flight),再删 db(FK CASCADE 带走 messages/parts)
+  agentRunner?.dropChat(chatId);
+  deleteSession(chatId);
+});
+ipcMain.handle("agent:set-workspace", async (_e, root: string | null) => {
+  currentWorkspaceRoot = root;
+  agentRunner?.setWorkspace(root);
+  // 同步推给 sidecar(FastAPI)+ mcp 子进程,两个进程各自维护 _ws._current。
+  // 缺一不可:HTTP 工具走 sidecar,LLM 走 mcp 子进程。
+  try {
+    await fetch(`http://127.0.0.1:${SIDECAR_PORT}/agent/workspace`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root }),
+    });
+  } catch (e) {
+    console.warn("[agent] push workspace to sidecar failed:", e);
+  }
+  await pushWorkspaceToMcp(root);
+});
 
 async function stopMcpClient(): Promise<void> {
   if (mcpClient) {
@@ -143,17 +320,26 @@ function createWindow() {
     },
   });
   mainWindow = win;
-  // setApplicationMenu(null) 把默认 F12 / Ctrl+Shift+I 一起带走了,这里手动补回
-  // 确保 dev / 排查问题时能开 DevTools
+  // setApplicationMenu(null) 把默认 F12 / Ctrl+Shift+I + 剪贴板快捷键一起带走了,
+  // 这里手动补回:DevTools 切换 + Ctrl+C/X/V/A 走 webContents 内置 API。
+  // 缺 Ctrl+C 会让"能选中,复制无内容"——选中可视化由 CSS 走,但 clipboard 写入靠这。
   win.webContents.on("before-input-event", (e, input) => {
     if (input.type !== "keyDown") return;
+    const ctrl = input.control || input.meta;
     const isF12 = input.key === "F12";
     const isCtrlShiftI =
-      (input.control || input.meta) && input.shift &&
-      (input.key === "I" || input.key === "i");
+      ctrl && input.shift && (input.key === "I" || input.key === "i");
     if (isF12 || isCtrlShiftI) {
       win.webContents.toggleDevTools();
       e.preventDefault();
+      return;
+    }
+    if (ctrl && !input.alt && !input.shift) {
+      const k = input.key.toLowerCase();
+      if (k === "c") { win.webContents.copy(); e.preventDefault(); return; }
+      if (k === "x") { win.webContents.cut(); e.preventDefault(); return; }
+      if (k === "v") { win.webContents.paste(); e.preventDefault(); return; }
+      if (k === "a") { win.webContents.selectAll(); e.preventDefault(); return; }
     }
   });
   win.on("closed", () => {
@@ -286,6 +472,32 @@ ipcMain.handle("fs:unwatch", () => {
   stopFsWatcher();
 });
 
+// 写操作前暂停 watcher,操作完成后恢复 —— Win 上 chokidar 持有目录句柄,会让
+// rename/delete 这种破坏性 op 失败 (WinError 5)。renderer 用 fs:pause-watch /
+// fs:resume-watch 包住单次操作即可。pause 返回当前 root + win 引用,renderer
+// 透传回来就行,不需要它知道任何内部状态。
+let _pausedRoot: string | null = null;
+let _pausedWin: BrowserWindow | null = null;
+ipcMain.handle("fs:pause-watch", (e) => {
+  if (fsWatcher) {
+    _pausedRoot = null;
+    // chokidar 不直接暴露 root,但我们在 startFsWatcher 里只传了一个 path,可
+    // 从 fs:watch IPC 调用者侧拿。这里依赖 watcherTarget,renderer 同侧。
+    _pausedWin = BrowserWindow.fromWebContents(e.sender);
+  }
+  stopFsWatcher();
+  return true;
+});
+ipcMain.handle("fs:resume-watch", (_e, rootPath: string) => {
+  // 显式传 root,免得 main 端记错。renderer 知道自己当前 root。
+  if (typeof rootPath !== "string" || !rootPath) return;
+  const win = _pausedWin && !_pausedWin.isDestroyed() ? _pausedWin : null;
+  _pausedWin = null;
+  _pausedRoot = null;
+  if (!win) return;
+  startFsWatcher(rootPath, win);
+});
+
 // ---------- 系统剪贴板:读"复制的文件"列表 ----------
 // 用户在 Windows 资源管理器 / macOS Finder 里 Ctrl+C/Cmd+C 一个文件,然后切到本 app
 // 按 Ctrl+V 粘贴。Electron contextIsolation 下 renderer 拿不到 native clipboard,
@@ -315,9 +527,8 @@ function parseHdropBuffer(buf: Buffer): string[] {
 //
 // 历史教训:Electron 的 clipboard.readBuffer("CF_HDROP") 在 Win 上是把字符串
 // 喂给 RegisterClipboardFormat 注册一个"自定义"格式 id,而非走系统 CF_HDROP=15,
-// 因此空 buffer 永远拿不到。换 PowerShell 的 Get-Clipboard 走 OLE 接口最可靠
-// (PyQt QClipboard 也是走 OLE,行为一致)。慢点(每次 ~200ms)但只在 Ctrl+V 时调,
-// 用户不会有感。
+// 因此空 buffer 永远拿不到。换 PowerShell 的 Get-Clipboard 走 OLE 接口最可靠。
+// 慢点(每次 ~200ms)但只在 Ctrl+V 时调,用户不会有感。
 async function readClipboardFilesWindows(): Promise<string[]> {
   try {
     const paths = await new Promise<string[]>((resolve) => {
@@ -400,7 +611,7 @@ ipcMain.handle("clipboard:read-files", async () => {
 // ---------- 混音台独立窗口 ----------
 // 主进程持有 mixTracks set + mixWindow 实例;主窗口/混音窗口通过 IPC 操纵。
 //
-// 关闭语义(对齐老 PyQt closeEvent):
+// 关闭语义:
 // - 工具栏 toggle: 隐藏/显示窗口,tracks 保留
 // - 系统 X 按钮 / 内部关闭按钮: 拦截 close, hide + 清空 tracks
 // - 主窗关 / app quit: 真正销毁
@@ -520,7 +731,7 @@ function ensureMixWindow(): BrowserWindow {
       query: { view: "mix-console" },
     });
   }
-  // X 按钮 / Alt+F4: 拦截改成 hide + 清空 tracks(老 PyQt closeEvent 行为)
+  // X 按钮 / Alt+F4: 拦截改成 hide + 清空 tracks
   win.on("close", (e) => {
     if (mixWindow !== win) return;
     if (isAppQuitting) return; // app 真退出,放行
@@ -649,6 +860,15 @@ ipcMain.handle("mix:remove-track", (_e, p: unknown) => {
 ipcMain.handle("mix:get-tracks", () => Array.from(mixTracks));
 
 app.whenReady().then(async () => {
+  // 调试目录每次重启清空 —— tmp/agent_contexts 是 dump LLM 上下文的快照,
+  // 跨会话留着会混淆,启动时清干净,本次会话内自然按 chatId + turn 累积。
+  try {
+    const dumpDir = path.resolve(__dirname, "..", "..", "tmp", "agent_contexts");
+    fs.rmSync(dumpDir, { recursive: true, force: true });
+  } catch (e) {
+    console.warn("[main] clean tmp/agent_contexts failed:", e);
+  }
+
   // chat 持久化 DB(SQLite)。dataDir 走 Electron userData,跨平台标准位置。
   // Win:%APPDATA%/audio-qc-app/  macOS:~/Library/Application Support/audio-qc-app/
   try {

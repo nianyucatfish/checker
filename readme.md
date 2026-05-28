@@ -1,33 +1,30 @@
-# 质检工具
-文档完善中...
+# Audio QC
 
-## 软件安装
+桌面端音频质检工具:从腾讯文档分工表拉"我负责验收"的歌 → 在工作区里挨个查文件命名 / 时长 / 节奏 / 结构 / 混音 → 写回"已验收"标记。当前 v2 架构 = Electron + React 前端 + Python FastAPI sidecar,Phase 4 接入 Anthropic agent。
 
-可直接从 Release 选择适配的版本安装，若无适配版本，下载 `requirements.txt` 的依赖包，在 `main.py` 所在文件夹下执行 `python main.py`
+## 目录
 
-## 工作区文件夹组织
-将所有歌曲文件夹放在同一个文件夹下
+```
+checker/
+├── app/          Electron + React (Vite + Tailwind + Monaco)
+├── sidecar/      Python FastAPI 服务,端口 8775
+├── doc/          设计文档 / 验收清单
+├── scripts/      一次性探针
+└── config.example.toml
+```
 
-+ 工作区文件夹
-  + {歌手1}\_{歌曲1}\_{负责人1}
-  + {歌手2}\_{歌曲2}\_{负责人2}
-  + {歌手3}\_{歌曲3}\_{负责人3}
+## 跑起来(dev)
 
-## 部分快捷键
-在波形预览界面 `Shift+滚轮` 可横向缩放波形，`滚轮` 可左右移动波形
+前置:`venv` 装好 sidecar 依赖 (`pip install -r sidecar/requirements.txt`),`config.toml` 从 `config.example.toml` 复制改。
 
-在文本文件 (主要是 `.csv`) 的编辑中 `Ctrl+Z` 撤销，`Ctrl+S` 保存文件 
+```bash
+cd app
+npm install     # 首次
+npm run dev     # Vite + Electron 一起起,Electron main 自动 spawn sidecar
+```
 
-## 可能不容易发现的功能
-很多功能可对文件/文件夹右键实施，如：右键文件夹可批量添加波形文件到混音台
+详见 `app/README.md` 和 `CLAUDE.md`。
 
-在问题区域可切换问题显示范围，点击问题列表可定位到文件/文件夹
+## 老版本(PyQt v1)
 
-## 注意
-+ 目前只在 windows 系统上测试过软件，其他平台上若有兼容问题请指出
-+ 初次运行可能会提示未知开发者等风险提示，通过一下并忽略就好
-+ 由于相关 js 依赖项需要联网下载，midi 预览功能需在联网情况下使用
-+ midi 预览功能可能偶尔失效，重进几次应该能解决
-+ 文本文件编辑撤回功能少数情况会出问题，使用时需谨慎
-+ 在文本文件编辑时未保存而切换文件会导致编辑记录丢失
-+ 主要纠错逻辑在 `logic_checker.py` 中，欢迎大家 debug！
+v1 单体 PyQt 版本现保留在 git history (tag/branch 视情况而定),工作目录已全面切到 v2。

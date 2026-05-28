@@ -1,5 +1,16 @@
 // 与 sidecar 通信的薄客户端。
 
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ChatOut {
+  ok: boolean;
+  message: ChatMessage;
+  model: string;
+}
+
 export interface CheckErrorOut {
   code: string;
   severity: string;
@@ -115,13 +126,6 @@ export interface PadResultOut {
   error: string | null;
 }
 
-export interface DurationSummaryOut {
-  ok: boolean;
-  folder: string;
-  inconsistent: boolean;
-  summary: string | null;
-}
-
 export interface CheckResult {
   ok: boolean;
   scope: string;
@@ -129,6 +133,37 @@ export interface CheckResult {
   paths_with_errors: number;
   total_errors: number;
 }
+
+export interface AgentEvent {
+  chatId: string;
+  type:
+    | "assistant_text"
+    | "tool_use"
+    | "tool_result"
+    | "phase_change"
+    | "turn_done"
+    | "awaiting_human"
+    | "compacted"
+    | "error";
+  data?: unknown;
+}
+
+// 会话列表项;主进程 listSessions 返回的精简形(不含 model / created_at)。
+export interface SessionInfo {
+  id: string;
+  title: string;
+  phase: string | null;
+  song: string | null;
+  updated_at: number;
+}
+
+// 与 main 进程 agent.ts UiTurn 对齐 —— hydrate 时回放,不含 human_check / error 类型
+// (那两类瞬态事件不持久化)。
+export type HydratedTurn =
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; text: string }
+  | { kind: "tool"; name: string; args: unknown; result?: unknown }
+  | { kind: "phase"; label: string };
 
 declare global {
   interface Window {
@@ -141,6 +176,8 @@ declare global {
       getPathForFile: (file: File) => string;
       fsWatch: (root: string) => Promise<void>;
       fsUnwatch: () => Promise<void>;
+      fsPauseWatch: () => Promise<void>;
+      fsResumeWatch: (root: string) => Promise<void>;
       onFsChanged: (cb: (dirs: string[]) => void) => () => void;
       clipboardReadFiles: () => Promise<string[]>;
       mixToggle: (
@@ -153,6 +190,30 @@ declare global {
       mixGetTracks: () => Promise<string[]>;
       onMixTracksChanged: (cb: (paths: string[]) => void) => () => void;
       onMixVisibilityChanged: (cb: (visible: boolean) => void) => () => void;
+      agentSend: (chatId: string, text: string) => Promise<void>;
+      agentStartQc: (chatId: string, song: string) => Promise<void>;
+      agentCancel: (chatId: string) => Promise<void>;
+      agentHydrate: (chatId: string) => Promise<{
+        phase: "A" | "B";
+        song: string | null;
+        turns: HydratedTurn[];
+      }>;
+      agentHumanCheckResolve: (
+        chatId: string,
+        payload: { answers: { choice: string; note?: string }[]; cancelled?: boolean },
+      ) => Promise<void>;
+      agentSetWorkspace: (root: string | null) => Promise<void>;
+      agentListSessions: () => Promise<SessionInfo[]>;
+      agentNewSession: (title?: string) => Promise<SessionInfo>;
+      agentRenameSession: (chatId: string, title: string) => Promise<void>;
+      agentDeleteSession: (chatId: string) => Promise<void>;
+      onAgentEvent: (cb: (ev: AgentEvent) => void) => () => void;
+      onUiOpenFile: (cb: (path: string) => void) => () => void;
+      onPlaybackToggle: (
+        cb: (kind: "beat" | "structure", on: boolean) => void,
+      ) => () => void;
+      agentGetDumpLlm: () => Promise<boolean>;
+      agentSetDumpLlm: (on: boolean) => Promise<void>;
     };
   }
 }
@@ -186,7 +247,14 @@ async function postJson<T>(p: string, body: unknown): Promise<T> {
 
 export async function rawFileUrl(path: string): Promise<string> {
   const base = await sidecarUrl();
-  return `${base}/files/raw?path=${encodeURIComponent(path)}`;
+  // 加时间戳 cache-bust:即使 sidecar Cache-Control 没生效(webview cache 行为有时
+  // 怪),不同的 URL 也强制重 fetch。代价仅是 query string 变化,sidecar 不解析 _t。
+  const t = Date.now();
+  return `${base}/files/raw?path=${encodeURIComponent(path)}&_t=${t}`;
+}
+
+export async function sendChat(messages: ChatMessage[]): Promise<ChatOut> {
+  return postJson("/chat", { messages });
 }
 
 export async function selectWorkspace(): Promise<string | null> {
@@ -217,12 +285,51 @@ export async function getAudioPeaks(path: string, columns = 4000): Promise<Audio
   return getJson("/tools/get_audio_peaks", { path, columns: String(columns) });
 }
 
+// 写操作前广播 audio:release,通知 AudioViewer / MidiViewer 释放对应文件的播放句柄。
+async function releaseAudio(): Promise<void> {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("audio:release"));
+    await new Promise((r) => setTimeout(r, 30));
+  }
+}
+
+// 当前 watch root,由 App.tsx 通过 setWatchRoot 设置。pause/resume 用。
+let _watchRoot: string | null = null;
+export function setWatchRoot(root: string | null): void {
+  _watchRoot = root;
+}
+
+/** 写操作前置准备:释放音频 + 暂停 chokidar(Win 上 chokidar 会持目录句柄,
+ *  导致 rename/delete folder 时撞 WinError 5)。 */
+async function preWrite(): Promise<void> {
+  await releaseAudio();
+  if (_watchRoot && typeof window !== "undefined") {
+    try { await window.electronAPI.fsPauseWatch(); } catch { /* ignore */ }
+  }
+}
+
+/** 写操作完成后恢复 watcher。在 finally 里调,保证不论成败都恢复。 */
+async function postWrite(): Promise<void> {
+  if (_watchRoot && typeof window !== "undefined") {
+    try { await window.electronAPI.fsResumeWatch(_watchRoot); } catch { /* ignore */ }
+  }
+}
+
+async function withWriteGuard<T>(fn: () => Promise<T>): Promise<T> {
+  await preWrite();
+  try {
+    return await fn();
+  } finally {
+    await postWrite();
+  }
+}
+
 export async function writeCsv(path: string, rows: string[][]): Promise<WriteResultOut> {
-  return postJson("/tools/write_csv", { path, rows });
+  return withWriteGuard(() => postJson("/tools/write_csv", { path, rows }));
 }
 
 export async function writeText(path: string, content: string): Promise<WriteResultOut> {
-  return postJson("/tools/write_text", { path, content });
+  return withWriteGuard(() => postJson("/tools/write_text", { path, content }));
 }
 
 export async function getAudioDurations(paths: string[]): Promise<GetAudioDurationsOut> {
@@ -230,19 +337,19 @@ export async function getAudioDurations(paths: string[]): Promise<GetAudioDurati
 }
 
 export async function renamePath(src: string, dst: string): Promise<FileOpResultOut> {
-  return postJson("/tools/rename_path", { src, dst });
+  return withWriteGuard(() => postJson("/tools/rename_path", { src, dst }));
 }
 
 export async function deletePaths(paths: string[]): Promise<FileOpResultOut> {
-  return postJson("/tools/delete_paths", { paths });
+  return withWriteGuard(() => postJson("/tools/delete_paths", { paths }));
 }
 
 export async function copyPaths(srcs: string[], dst_dir: string): Promise<FileOpResultOut> {
-  return postJson("/tools/copy_paths", { srcs, dst_dir });
+  return withWriteGuard(() => postJson("/tools/copy_paths", { srcs, dst_dir }));
 }
 
 export async function movePaths(srcs: string[], dst_dir: string): Promise<FileOpResultOut> {
-  return postJson("/tools/move_paths", { srcs, dst_dir });
+  return withWriteGuard(() => postJson("/tools/move_paths", { srcs, dst_dir }));
 }
 
 export async function revealInFolder(path: string): Promise<void> {
@@ -259,10 +366,6 @@ export async function applyRenames(ops: RenameOp[]): Promise<ApplyRenamesOut> {
 
 export async function padSongToLongest(songPath: string): Promise<PadResultOut> {
   return postJson("/tools/pad_song_to_longest", { song_path: songPath });
-}
-
-export async function getDurationSummary(folder: string): Promise<DurationSummaryOut> {
-  return getJson("/tools/get_duration_summary", { folder });
 }
 
 export async function checkWorkspace(root: string): Promise<CheckResult> {
@@ -284,7 +387,7 @@ export async function pingSidecar(): Promise<boolean> {
 }
 
 // ====================================================
-// ⚠️ 临时开发者端点(/dev/*)— 工具齐了改走 /tools/* 后删除
+// Dev 面板专用 (/dev/*) — 给 Toolbar 调试用,不进 agent 工具集
 // ====================================================
 
 export interface DevSheetStatus {

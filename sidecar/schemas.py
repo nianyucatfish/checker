@@ -5,7 +5,7 @@ sidecar.schemas — REST API 的 Pydantic 输入输出模型。
 后续会用 datamodel-code-generator 从这里导出 TypeScript 类型给前端用。
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,21 @@ from pydantic import BaseModel, Field
 class ErrorResponse(BaseModel):
     ok: bool = False
     error: str
+
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class ChatIn(BaseModel):
+    messages: List[ChatMessage]
+
+
+class ChatOut(BaseModel):
+    ok: bool = True
+    message: ChatMessage
+    model: str
 
 
 # ====================================================
@@ -78,13 +93,6 @@ class AudioMetadata(BaseModel):
 # ====================================================
 #  get_duration_summary
 # ====================================================
-
-
-class DurationSummary(BaseModel):
-    ok: bool = True
-    folder: str
-    inconsistent: bool
-    summary: Optional[str] = None  # 旧逻辑给的人类可读摘要，无不一致时为 None
 
 
 # ====================================================

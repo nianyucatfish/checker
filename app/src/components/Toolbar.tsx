@@ -162,6 +162,39 @@ export function Toolbar({
   const [devResult, setDevResult] = useState<DevResult | null>(null);
   const [devBusy, setDevBusy] = useState(false);
 
+  // 录制 LLM 上下文开关。mount 时从 main 拿当前值,优先用 localStorage 覆盖一次
+  // (重启 Electron 后 main 端会回到环境变量默认,renderer 端持久化做"上次怎么开就怎么开")。
+  const DUMP_LLM_LS_KEY = "audio_qc.dump_llm";
+  const [dumpLlmOn, setDumpLlmOn] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const saved = localStorage.getItem(DUMP_LLM_LS_KEY);
+      if (saved === "1") {
+        await window.electronAPI.agentSetDumpLlm(true);
+        if (!cancelled) setDumpLlmOn(true);
+        return;
+      }
+      if (saved === "0") {
+        await window.electronAPI.agentSetDumpLlm(false);
+        if (!cancelled) setDumpLlmOn(false);
+        return;
+      }
+      // localStorage 没值 → 用 main 当前值(可能来自环境变量)
+      const cur = await window.electronAPI.agentGetDumpLlm();
+      if (!cancelled) setDumpLlmOn(cur);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const toggleDumpLlm = async () => {
+    const next = !dumpLlmOn;
+    await window.electronAPI.agentSetDumpLlm(next);
+    localStorage.setItem(DUMP_LLM_LS_KEY, next ? "1" : "0");
+    setDumpLlmOn(next);
+  };
+
   const runDev = async (title: string, fn: () => Promise<unknown>) => {
     if (devBusy) return;
     setDevBusy(true);
@@ -316,6 +349,17 @@ export function Toolbar({
       label: "强制刷新整表 (~30s)",
       onClick: () => runDev("强制刷新整表", devRefreshSheet),
       disabled: devBusy,
+    },
+    "sep",
+    {
+      // 调试 GA 压缩 / trail 用:开启后每轮 LLM 调用前 dump 完整 messages + tools 到
+      // tmp/agent_contexts/<chatId>_t<NNN>.txt。对比 t4 vs t5 可看出软压效果。
+      label: dumpLlmOn
+        ? "录制 LLM 上下文:已开启 → tmp/agent_contexts/"
+        : "录制 LLM 上下文:未开启",
+      onClick: () => {
+        void toggleDumpLlm();
+      },
     },
   ];
 

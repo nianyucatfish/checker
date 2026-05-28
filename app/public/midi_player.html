@@ -489,7 +489,7 @@
 
             <div class="right-controls">
                 <button id="moveModeBtn" class="btn-mini btn-move-mode toolbar-btn-fixed" disabled>移动模式:关</button>
-                <button id="exportBtn" class="btn-mini toolbar-btn-fixed" style="display:none;" disabled>保存MIDI</button>
+                <button id="exportBtn" class="btn-mini toolbar-btn-fixed" disabled>保存MIDI</button>
                 <div id="status">等待加载 MIDI...</div>
             </div>
         </div>
@@ -1688,6 +1688,21 @@
             else startPlayback(pauseOffset);
         });
 
+        // 空格 = play/pause(webview 内部焦点时)。skip 在 input/textarea/可编辑节点里输入空格。
+        document.addEventListener('keydown', (e) => {
+            if (e.code !== 'Space' && e.key !== ' ') return;
+            const t = e.target;
+            if (t) {
+                const tag = t.tagName;
+                if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+                if (t.isContentEditable) return;
+            }
+            if (!currentSequence || playBtn.disabled) return;
+            e.preventDefault();
+            if (isPlaying) pausePlayback();
+            else startPlayback(pauseOffset);
+        });
+
         stopBtn.addEventListener('click', () => {
             stopPlayback();
         });
@@ -1946,51 +1961,47 @@
         async function exportShiftedMidi() {
             if (!currentSequence || !tracks.length) return;
             try {
-                statusLabel.innerText = '正在保存 MIDI...';
-                const seq = normalizeSequenceForExport(getShiftedFullSequence());
-                const midiBytes = await Promise.resolve(mm.sequenceProtoToMidi(seq));
-
-                if (exportBridge && typeof exportBridge.saveMidiBase64 === 'function') {
-                    let binary = '';
-                    const chunkSize = 0x8000;
-                    for (let i = 0; i < midiBytes.length; i += chunkSize) {
-                        const chunk = midiBytes.subarray(i, i + chunkSize);
-                        binary += String.fromCharCode.apply(null, chunk);
-                    }
-                    const midiBase64 = btoa(binary);
-
-                    const result = await new Promise((resolve) => {
-                        if (typeof exportBridge.saveMidiToCurrentPath === 'function') {
-                            exportBridge.saveMidiToCurrentPath(midiBase64, resolve);
-                        } else {
-                            exportBridge.saveMidiBase64(midiBase64, defaultExportFilename, resolve);
-                        }
-                    });
-
-                    if (result === 'CANCELLED') {
-                        statusLabel.innerText = '已取消保存';
-                        return;
-                    }
-                    if (typeof result === 'string' && result.startsWith('ERROR:')) {
-                        throw new Error(result.replace('ERROR:', '').trim());
-                    }
-
-                    commitOffsetsToCurrentState();
-                    statusLabel.innerText = '保存完成';
+                if (!exportBridge || typeof exportBridge.saveShiftedMidiPerTrackToCurrentPath !== 'function') {
+                    statusLabel.innerText = '导出需要 Python 桥接,请通过应用打开';
+                    statusLabel.classList.add('error');
                     return;
                 }
 
-                const blob = new Blob([midiBytes], { type: 'audio/midi' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = defaultExportFilename;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                URL.revokeObjectURL(url);
+                // 把 per-track offset 打包成 [{instrument, shift}, ...]
+                // instrument 对应 magenta NoteSequence 的 instrument 编号(≈ MIDI channel)
+                const shiftsList = tracks.map(t => ({
+                    instrument: t.instId,
+                    shift: Math.round((t.offsetSeconds || 0) * 1000) / 1000,
+                }));
+
+                statusLabel.innerText = '正在保存 MIDI...';
+                statusLabel.classList.remove('error');
+
+                // dbg: 抛 shifts 给 host,方便排查
+                try {
+                    console.log('__MIDI_BRIDGE__' + JSON.stringify({
+                        type: 'midi_export_dbg',
+                        stage: 'pre_save',
+                        shifts: shiftsList,
+                    }));
+                } catch(e){}
+
+                const shiftsJson = JSON.stringify(shiftsList);
+                const result = await new Promise((resolve) => {
+                    exportBridge.saveShiftedMidiPerTrackToCurrentPath(shiftsJson, resolve);
+                });
+
+                if (result === 'CANCELLED') {
+                    statusLabel.innerText = '已取消保存';
+                    return;
+                }
+                if (typeof result === 'string' && result.startsWith('ERROR:')) {
+                    throw new Error(result.replace('ERROR:', '').trim());
+                }
+
                 commitOffsetsToCurrentState();
-                statusLabel.innerText = '保存完成(浏览器下载)';
+                statusLabel.innerText = '保存完成';
+                return;
             } catch (e) {
                 console.error(e);
                 statusLabel.innerText = '保存失败: ' + e.message;

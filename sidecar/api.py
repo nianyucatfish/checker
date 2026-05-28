@@ -9,23 +9,28 @@ import csv
 import mimetypes
 import os
 import shutil
+import time
 from typing import List
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from sidecar import checker, fixers
+from sidecar import workspace as _ws
+from sidecar.config import reload_config
 from sidecar.schemas import (
     AudioMetadata,
     ApplyRenamesIn,
     ApplyRenamesOut,
+    ChatIn,
+    ChatOut,
     CheckErrorOut,
     CheckResult,
     CopyPathsIn,
     DeletePathsIn,
     DirEntry,
-    DurationSummary,
     FileEntry,
     FileOpResultOut,
     GetAudioDurationsIn,
@@ -46,7 +51,7 @@ from sidecar.schemas import (
     WriteResultOut,
     WriteTextIn,
 )
-from logic_checker import LogicChecker
+from sidecar.logic_checker import LogicChecker
 
 
 app = FastAPI(title="Audio QC Sidecar", version="0.1.0")
@@ -63,6 +68,148 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"ok": True, "service": "sidecar", "version": app.version}
+
+
+@app.post("/chat", response_model=ChatOut)
+def chat(inp: ChatIn):
+    cfg = reload_config().test_llm
+    if not cfg.endpoint or not cfg.api_key:
+        raise HTTPException(status_code=400, detail="test_llm.endpoint/api_key 未配置")
+
+    url = cfg.endpoint.rstrip("/") + "/v1/chat/completions"
+    payload = {
+        "model": cfg.model,
+        "messages": [m.model_dump() for m in inp.messages],
+        "stream": False,
+    }
+    headers = {"Authorization": f"Bearer {cfg.api_key}"}
+    try:
+        with httpx.Client(timeout=60, trust_env=False) as client:
+            r = client.post(url, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"LLM HTTP {e.response.status_code}: {e.response.text[:500]}") from e
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {e}") from e
+
+    try:
+        content = data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError) as e:
+        raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
+    return ChatOut(message={"role": "assistant", "content": content}, model=cfg.model)
+
+
+@app.post("/agent/workspace")
+def agent_workspace(body: dict):
+    """Electron 切工作区时推一次,sidecar 之后用它解析相对路径。
+
+    Body: {root: str | null}. root=null/空 → 清空(后续相对路径调用会被拒)。
+    """
+    root = body.get("root")
+    _ws.set_workspace(root if isinstance(root, str) else None)
+    return {"ok": True, "current": _ws.get_workspace()}
+
+
+@app.post("/agent/completion")
+def agent_completion(body: dict):
+    """Proxy LLM call with tool support for the Electron agent loop.
+
+    Body: {messages, tools, tool_choice?}. Returns the raw assistant message dict
+    (`content` + optional `tool_calls`). Keeps the test_llm api_key in sidecar,
+    Electron main never sees it.
+    """
+    cfg = reload_config().test_llm
+    if not cfg.endpoint or not cfg.api_key:
+        raise HTTPException(status_code=400, detail="test_llm.endpoint/api_key 未配置")
+
+    payload = {
+        "model": cfg.model,
+        "messages": body.get("messages", []),
+        "tools": body.get("tools", []),
+        "tool_choice": body.get("tool_choice", "auto"),
+        "stream": False,
+        # 显式给上限,避免代理默认值过小导致中段截断
+        "max_tokens": body.get("max_tokens", 4096),
+    }
+    headers = {"Authorization": f"Bearer {cfg.api_key}"}
+    url = cfg.endpoint.rstrip("/") + "/v1/chat/completions"
+
+    # GA llmcore.py:296-349 同款重试策略:
+    # - 5xx/429/超时 → 指数退避 1.5 * 2^attempt(封顶 30s),honor Retry-After
+    # - connect=10s / read=300s 分别给(代理慢时不会假死)
+    RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+    max_retries = 3
+    last_err: str | None = None
+    data: dict | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            with httpx.Client(timeout=httpx.Timeout(300.0, connect=10.0), trust_env=False) as client:
+                r = client.post(url, json=payload, headers=headers)
+                if r.status_code >= 400:
+                    if r.status_code in RETRYABLE and attempt < max_retries:
+                        ra_hdr = r.headers.get("retry-after")
+                        try:
+                            ra = float(ra_hdr) if ra_hdr else None
+                        except ValueError:
+                            ra = None
+                        delay = max(0.5, ra if ra is not None else min(30.0, 1.5 * (2 ** attempt)))
+                        print(f"[agent_completion] HTTP {r.status_code}, retry in {delay:.1f}s ({attempt+1}/{max_retries+1})", flush=True)
+                        time.sleep(delay)
+                        continue
+                    raise HTTPException(status_code=502, detail=f"LLM HTTP {r.status_code}: {r.text[:500]}")
+                data = r.json()
+                break
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if attempt < max_retries:
+                delay = min(30.0, 1.5 * (2 ** attempt))
+                print(f"[agent_completion] {type(e).__name__}, retry in {delay:.1f}s ({attempt+1}/{max_retries+1})", flush=True)
+                time.sleep(delay)
+                continue
+            raise HTTPException(status_code=502, detail=f"LLM request failed: {last_err}") from e
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"LLM request failed: {e}") from e
+    if data is None:
+        raise HTTPException(status_code=502, detail=f"LLM request failed after {max_retries+1} attempts: {last_err}")
+
+    try:
+        choice = data["choices"][0]
+        msg = choice["message"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
+    finish_reason = choice.get("finish_reason", "")
+    usage = data.get("usage", {})
+    # 抽取 cache 命中数:覆盖 3 种主流 schema
+    cached = (
+        usage.get("prompt_cache_hit_tokens")
+        or (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        or usage.get("cache_read_input_tokens")
+        or 0
+    )
+    print(
+        f"[agent_completion] finish={finish_reason} cached={cached} usage={usage}",
+        flush=True,
+    )
+    # 把代理原始 JSON 落盘 tmp/agent_upstream.jsonl,排查 native token 泄漏 / tool_calls
+    # 解析失败这类代理 bug —— 看的是 sidecar 拿到的完全未处理的 upstream 数据。
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+        dump_path = _Path(__file__).resolve().parent.parent / "tmp" / "agent_upstream.jsonl"
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        with dump_path.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps({"ts": _time.time(), "finish": finish_reason, "data": data}, ensure_ascii=False) + "\n")
+    except Exception as _e:
+        print(f"[agent_completion] dump failed: {_e}", flush=True)
+    return {
+        "message": msg,
+        "model": cfg.model,
+        "usage": usage,
+        "cached_tokens": cached,
+        "finish_reason": finish_reason,
+    }
 
 
 @app.get("/tools/list_workspace", response_model=ListWorkspaceOut)
@@ -118,16 +265,6 @@ def tool_get_audio_metadata(path: str = Query(...)):
         path=path, samplerate=sr, channels=ch, subtype=subtype, frames=frames,
         duration_seconds=frames / sr if sr else 0.0,
     )
-
-
-@app.get("/tools/get_duration_summary", response_model=DurationSummary)
-def tool_get_duration_summary(folder: str = Query(...), tolerance_seconds: float = 0.02):
-    if not os.path.isdir(folder):
-        raise HTTPException(status_code=400, detail=f"not a directory: {folder}")
-    summary = LogicChecker.get_wav_duration_inconsistency_summary(
-        folder, tolerance_seconds=tolerance_seconds
-    )
-    return DurationSummary(folder=folder, inconsistent=summary is not None, summary=summary)
 
 
 @app.get("/tools/list_dir", response_model=ListDirOut)
@@ -303,10 +440,104 @@ def tool_write_text(body: WriteTextIn):
     return WriteResultOut(path=body.path, bytes_written=size)
 
 
+@app.post("/tools/write_midi", response_model=WriteResultOut)
+def tool_write_midi(body: dict):
+    """把 base64 编码的 MIDI 字节写到指定 path。MidiViewer 保存按钮走这条。
+    Body: {path: str, base64: str}
+    """
+    import base64 as _b64
+    path = body.get("path")
+    b64 = body.get("base64")
+    if not isinstance(path, str) or not path:
+        raise HTTPException(status_code=400, detail="path required")
+    if not isinstance(b64, str):
+        raise HTTPException(status_code=400, detail="base64 required")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".mid", ".midi"):
+        raise HTTPException(status_code=400, detail=f"only .mid/.midi allowed, got {ext}")
+    try:
+        data = _b64.b64decode(b64, validate=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"invalid base64: {e}")
+    # 调试副本:每次写 midi 也存一份到 tmp/last_midi_save.mid,方便事后对比
+    try:
+        from pathlib import Path as _Path
+        dbg_dir = _Path(__file__).resolve().parent.parent / "tmp"
+        dbg_dir.mkdir(parents=True, exist_ok=True)
+        (dbg_dir / "last_midi_save.mid").write_bytes(data)
+        (dbg_dir / "last_midi_save.meta.txt").write_text(
+            f"target_path={path}\nsize={len(data)}\nfirst_30_hex={data[:30].hex()}\n",
+            encoding="utf-8",
+        )
+    except Exception as _e:
+        print(f"[write_midi] dbg dump failed: {_e}", flush=True)
+    def _do(tmp: str):
+        with open(tmp, "wb") as f:
+            f.write(data)
+    size = _atomic_write(path, _do)
+    return WriteResultOut(path=path, bytes_written=size)
+
+
+@app.post("/tools/shift_midi_per_track_save")
+def tool_shift_midi_per_track_save(body: dict):
+    """读原 MIDI bytes → 按 magenta instrument id 做 tick 级平移 → 原子写回 path。
+
+    Body: {path: str, shifts: [{instrument: int, shift: float seconds}]}
+
+    替代 webview 端 mm.sequenceProtoToMidi(magenta-music 1.x 在多声部 / 同 channel
+    overlap notes 时重写会出错,见 2e05704)。Python 用 mido 在 tick 层平移,
+    保 raw event 顺序 / velocity / tempo 不变。
+    """
+    from sidecar import midi_shifter
+    path = body.get("path")
+    shifts_list = body.get("shifts") or []
+    if not isinstance(path, str) or not path:
+        raise HTTPException(status_code=400, detail="path required")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=400, detail=f"midi file not found: {path}")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".mid", ".midi"):
+        raise HTTPException(status_code=400, detail=f"only .mid/.midi allowed, got {ext}")
+    # shifts: list[{instrument, shift}] → dict[int, float]
+    shifts: dict[int, float] = {}
+    for item in shifts_list:
+        if not isinstance(item, dict): continue
+        try:
+            shifts[int(item["instrument"])] = float(item.get("shift", 0))
+        except (KeyError, TypeError, ValueError):
+            continue
+    try:
+        with open(path, "rb") as f:
+            orig_bytes = f.read()
+        new_bytes = midi_shifter.shift_midi_bytes_per_magenta_instrument(orig_bytes, shifts)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"midi shift failed: {e}")
+    # 调试副本
+    try:
+        from pathlib import Path as _Path
+        dbg_dir = _Path(__file__).resolve().parent.parent / "tmp"
+        dbg_dir.mkdir(parents=True, exist_ok=True)
+        (dbg_dir / "last_midi_save.mid").write_bytes(new_bytes)
+        (dbg_dir / "last_midi_save.meta.txt").write_text(
+            f"target_path={path}\nsize={len(new_bytes)}\nshifts={shifts}\nfirst_30_hex={new_bytes[:30].hex()}\n",
+            encoding="utf-8",
+        )
+    except Exception as _e:
+        print(f"[shift_midi] dbg dump failed: {_e}", flush=True)
+    def _do(tmp: str):
+        with open(tmp, "wb") as f:
+            f.write(new_bytes)
+    size = _atomic_write(path, _do)
+    return WriteResultOut(path=path, bytes_written=size)
+
+
 @app.get("/files/raw")
 def files_raw(path: str = Query(..., description="absolute file path")):
     """流式返回任意本地文件的字节内容。FileResponse 自带 Range 支持，
     供前端 <audio>/<video> / fetch decodeAudioData 等使用。
+
+    返回 Cache-Control: no-store —— Chromium webview 默认会缓存普通 GET 响应,
+    保存 midi/wav 后重新打开看到旧字节就是这个 cache 在搞鬼,显式禁用。
     """
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail=f"file not found: {path}")
@@ -317,7 +548,10 @@ def files_raw(path: str = Query(..., description="absolute file path")):
             media_type = "audio/midi"
         else:
             media_type = "application/octet-stream"
-    return FileResponse(path, media_type=media_type, filename=os.path.basename(path))
+    resp = FileResponse(path, media_type=media_type, filename=os.path.basename(path))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.get("/tools/get_audio_peaks", response_model=AudioPeaksOut)
@@ -417,9 +651,33 @@ def _ensure_exists(p: str):
         raise HTTPException(status_code=400, detail=f"path not found: {p}")
 
 
+def _rename_with_retry(src: str, dst: str, retries: int = 4, delay: float = 0.08) -> None:
+    """os.rename + Windows 文件锁瞬态重试。
+
+    Win 上播放器/HTTP stream 释放 fd 是异步的,前端 audio:release 后服务端可能还
+    handle 着;直接 rename 会 PermissionError。指数退避 0.08/0.16/0.32/0.64s 共 ~1.2s
+    给浏览器和 sidecar 自己的 FileResponse 完成清理,99% 瞬态锁都能熬过。
+    """
+    import time as _time
+    last: Exception | None = None
+    for i in range(retries + 1):
+        try:
+            os.rename(src, dst)
+            return
+        except (PermissionError, OSError) as e:
+            last = e
+            if i < retries:
+                _time.sleep(delay * (2 ** i))
+            else:
+                raise
+
+
 @app.post("/tools/rename_path", response_model=FileOpResultOut)
 def tool_rename_path(body: RenamePathIn):
-    """重命名/移动单个文件或目录。src 必须存在;dst 父目录必须存在;dst 不能已存在。"""
+    """重命名/移动单个文件或目录。src 必须存在;dst 父目录必须存在;dst 不能已存在。
+    Win 文件锁瞬态自动重试(~1.2s 窗口),避免外部播放器/sidecar 自身 stream 没释放
+    fd 时硬失败。
+    """
     src = body.src
     dst = body.dst
     _ensure_exists(src)
@@ -433,10 +691,10 @@ def tool_rename_path(body: RenamePathIn):
         if os.path.normcase(os.path.normpath(src)) == os.path.normcase(os.path.normpath(dst)):
             # Windows 大小写改名:走两步
             tmp = src + ".__rename_tmp__"
-            os.rename(src, tmp)
-            os.rename(tmp, dst)
+            _rename_with_retry(src, tmp)
+            _rename_with_retry(tmp, dst)
         else:
-            os.rename(src, dst)
+            _rename_with_retry(src, dst)
     except OSError as e:
         raise HTTPException(status_code=400, detail=f"rename failed: {e}")
     return FileOpResultOut(executed=[dst])
@@ -515,11 +773,10 @@ def tool_move_paths(body: MovePathsIn):
 
 
 # ====================================================
-#  ⚠️ 开发者临时测试端点 (TODO: 工具齐了之后删掉,接 agent 走 /tools/*)
+#  Dev 面板专用端点 (/dev/*) — Toolbar 调试用,不进 agent 工具集
 #
-#  路由前缀 /dev/* 区别于正式 /tools/*。
 #  - 不写 Pydantic schema,返回 dict 即可,降低改接口的成本。
-#  - 不进 OpenAPI 工具列表(给 agent 暴露的是 /tools/*)。
+#  - 不进 OpenAPI 工具列表(给 agent 暴露的是 /tools/* + MCP)。
 #  - 错误统一捕成 HTTP 400 + 文本 message,给前端 alert 显示。
 # ====================================================
 

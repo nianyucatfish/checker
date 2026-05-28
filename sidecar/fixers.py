@@ -1,8 +1,9 @@
 """
-sidecar.fixers — 把 main_window.py 里的写操作核心逻辑剥离出来，纯函数风格。
-设计原则：
-- 不依赖 PyQt（无 QMessageBox / QDialog / 信号）
-- 异常以返回值/exception 形式表达
+sidecar.fixers — 文件系统写操作核心(rename / move / copy / delete / pad / trim)。
+
+设计原则:
+- 纯函数,异常以返回值/exception 形式表达
+- 不接 UI,UI 层(electron main / sidecar API)自己决定确认 / 进度提示
 """
 import os
 import shutil
@@ -13,7 +14,7 @@ import numpy as np
 import soundfile as sf
 from send2trash import send2trash
 
-from logic_checker import LogicChecker
+from sidecar.logic_checker import LogicChecker
 
 
 @dataclass
@@ -37,6 +38,13 @@ class AutofixResult:
     executed: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     path_updates: dict = field(default_factory=dict)
+
+
+@dataclass
+class SimulateResult:
+    would_execute: list = field(default_factory=list)
+    would_conflict: list = field(default_factory=list)
+    predicted_path_updates: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -104,7 +112,6 @@ def build_autofix_plan(song_paths):
     """构建自动修复重命名计划。
 
     返回 AutofixPlan(ops=可执行操作, conflicts=因冲突跳过的描述)。
-    剥离自 main_window.py:2105 _build_autofix_plan。
     """
     raw_ops = []
     for song_path in song_paths:
@@ -160,7 +167,6 @@ def execute_autofix_plan(ops):
 
     例：先把 A/B/file.wav 改名为 A/B/file_new.wav，再把 A/B/ 改名为 A/B_new/，
     第二步执行时 src 应解析为已被改过的当前路径。path_updates 记录这种映射。
-    剥离自 main_window.py:2199-2218 _run_autofix 的执行循环。
     """
     result = AutofixResult()
 
@@ -244,6 +250,9 @@ def _validate_op_paths(op: dict, workspace_root: str) -> None:
     elif op_type == "move":
         # dst_dir 是目标目录;移动后新路径 = dst_dir/basename(src),也要在工作区
         paths_to_check = [op["src"], op["dst_dir"]]
+    elif op_type == "copy":
+        # 跟 move 同结构,但源不消失;目标路径 = dst_dir/basename(src)
+        paths_to_check = [op["src"], op["dst_dir"]]
     elif op_type == "create_dir":
         paths_to_check = [op["path"]]
     elif op_type == "write_text":
@@ -252,6 +261,14 @@ def _validate_op_paths(op: dict, workspace_root: str) -> None:
         if ext not in _WRITE_TEXT_ALLOWED_EXTS:
             raise ValueError(
                 f"write_text 拒绝扩展名 {ext!r}: 仅允许 "
+                f"{sorted(_WRITE_TEXT_ALLOWED_EXTS)}(脑暴 §8 边界)"
+            )
+    elif op_type == "text_edit":
+        paths_to_check = [op["path"]]
+        ext = os.path.splitext(op["path"])[1].lower()
+        if ext not in _WRITE_TEXT_ALLOWED_EXTS:
+            raise ValueError(
+                f"text_edit 拒绝扩展名 {ext!r}: 仅允许 "
                 f"{sorted(_WRITE_TEXT_ALLOWED_EXTS)}(脑暴 §8 边界)"
             )
     else:
@@ -294,14 +311,160 @@ def execute_ops(ops: list, workspace_root: str) -> AutofixResult:
                 _exec_delete(op, result)
             elif op_type == "move":
                 _exec_move(op, result)
+            elif op_type == "copy":
+                _exec_copy(op, result)
             elif op_type == "create_dir":
                 _exec_create_dir(op, result)
             elif op_type == "write_text":
                 _exec_write_text(op, result)
+            elif op_type == "text_edit":
+                _exec_text_edit(op, result)
         except Exception as e:
             result.errors.append(f"{op_type} 失败 {op}: {e}")
 
     return result
+
+
+def simulate_ops(ops: list, workspace_root: str) -> SimulateResult:
+    """Dry-run validation:逐 op 静态预测冲突,不碰磁盘。
+
+    模拟 path_updates 级联(rename/move 改变后续 op 的 src 解析)与"已删/已建"集合,
+    所以连环操作(先 rename 再 move 同一文件)能正确判断中间状态。
+
+    Conflict codes:
+    - PATH_OUTSIDE_WORKSPACE: op 引用的路径越出工作区
+    - INVALID_OP: op 结构缺字段 / 未知 type
+    - SRC_MISSING: rename/delete/move/copy/text_edit 的 src/path 不存在(且没被前面的 op 建出来)
+    - DST_EXISTS: rename/move/copy 目标已存在(且不是 case-only swap)
+    - EXT_NOT_ALLOWED: write_text / text_edit 目标扩展名不在白名单
+    - EDIT_NOT_FOUND: text_edit 的 old_string 在文件中找不到
+    - EDIT_AMBIGUOUS: text_edit 的 old_string 在文件中出现多次且未指定 replace_all=True
+    """
+    result = SimulateResult()
+    seen_creates: set[str] = set()  # 前面 op 已"建"出来的路径(rename/move 的 dst, write_text 的 path)
+    seen_deletes: set[str] = set()  # 前面 op 已"删"掉的路径(rename/move 的 src, delete 的 path)
+
+    for i, op in enumerate(ops):
+        op_type = op.get("type")
+        # write_text / text_edit 的扩展名检查在 _validate_op_paths 内是 ValueError,
+        # 需先解出来报 EXT_NOT_ALLOWED
+        if op_type in ("write_text", "text_edit"):
+            ext = os.path.splitext(op.get("path", ""))[1].lower()
+            if ext not in _WRITE_TEXT_ALLOWED_EXTS:
+                result.would_conflict.append({
+                    "op_index": i, "type": op_type,
+                    "code": "EXT_NOT_ALLOWED", "detail": ext,
+                })
+                continue
+        try:
+            _validate_op_paths(op, workspace_root)
+        except PathOutsideWorkspaceError as e:
+            result.would_conflict.append({
+                "op_index": i, "type": op_type,
+                "code": "PATH_OUTSIDE_WORKSPACE", "detail": str(e),
+            })
+            continue
+        except (KeyError, ValueError) as e:
+            result.would_conflict.append({
+                "op_index": i, "type": op_type,
+                "code": "INVALID_OP", "detail": str(e),
+            })
+            continue
+
+        if op_type == "rename":
+            src = result.predicted_path_updates.get(op["src"], op["src"])
+            dst = op["dst"]
+            if not _would_exist(src, seen_creates, seen_deletes):
+                result.would_conflict.append({"op_index": i, "type": "rename", "code": "SRC_MISSING", "detail": src})
+                continue
+            if _would_exist(dst, seen_creates, seen_deletes) and os.path.normcase(src) != os.path.normcase(dst):
+                result.would_conflict.append({"op_index": i, "type": "rename", "code": "DST_EXISTS", "detail": dst})
+                continue
+            result.would_execute.append({"type": "rename", "src": src, "dst": dst})
+            result.predicted_path_updates[op["src"]] = dst
+            seen_deletes.add(src)
+            seen_creates.add(dst)
+        elif op_type == "delete":
+            path = result.predicted_path_updates.get(op["path"], op["path"])
+            if not _would_exist(path, seen_creates, seen_deletes):
+                result.would_conflict.append({"op_index": i, "type": "delete", "code": "SRC_MISSING", "detail": path})
+                continue
+            result.would_execute.append({"type": "delete", "path": path})
+            seen_deletes.add(path)
+        elif op_type == "move":
+            src = result.predicted_path_updates.get(op["src"], op["src"])
+            dst_dir = op["dst_dir"]
+            dst = os.path.join(dst_dir, os.path.basename(src))
+            if not _would_exist(src, seen_creates, seen_deletes):
+                result.would_conflict.append({"op_index": i, "type": "move", "code": "SRC_MISSING", "detail": src})
+                continue
+            if _would_exist(dst, seen_creates, seen_deletes):
+                result.would_conflict.append({"op_index": i, "type": "move", "code": "DST_EXISTS", "detail": dst})
+                continue
+            result.would_execute.append({"type": "move", "src": src, "dst": dst})
+            result.predicted_path_updates[op["src"]] = dst
+            seen_deletes.add(src)
+            seen_creates.add(dst)
+        elif op_type == "copy":
+            src = result.predicted_path_updates.get(op["src"], op["src"])
+            dst_dir = op["dst_dir"]
+            dst = os.path.join(dst_dir, os.path.basename(src))
+            if not _would_exist(src, seen_creates, seen_deletes):
+                result.would_conflict.append({"op_index": i, "type": "copy", "code": "SRC_MISSING", "detail": src})
+                continue
+            if _would_exist(dst, seen_creates, seen_deletes):
+                result.would_conflict.append({"op_index": i, "type": "copy", "code": "DST_EXISTS", "detail": dst})
+                continue
+            result.would_execute.append({"type": "copy", "src": src, "dst": dst})
+            # copy 不入 seen_deletes(源保留),只 seen_creates 加 dst
+            seen_creates.add(dst)
+        elif op_type == "write_text":
+            path = op["path"]
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in _WRITE_TEXT_ALLOWED_EXTS:
+                result.would_conflict.append({"op_index": i, "type": "write_text", "code": "EXT_NOT_ALLOWED", "detail": ext})
+                continue
+            result.would_execute.append({"type": "write_text", "path": path, "bytes": len(op.get("content", "").encode("utf-8"))})
+            seen_creates.add(path)
+        elif op_type == "text_edit":
+            path = result.predicted_path_updates.get(op["path"], op["path"])
+            old_string = op.get("old_string", "")
+            replace_all = bool(op.get("replace_all", False))
+            # 文件得真实存在(text_edit 不能改前面 op 在 seen_creates 里的"虚拟"文件;
+            # 那场景应当用 write_text)
+            if not os.path.isfile(path) or path in seen_deletes:
+                result.would_conflict.append({"op_index": i, "type": "text_edit", "code": "SRC_MISSING", "detail": path})
+                continue
+            try:
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    text = f.read()
+            except OSError as e:
+                result.would_conflict.append({"op_index": i, "type": "text_edit", "code": "SRC_MISSING", "detail": f"{path}: {e}"})
+                continue
+            count = text.count(old_string) if old_string else 0
+            if count == 0:
+                result.would_conflict.append({"op_index": i, "type": "text_edit", "code": "EDIT_NOT_FOUND", "detail": path})
+                continue
+            if count > 1 and not replace_all:
+                result.would_conflict.append({"op_index": i, "type": "text_edit", "code": "EDIT_AMBIGUOUS", "detail": f"{path}: {count} matches"})
+                continue
+            result.would_execute.append({"type": "text_edit", "path": path, "replacements": count if replace_all else 1})
+        elif op_type == "create_dir":
+            path = op["path"]
+            result.would_execute.append({"type": "create_dir", "path": path})
+            seen_creates.add(path)
+        else:
+            result.would_conflict.append({"op_index": i, "type": op_type, "code": "INVALID_OP", "detail": f"未知 op type: {op_type}"})
+
+    return result
+
+
+def _would_exist(path: str, seen_creates: set, seen_deletes: set) -> bool:
+    """路径在当前模拟状态下是否会存在 = 真实存在 + 前面 op 建过 - 前面 op 删过。"""
+    if path in seen_deletes:
+        # 删除后又被建出来(rename dst 等)? 优先看 seen_creates 顺序无法区分,简化:删过就当不存在,除非又建出来
+        return path in seen_creates
+    return os.path.exists(path) or path in seen_creates
 
 
 def _exec_rename(op: dict, result: AutofixResult) -> None:
@@ -348,6 +511,18 @@ def _exec_move(op: dict, result: AutofixResult) -> None:
     result.path_updates[op["src"]] = dst_path
 
 
+def _exec_copy(op: dict, result: AutofixResult) -> None:
+    """copy = shutil.copy2(保留 mtime / 权限),目标是目录,保留原 basename。源不动。"""
+    src = result.path_updates.get(op["src"], op["src"])
+    dst_dir = op["dst_dir"]
+    os.makedirs(dst_dir, exist_ok=True)
+    dst_path = os.path.join(dst_dir, os.path.basename(src))
+    if os.path.exists(dst_path):
+        raise FileExistsError(f"目标已存在:{dst_path}")
+    shutil.copy2(src, dst_path)
+    result.executed.append({"type": "copy", "src": src, "dst": dst_path})
+
+
 def _exec_create_dir(op: dict, result: AutofixResult) -> None:
     """create_dir = os.makedirs(exist_ok=True);幂等。"""
     path = op["path"]
@@ -390,6 +565,56 @@ def _exec_write_text(op: dict, result: AutofixResult) -> None:
     })
 
 
+def _exec_text_edit(op: dict, result: AutofixResult) -> None:
+    """text_edit = 精确字符串替换。读全文 → count old_string → 替换 → 原子写回。
+
+    校验:old_string 必须出现 >=1 次;>1 次必须 replace_all=True,否则 raise(对应
+    simulate 的 EDIT_NOT_FOUND / EDIT_AMBIGUOUS)。replace_all=False 时只换第一处。
+
+    读 utf-8-sig 容忍 BOM;写 utf-8 不带 BOM(content 写啥就写啥)。
+    """
+    path = result.path_updates.get(op["path"], op["path"])
+    old_string = op["old_string"]
+    new_string = op["new_string"]
+    replace_all = bool(op.get("replace_all", False))
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    with open(path, "r", encoding="utf-8-sig") as f:
+        text = f.read()
+
+    count = text.count(old_string) if old_string else 0
+    if count == 0:
+        raise ValueError(f"text_edit: old_string 未找到 {path}")
+    if count > 1 and not replace_all:
+        raise ValueError(
+            f"text_edit: old_string 在 {path} 出现 {count} 次,需指定 replace_all=True 或给更长上下文"
+        )
+
+    if replace_all:
+        new_text = text.replace(old_string, new_string)
+    else:
+        new_text = text.replace(old_string, new_string, 1)
+
+    tmp = path + ".__write_tmp__"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(new_text)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
+    result.executed.append({
+        "type": "text_edit",
+        "path": path,
+        "replacements": count if replace_all else 1,
+    })
+
+
 def _read_wav_metas(wav_files):
     """读取一组 WAV 的 (path, samplerate, channels, frames)；任一失败则返回错误。"""
     metas = []
@@ -408,10 +633,7 @@ def _read_wav_metas(wav_files):
 
 
 def _pad_to_target_frames(metas, target_frames):
-    """对每个 WAV 在尾部补静音到 target_frames。返回 (padded_count, error)。
-
-    剥离自 main_window.py:602 _do_pad_wavs，去掉 watcher / QMessageBox。
-    """
+    """对每个 WAV 在尾部补静音到 target_frames。返回 (padded_count, error)。"""
     padded = 0
     for fp, sr, ch, frames in metas:
         if target_frames <= frames:
@@ -458,7 +680,7 @@ def _pad_to_target_frames(metas, target_frames):
 def pad_wavs_to_longest(wav_files):
     """把一批 WAV 文件补空白到其中最长的帧数（采样点对齐）。
 
-    若采样率不一致返回 error。剥离自 main_window.py:555 _pad_wavs_to_longest。
+    若采样率不一致返回 error。
     """
     metas, err = _read_wav_metas(wav_files)
     if err:
@@ -484,10 +706,7 @@ def pad_wavs_to_longest(wav_files):
 
 
 def pad_song_to_longest(song_path):
-    """歌曲级入口：对 分轨wav / 总轨wav / 混音工程原文件 三个目录的一级 WAV 统一时长。
-
-    剥离自 main_window.py:504 trim_song_wavs_to_shortest 的纯逻辑（去掉 UI 确认与 log）。
-    """
+    """歌曲级入口：对 分轨wav / 总轨wav / 混音工程原文件 三个目录的一级 WAV 统一时长。"""
     if not song_path or not os.path.isdir(song_path):
         return PadResult(error="无效路径")
 

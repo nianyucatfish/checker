@@ -6,7 +6,7 @@ from sidecar.errors import CheckError, ErrorCode, FixHint
 def test_str_returns_message():
     e = CheckError(code=ErrorCode.MISSING_FILE, path="/a/b", message="[缺失文件] foo.wav")
     assert str(e) == "[缺失文件] foo.wav"
-    # 兼容老 PyQt UI 的 f-string 格式化
+    # f-string 拼接行为
     assert f"prefix {e}" == "prefix [缺失文件] foo.wav"
 
 

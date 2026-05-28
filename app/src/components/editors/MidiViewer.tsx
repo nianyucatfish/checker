@@ -68,6 +68,7 @@ function MidiWebview({ path }: { path: string }) {
   const wvRef = useRef<WebviewElement | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [saveToast, setSaveToast] = useState<string | null>(null);
   // 每次 mount 用一个唯一 src,绕过 webview partition 缓存
   const srcRef = useRef<string>(`/midi_player.html?t=${Date.now()}`);
 
@@ -89,7 +90,7 @@ function MidiWebview({ path }: { path: string }) {
     const onConsole = (e: { message: string }) => {
       if (!e.message || !e.message.startsWith(BRIDGE_MARKER)) return;
       const json = e.message.slice(BRIDGE_MARKER.length);
-      let data: { type?: string; ok?: boolean; error?: string } = {};
+      let data: { type?: string; ok?: boolean; error?: string; path?: string } = {};
       try {
         data = JSON.parse(json);
       } catch {
@@ -105,19 +106,34 @@ function MidiWebview({ path }: { path: string }) {
       } else if (data.type === "midi_iframe_error") {
         setStatus("error");
         setErrorMsg(String(data.error || "页面错误"));
+      } else if (data.type === "midi_saved") {
+        console.log(`[midi] save ${data.ok ? "ok" : "fail"}: ${data.path || data.error}`);
+        setSaveToast(data.ok ? `已保存: ${data.path}` : `保存失败: ${data.error}`);
+        setTimeout(() => setSaveToast(null), data.ok ? 2500 : 6000);
+      } else if (data.type === "midi_export_dbg") {
+        console.log("[midi] export dbg:", JSON.stringify(data));
       }
     };
 
     // 把对比 WAV 数据注成 window.exportBridge,让 midi_player.html 里
     // QWebChannel 那条路径走不通时也能拉到列表(老版 MidiExportBridge 的 JS 替身)。
-    // saveMidi* 暂不支持,返回错误字串。
+    // saveMidiToCurrentPath: 写 base64 回原文件(sidecar /tools/write_midi);
+    // saveMidiBase64: 弹文件保存对话框(Electron dialog) + 写入新位置。
     const injectExportBridge = async (payload: CompareWavPayload) => {
       if (cancelled || comparePayloadInjected) return;
       comparePayloadInjected = true;
       const json = JSON.stringify(payload);
+      const sidecarUrl = await window.electronAPI.getSidecarUrl();
+      const currentPath = path;
       const code = `(function(){
         var payload = ${json};
         var urls = payload.urls || {};
+        var SIDECAR = ${JSON.stringify(sidecarUrl)};
+        var CURRENT_PATH = ${JSON.stringify(currentPath)};
+        var MARKER = ${JSON.stringify(BRIDGE_MARKER)};
+        function ack(type, data) {
+          try { console.log(MARKER + JSON.stringify(Object.assign({type:type}, data||{}))); } catch(e){}
+        }
         window.exportBridge = {
           getCompareWavList: function(cb){
             try { cb(JSON.stringify(payload)); } catch(e) {}
@@ -129,8 +145,29 @@ function MidiWebview({ path }: { path: string }) {
               else   cb(JSON.stringify({ok:false, error:'文件不在列表中'}));
             } catch(e) {}
           },
-          saveMidiBase64: function(){ return 'ERROR: 保存功能在新版尚未接入'; },
-          saveMidiToCurrentPath: function(){ return 'ERROR: 保存功能在新版尚未接入'; },
+          // 老分支 2e05704 同款:不再 base64 写出 mm 重编码,JS 只传 per-track shifts
+          // 给 Python,Python 用 mido 在 tick 层平移原始 midi bytes,绕过 magenta 1.x
+          // 多声部 overlap 重写 bug。
+          saveShiftedMidiPerTrackToCurrentPath: function(shiftsJson, cb){
+            var shifts;
+            try { shifts = JSON.parse(shiftsJson); }
+            catch(e){ try{cb('ERROR: bad shifts json')}catch(_){}; return null; }
+            fetch(SIDECAR + '/tools/shift_midi_per_track_save', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({path: CURRENT_PATH, shifts: shifts}),
+            }).then(function(r){
+              if (!r.ok) return r.text().then(function(t){ throw new Error('HTTP '+r.status+': '+t); });
+              return r.json();
+            }).then(function(){
+              ack('midi_saved', {ok:true, path: CURRENT_PATH});
+              try { cb && cb('OK'); } catch(e){}
+            }).catch(function(e){
+              ack('midi_saved', {ok:false, error: String(e)});
+              try { cb && cb('ERROR: ' + String(e)); } catch(e){}
+            });
+            return null;
+          },
         };
       })();`;
       try {
@@ -164,7 +201,7 @@ function MidiWebview({ path }: { path: string }) {
         if (window.__midi_bridge_installed__) return;
         window.__midi_bridge_installed__ = true;
         var marker = ${JSON.stringify(BRIDGE_MARKER)};
-        var OUT = {midi_loaded:1, midi_load_error:1, midi_iframe_ready:1, midi_iframe_error:1};
+        var OUT = {midi_loaded:1, midi_load_error:1, midi_iframe_ready:1, midi_iframe_error:1, midi_saved:1, midi_export_dbg:1};
         var send = function(data){
           try { console.log(marker + JSON.stringify(data)); } catch(e) {}
         };
@@ -239,8 +276,29 @@ function MidiWebview({ path }: { path: string }) {
       wv.removeEventListener("dom-ready", onDomReady as never);
       wv.removeEventListener("did-fail-load", onFailLoad as never);
       wv.removeEventListener("crashed", onCrashed as never);
+      // 释放 webview 内 <audio>/MIDI 引擎对源文件的句柄,避免外部文件操作撞 Win 锁
+      try {
+        wv.executeJavaScript(
+          `(function(){try{document.querySelectorAll('audio,video').forEach(function(a){a.pause();a.removeAttribute('src');a.load();});}catch(e){}})();`,
+        ).catch(() => {});
+      } catch { /* ignore */ }
     };
   }, [path]);
+
+  // 全局 audio:release: 释放 webview 内播放器句柄
+  useEffect(() => {
+    const onRelease = () => {
+      const wv = wvRef.current;
+      if (!wv) return;
+      try {
+        wv.executeJavaScript(
+          `(function(){try{document.querySelectorAll('audio,video').forEach(function(a){a.pause();a.removeAttribute('src');a.load();});}catch(e){}})();`,
+        ).catch(() => {});
+      } catch { /* ignore */ }
+    };
+    window.addEventListener("audio:release", onRelease);
+    return () => window.removeEventListener("audio:release", onRelease);
+  }, []);
 
   return (
     <div className="flex-1 flex flex-col min-h-0 relative bg-bg">
@@ -249,6 +307,11 @@ function MidiWebview({ path }: { path: string }) {
         src={srcRef.current}
         className="flex-1 w-full bg-white"
       />
+      {saveToast && (
+        <div className="absolute top-3 right-3 z-20 max-w-md px-3 py-2 rounded text-xs shadow-md border border-border bg-bg-sidebar/95 text-fg break-all selectable">
+          {saveToast}
+        </div>
+      )}
       {status !== "ready" && (
         <div className="absolute inset-0 flex items-center justify-center bg-bg/70 z-10 pointer-events-none">
           <div className="flex flex-col items-center gap-2 text-fg-muted bg-bg-sidebar/95 border border-border rounded px-6 py-4 pointer-events-auto max-w-2xl">

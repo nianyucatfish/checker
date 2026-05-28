@@ -2,7 +2,6 @@
 结构化错误模型。
 
 CheckError 是 logic_checker 报错的新载荷，从字符串升级为带元数据的对象。
-保留 __str__ 返回 message，使老的 PyQt UI 在 f"...{e}" 这类格式化里行为不变。
 
 设计原则（详见 plan: 错误驱动的修复）：
 - 每条错误自带 expected/fix_hints，agent 拿到一条 error 就能修，不需要读规范文档
@@ -72,7 +71,7 @@ class FixHint:
 class CheckError:
     """单条结构化错误。
 
-    str(error) 返回 message，便于在老 PyQt UI 的 f-string 格式化里直接用。
+    str(error) 返回 message，便于在 f-string 里直接拼。
     to_dict() 给 sidecar API / agent prompt 使用。
     """
 

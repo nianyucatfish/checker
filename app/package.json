@@ -32,12 +32,16 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@monaco-editor/react": "^4.7.0",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/papaparse": "^5.5.2",
     "better-sqlite3": "^12.9.0",
     "chokidar": "^3.6.0",
     "lucide-react": "^1.14.0",
     "monaco-editor": "^0.55.1",
+    "papaparse": "^5.5.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-resizable-panels": "^2.1.9"
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^2.1.9",
+    "remark-gfm": "^4.0.1"
   }
 }

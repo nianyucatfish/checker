@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   fsWatch: (root: string) => ipcRenderer.invoke("fs:watch", root),
   fsUnwatch: () => ipcRenderer.invoke("fs:unwatch"),
+  fsPauseWatch: () => ipcRenderer.invoke("fs:pause-watch"),
+  fsResumeWatch: (root: string) => ipcRenderer.invoke("fs:resume-watch", root),
   // 读 OS 剪贴板上"复制的文件"列表(Win CF_HDROP / macOS NSFilenamesPboardType);
   // 没文件返回 []。给 Explorer Ctrl+V 跨进程粘贴用。
   clipboardReadFiles: () =>
@@ -47,4 +49,59 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("mix:visibility-changed", listener);
     return () => ipcRenderer.off("mix:visibility-changed", listener);
   },
+  // ---------- agent ----------
+  agentSend: (chatId: string, text: string) =>
+    ipcRenderer.invoke("agent:send", chatId, text),
+  agentStartQc: (chatId: string, song: string) =>
+    ipcRenderer.invoke("agent:start-qc", chatId, song),
+  agentCancel: (chatId: string) => ipcRenderer.invoke("agent:cancel", chatId),
+  agentHydrate: (chatId: string) =>
+    ipcRenderer.invoke("agent:hydrate", chatId) as Promise<{
+      phase: "A" | "B";
+      song: string | null;
+      turns: unknown[];
+    }>,
+  agentHumanCheckResolve: (
+    chatId: string,
+    payload: { answers: { choice: string; note?: string }[]; cancelled?: boolean },
+  ) => ipcRenderer.invoke("agent:human-check-resolve", chatId, payload),
+  agentSetWorkspace: (root: string | null) =>
+    ipcRenderer.invoke("agent:set-workspace", root),
+  agentListSessions: () =>
+    ipcRenderer.invoke("agent:list-sessions") as Promise<
+      Array<{ id: string; title: string; phase: string | null; song: string | null; updated_at: number }>
+    >,
+  agentNewSession: (title?: string) =>
+    ipcRenderer.invoke("agent:new-session", title) as Promise<{
+      id: string;
+      title: string;
+      phase: string | null;
+      song: string | null;
+      updated_at: number;
+    }>,
+  agentRenameSession: (chatId: string, title: string) =>
+    ipcRenderer.invoke("agent:rename-session", chatId, title) as Promise<void>,
+  agentDeleteSession: (chatId: string) =>
+    ipcRenderer.invoke("agent:delete-session", chatId) as Promise<void>,
+  onAgentEvent: (cb: (ev: unknown) => void) => {
+    const listener = (_e: unknown, ev: unknown) => cb(ev);
+    ipcRenderer.on("agent:event", listener);
+    return () => ipcRenderer.off("agent:event", listener);
+  },
+  // ---------- ui tools (agent → renderer) ----------
+  // agent.uiTools.openFile / togglePlayback 走 webContents.send 到这,
+  // renderer 监听后改 editor state / dispatch CustomEvent。
+  onUiOpenFile: (cb: (path: string) => void) => {
+    const listener = (_e: unknown, p: string) => cb(p);
+    ipcRenderer.on("ui:open-file", listener);
+    return () => ipcRenderer.off("ui:open-file", listener);
+  },
+  onPlaybackToggle: (cb: (kind: "beat" | "structure", on: boolean) => void) => {
+    const listener = (_e: unknown, kind: "beat" | "structure", on: boolean) => cb(kind, on);
+    ipcRenderer.on("playback:toggle", listener);
+    return () => ipcRenderer.off("playback:toggle", listener);
+  },
+  // ---------- agent dev toggles ----------
+  agentGetDumpLlm: () => ipcRenderer.invoke("agent:get-dump-llm") as Promise<boolean>,
+  agentSetDumpLlm: (on: boolean) => ipcRenderer.invoke("agent:set-dump-llm", on) as Promise<void>,
 });

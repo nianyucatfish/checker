@@ -105,181 +105,95 @@ def test_review_log_explicit_timestamp_preserved(tmp_review_log):
 
 
 # ============================================================
-#  fs_song_exists
+#  fs_list_dir
 # ============================================================
 
 
-def test_fs_song_exists_true(tmp_workspace):
-    song_dir = os.path.join(tmp_workspace, "歌手_望春风_扒谱者")
-    os.makedirs(song_dir)
-    out = mcp_server.fs_song_exists(tmp_workspace, "歌手_望春风_扒谱者")
-    assert out["exists"] is True
-    assert out["song_path"] == song_dir
+def test_fs_list_dir_default_depth_two(tmp_workspace):
+    song = os.path.join(tmp_workspace, "歌手_望春风_扒谱者")
+    sub = os.path.join(song, "分轨wav")
+    os.makedirs(sub)
+    Path(os.path.join(sub, "Vocal_A.wav")).write_text("x", encoding="utf-8")
+    out = mcp_server.fs_list_dir(song)
+    assert out["name"] == "歌手_望春风_扒谱者"
+    dir_names = [d["name"] for d in out["dirs"]]
+    assert "分轨wav" in dir_names
+    sub_node = next(d for d in out["dirs"] if d["name"] == "分轨wav")
+    assert any(f["name"] == "Vocal_A.wav" for f in sub_node["files"])
 
 
-def test_fs_song_exists_false(tmp_workspace):
-    out = mcp_server.fs_song_exists(tmp_workspace, "不存在的歌")
-    assert out["exists"] is False
+def test_fs_list_dir_truncated_beyond_depth(tmp_workspace):
+    deep = os.path.join(tmp_workspace, "a", "b", "c")
+    os.makedirs(deep)
+    out = mcp_server.fs_list_dir(tmp_workspace, max_depth=2)
+    a = next(d for d in out["dirs"] if d["name"] == "a")
+    b = next(d for d in a["dirs"] if d["name"] == "b")
+    assert b.get("truncated") is True
 
 
-def test_fs_song_exists_path_is_file_returns_false(tmp_workspace):
-    """同名 file 不算"歌存在"——只接受目录。"""
-    p = os.path.join(tmp_workspace, "fake")
-    Path(p).write_text("x", encoding="utf-8")
-    out = mcp_server.fs_song_exists(tmp_workspace, "fake")
-    assert out["exists"] is False
-
-
-# ============================================================
-#  audit_run_workspace_check
-# ============================================================
-
-
-def test_audit_run_workspace_check_aggregates_by_song(tmp_workspace):
-    """两首"歌"(空目录)→ 每首会被 checker 报缺一堆东西。"""
-    for name in ["歌手_A_扒谱者", "歌手_B_扒谱者"]:
-        os.makedirs(os.path.join(tmp_workspace, name))
-    out = mcp_server.audit_run_workspace_check(tmp_workspace)
-    assert "by_song" in out
-    assert "total_errors" in out
-    assert out["total_errors"] > 0
-    # 每首歌都该有自己的 bucket
-    song_keys = set(out["by_song"].keys())
-    assert any("歌手_A_扒谱者" in k for k in song_keys)
-    assert any("歌手_B_扒谱者" in k for k in song_keys)
-
-
-def test_audit_run_workspace_check_empty_workspace(tmp_workspace):
-    out = mcp_server.audit_run_workspace_check(tmp_workspace)
-    assert out["by_song"] == {}
-    assert out["total_errors"] == 0
+def test_fs_list_dir_missing_path_returns_error(tmp_workspace):
+    out = mcp_server.fs_list_dir(os.path.join(tmp_workspace, "nope"))
+    assert "error" in out
 
 
 # ============================================================
-#  audit_get_prior_review
+#  audit_list_errors
 # ============================================================
 
 
-def test_audit_get_prior_review_returns_entries(tmp_review_log):
-    review_log.append(chat_id="c1", song="望春风", state="1.4", result="pass", summary="ok")
-    out = mcp_server.audit_get_prior_review("望春风")
-    assert "entries" in out
-    assert len(out["entries"]) == 1
-    assert out["entries"][0]["state"] == "1.4"
+def test_audit_list_errors_empty_song_reports_missing(tmp_workspace):
+    """空 song folder → 报一堆 MISSING_DIR / MISSING_FILE。"""
+    song = os.path.join(tmp_workspace, "歌手_A_扒谱者")
+    os.makedirs(song)
+    out = mcp_server.audit_list_errors(song)
+    assert out["by_code"]  # 至少有错
+    # MISSING_FILE 错误项应该有 candidates 字段(虽然此时全空)
+    for e in out["errors"]:
+        if e["code"] == "MISSING_FILE":
+            assert "candidates" in e
+            assert e["candidates"] == []
 
 
-def test_audit_get_prior_review_no_history(tmp_review_log):
-    out = mcp_server.audit_get_prior_review("从未见过")
-    assert out["entries"] == []
+def test_audit_list_errors_candidates_finds_orphan_in_sibling_song(tmp_workspace):
+    """缺文件错误,工作区另一首歌里有同名 → 候选清单标 other_song。"""
+    song = os.path.join(tmp_workspace, "歌手_A_扒谱者")
+    for d in ("分轨wav", "总轨wav", "midi", "csv", "混音工程原文件"):
+        os.makedirs(os.path.join(song, d))
+    # 在另一首歌里放一份 A_Vocal_A.wav(checker 期望的命名带歌曲名前缀)
+    sibling = os.path.join(tmp_workspace, "歌手_B_扒谱者", "分轨wav")
+    os.makedirs(sibling)
+    orphan = os.path.join(sibling, "A_Vocal_A.wav")
+    open(orphan, "wb").close()
+
+    out = mcp_server.audit_list_errors(song)
+    missing_vocal = [
+        e for e in out["errors"]
+        if e["code"] == "MISSING_FILE" and e.get("expected", {}).get("filename") == "A_Vocal_A.wav"
+    ]
+    assert missing_vocal, "应该报 A_Vocal_A.wav 缺失"
+    cand = missing_vocal[0]["candidates"]
+    assert len(cand) == 1
+    assert cand[0]["scope"] == "other_song"
+    assert cand[0]["path"] == orphan
 
 
-# ============================================================
-#  fix_propose_csv_header_rewrite
-# ============================================================
+def test_audit_list_errors_candidates_finds_orphan_in_wrong_subdir(tmp_workspace):
+    """同首歌错的子目录里有同名文件 → 候选清单标 this_song。"""
+    song = os.path.join(tmp_workspace, "歌手_A_扒谱者")
+    for d in ("分轨wav", "总轨wav", "midi", "csv", "混音工程原文件"):
+        os.makedirs(os.path.join(song, d))
+    # A_Vocal_A.wav 跑到了 csv/ 下(放错位置)
+    wrong = os.path.join(song, "csv", "A_Vocal_A.wav")
+    open(wrong, "wb").close()
 
-
-def test_csv_header_rewrite_beat_wrong_case(tmp_workspace):
-    p = os.path.join(tmp_workspace, "song_Beat.csv")
-    Path(p).write_text("time,label\n00:00,intro\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_header_rewrite(p)
-    assert len(out["ops"]) == 1
-    op = out["ops"][0]
-    assert op["type"] == "write_text"
-    assert op["path"] == p
-    assert op["content"].startswith("TIME,LABEL\n")
-    assert "00:00,intro" in op["content"]
-
-
-def test_csv_header_rewrite_beat_already_correct(tmp_workspace):
-    p = os.path.join(tmp_workspace, "song_Beat.csv")
-    Path(p).write_text("TIME,LABEL\n00:00,intro\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_header_rewrite(p)
-    assert out["ops"] == []
-    assert "已正确" in out["skipped"]
-
-
-def test_csv_header_rewrite_instr_map_csv(tmp_workspace):
-    p = os.path.join(tmp_workspace, "乐器音源对照表.csv")
-    Path(p).write_text("instrument,source\n钢琴1,Kontakt\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_header_rewrite(p)
-    assert len(out["ops"]) == 1
-    assert out["ops"][0]["content"].startswith("乐器,音源\n")
-
-
-def test_csv_header_rewrite_structure_skips(tmp_workspace):
-    """Structure.csv 表头是内容驱动,无法自动修。"""
-    p = os.path.join(tmp_workspace, "song_Structure.csv")
-    Path(p).write_text("intro,verse\n00:00,00:30\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_header_rewrite(p)
-    assert out["ops"] == []
-    assert "Structure" in out["skipped"]
-
-
-def test_csv_header_rewrite_unknown_type_skips(tmp_workspace):
-    p = os.path.join(tmp_workspace, "random.csv")
-    Path(p).write_text("a,b\n1,2\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_header_rewrite(p)
-    assert out["ops"] == []
-    assert "未知 CSV 类型" in out["skipped"]
-
-
-def test_csv_header_rewrite_file_not_found(tmp_workspace):
-    p = os.path.join(tmp_workspace, "nonexistent_Beat.csv")
-    out = mcp_server.fix_propose_csv_header_rewrite(p)
-    assert out["ok"] is False
-    assert out["code"] == "FILE_NOT_FOUND"
-
-
-# ============================================================
-#  fix_propose_csv_time_zero_pad
-# ============================================================
-
-
-def test_csv_time_zero_pad_fixes_single_digits(tmp_workspace):
-    p = os.path.join(tmp_workspace, "song_Beat.csv")
-    Path(p).write_text("TIME,LABEL\n0:5,intro\n1:30,verse\n0:0,outro\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_time_zero_pad(p)
-    assert out["fixes"] == 3  # 0:5 / 1:30 / 0:0
-    op = out["ops"][0]
-    assert "00:05,intro" in op["content"]
-    assert "01:30,verse" in op["content"]
-    assert "00:00,outro" in op["content"]
-
-
-def test_csv_time_zero_pad_already_correct(tmp_workspace):
-    p = os.path.join(tmp_workspace, "song_Beat.csv")
-    Path(p).write_text("TIME,LABEL\n00:05,intro\n01:30,verse\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_time_zero_pad(p)
-    assert out["fixes"] == 0
-    assert out["ops"] == []
-
-
-def test_csv_time_zero_pad_no_times_in_file(tmp_workspace):
-    p = os.path.join(tmp_workspace, "乐器音源对照表.csv")
-    Path(p).write_text("乐器,音源\n钢琴1,Kontakt\n", encoding="utf-8")
-    out = mcp_server.fix_propose_csv_time_zero_pad(p)
-    assert out["fixes"] == 0
-    assert out["ops"] == []
-
-
-def test_csv_time_zero_pad_structure_csv(tmp_workspace):
-    p = os.path.join(tmp_workspace, "song_Structure.csv")
-    Path(p).write_text(
-        "Intro,Verse,Chorus\n0:2,0:37,1:33\n",
-        encoding="utf-8",
-    )
-    out = mcp_server.fix_propose_csv_time_zero_pad(p)
-    assert out["fixes"] == 3  # 0:2 / 0:37 / 1:33
-    assert "00:02" in out["ops"][0]["content"]
-    assert "00:37" in out["ops"][0]["content"]
-    assert "01:33" in out["ops"][0]["content"]
-
-
-def test_csv_time_zero_pad_file_not_found(tmp_workspace):
-    p = os.path.join(tmp_workspace, "nonexistent.csv")
-    out = mcp_server.fix_propose_csv_time_zero_pad(p)
-    assert out["ok"] is False
-    assert out["code"] == "FILE_NOT_FOUND"
+    out = mcp_server.audit_list_errors(song)
+    missing_vocal = [
+        e for e in out["errors"]
+        if e["code"] == "MISSING_FILE" and e.get("expected", {}).get("filename") == "A_Vocal_A.wav"
+    ]
+    assert missing_vocal
+    cand = missing_vocal[0]["candidates"]
+    assert any(c["scope"] == "this_song" and c["path"] == wrong for c in cand)
 
 
 # ============================================================
@@ -362,3 +276,241 @@ def test_execute_ops_write_text_in_mixed_batch(tmp_workspace):
     assert result.errors == []
     assert len(result.executed) == 2
     assert Path(new_csv).read_text(encoding="utf-8") == "TIME,LABEL\n00:00,intro\n"
+
+
+# ============================================================
+#  fixers.simulate_ops (dry-run validation)
+# ============================================================
+
+
+def test_simulate_basic_rename(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.csv")
+    Path(p).write_text("x", encoding="utf-8")
+    sim = fixers.simulate_ops(
+        [{"type": "rename", "src": p, "dst": os.path.join(tmp_workspace, "b.csv")}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_conflict == []
+    assert len(sim.would_execute) == 1
+    assert sim.would_execute[0]["type"] == "rename"
+
+
+def test_simulate_detects_dst_exists(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.csv")
+    dst = os.path.join(tmp_workspace, "b.csv")
+    Path(src).write_text("x", encoding="utf-8")
+    Path(dst).write_text("y", encoding="utf-8")
+    sim = fixers.simulate_ops(
+        [{"type": "rename", "src": src, "dst": dst}],
+        workspace_root=tmp_workspace,
+    )
+    assert len(sim.would_conflict) == 1
+    assert sim.would_conflict[0]["code"] == "DST_EXISTS"
+
+
+def test_simulate_detects_src_missing(tmp_workspace):
+    sim = fixers.simulate_ops(
+        [{"type": "delete", "path": os.path.join(tmp_workspace, "nope.csv")}],
+        workspace_root=tmp_workspace,
+    )
+    assert len(sim.would_conflict) == 1
+    assert sim.would_conflict[0]["code"] == "SRC_MISSING"
+
+
+def test_simulate_detects_path_outside_workspace(tmp_workspace):
+    sim = fixers.simulate_ops(
+        [{"type": "delete", "path": "/etc/passwd" if os.name != "nt" else "C:/Windows/notepad.exe"}],
+        workspace_root=tmp_workspace,
+    )
+    assert len(sim.would_conflict) == 1
+    assert sim.would_conflict[0]["code"] == "PATH_OUTSIDE_WORKSPACE"
+
+
+def test_simulate_detects_ext_not_allowed(tmp_workspace):
+    sim = fixers.simulate_ops(
+        [{"type": "write_text", "path": os.path.join(tmp_workspace, "x.wav"), "content": "fake"}],
+        workspace_root=tmp_workspace,
+    )
+    assert len(sim.would_conflict) == 1
+    assert sim.would_conflict[0]["code"] == "EXT_NOT_ALLOWED"
+
+
+def test_simulate_chained_rename_then_move(tmp_workspace):
+    """先 rename a→b,再 move b 到 sub/。simulate 应理解链式状态。"""
+    a = os.path.join(tmp_workspace, "a.csv")
+    b = os.path.join(tmp_workspace, "b.csv")
+    sub = os.path.join(tmp_workspace, "sub")
+    os.makedirs(sub)
+    Path(a).write_text("x", encoding="utf-8")
+    sim = fixers.simulate_ops(
+        [
+            {"type": "rename", "src": a, "dst": b},
+            {"type": "move", "src": a, "dst_dir": sub},  # 用原始 src,simulate 通过 predicted_path_updates 解
+        ],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_conflict == []
+    assert len(sim.would_execute) == 2
+
+
+# ============================================================
+#  fix_execute_plan: simulate + auto-mode gating + diff echo
+# ============================================================
+
+
+@pytest.fixture
+def reset_simulate_cache():
+    """每个测试前清空 simulate cache,避免互相影响。"""
+    mcp_server._simulate_cache.clear()
+    yield
+    mcp_server._simulate_cache.clear()
+
+
+@pytest.fixture
+def auto_mode(monkeypatch):
+    """临时把 execution_mode 切到 auto。"""
+    from sidecar import config
+    monkeypatch.setattr(
+        config, "get_config",
+        lambda: config.Config(preferences=config.PreferencesConfig(execution_mode="auto"))
+    )
+    # mcp_server import 时 from sidecar.config import get_config,模块内绑定也要 patch
+    monkeypatch.setattr(
+        mcp_server, "get_config",
+        lambda: config.Config(preferences=config.PreferencesConfig(execution_mode="auto"))
+    )
+
+
+def test_fix_execute_plan_simulate_returns_preview(tmp_workspace, reset_simulate_cache):
+    p = os.path.join(tmp_workspace, "a.csv")
+    Path(p).write_text("x", encoding="utf-8")
+    ops = [{"type": "rename", "src": p, "dst": os.path.join(tmp_workspace, "b.csv")}]
+    out = mcp_server.fix_execute_plan(ops, workspace_root=tmp_workspace, simulate=True)
+    assert out["simulated"] is True
+    assert len(out["would_execute"]) == 1
+    assert "ops_hash" in out
+    # simulate 不碰磁盘
+    assert os.path.exists(p)
+
+
+def test_fix_execute_plan_auto_mode_rejects_without_simulate(tmp_workspace, reset_simulate_cache, auto_mode):
+    p = os.path.join(tmp_workspace, "a.csv")
+    Path(p).write_text("x", encoding="utf-8")
+    out = mcp_server.fix_execute_plan(
+        [{"type": "rename", "src": p, "dst": os.path.join(tmp_workspace, "b.csv")}],
+        workspace_root=tmp_workspace,
+    )
+    assert out["ok"] is False
+    assert out["code"] == "SIMULATE_REQUIRED"
+    # 文件没动
+    assert os.path.exists(p)
+
+
+def test_fix_execute_plan_auto_mode_accepts_after_simulate(tmp_workspace, reset_simulate_cache, auto_mode):
+    p = os.path.join(tmp_workspace, "a.csv")
+    Path(p).write_text("x", encoding="utf-8")
+    ops = [{"type": "rename", "src": p, "dst": os.path.join(tmp_workspace, "b.csv")}]
+    mcp_server.fix_execute_plan(ops, workspace_root=tmp_workspace, simulate=True)
+    out = mcp_server.fix_execute_plan(ops, workspace_root=tmp_workspace, simulate=False)
+    assert "executed" in out
+    assert len(out["executed"]) == 1
+    assert not os.path.exists(p)
+    assert os.path.exists(os.path.join(tmp_workspace, "b.csv"))
+
+
+def test_fix_execute_plan_confirm_mode_no_simulate_required(tmp_workspace, reset_simulate_cache):
+    """confirm 模式(默认)不查 simulate 集合 —— 用户卡片是 gate,不再二次校验。"""
+    p = os.path.join(tmp_workspace, "a.csv")
+    Path(p).write_text("x", encoding="utf-8")
+    out = mcp_server.fix_execute_plan(
+        [{"type": "rename", "src": p, "dst": os.path.join(tmp_workspace, "b.csv")}],
+        workspace_root=tmp_workspace,
+        simulate=False,
+    )
+    assert "executed" in out
+    assert len(out["executed"]) == 1
+
+
+def test_fix_execute_plan_auto_mode_hash_mismatch_rejected(tmp_workspace, reset_simulate_cache, auto_mode):
+    """auto 模式:simulate 过 op A,但 execute 时换成 op B —— hash 不一致 → 拒。"""
+    a = os.path.join(tmp_workspace, "a.csv")
+    Path(a).write_text("x", encoding="utf-8")
+    mcp_server.fix_execute_plan(
+        [{"type": "rename", "src": a, "dst": os.path.join(tmp_workspace, "b.csv")}],
+        workspace_root=tmp_workspace,
+        simulate=True,
+    )
+    # execute 时改了 dst
+    out = mcp_server.fix_execute_plan(
+        [{"type": "rename", "src": a, "dst": os.path.join(tmp_workspace, "c.csv")}],
+        workspace_root=tmp_workspace,
+        simulate=False,
+    )
+    assert out.get("code") == "SIMULATE_REQUIRED"
+
+
+# ============================================================
+#  read_text_file
+# ============================================================
+
+
+def test_read_text_file_full(tmp_workspace):
+    p = os.path.join(tmp_workspace, "small.csv")
+    Path(p).write_text("TIME,LABEL\n00:01,Intro\n00:30,Verse\n", encoding="utf-8")
+    out = mcp_server.read_text_file(p)
+    assert out["total_lines"] == 3
+    assert out["truncated"] is False
+    assert "00:01,Intro" in out["content"]
+
+
+def test_read_text_file_missing(tmp_workspace):
+    out = mcp_server.read_text_file(os.path.join(tmp_workspace, "nope.csv"))
+    assert out["ok"] is False
+    assert out["code"] == "FILE_NOT_FOUND"
+
+
+def test_read_text_file_line_range(tmp_workspace):
+    p = os.path.join(tmp_workspace, "beat.csv")
+    Path(p).write_text("\n".join(f"00:{i:02d},X" for i in range(20)) + "\n", encoding="utf-8")
+    out = mcp_server.read_text_file(p, line_range=[5, 8])
+    assert out["truncated"] is True
+    assert out["line_range"] == [5, 8]
+    assert out["total_lines"] == 20
+    # 1-based: 第 5-8 行,对应 "00:04" 到 "00:07"
+    assert "00:04,X" in out["content"]
+    assert "00:07,X" in out["content"]
+    assert "00:03,X" not in out["content"]
+    assert "00:08,X" not in out["content"]
+
+
+def test_read_text_file_auto_truncates_large(tmp_workspace):
+    p = os.path.join(tmp_workspace, "big.csv")
+    # 100 行 × ~100 字节 = ~10KB,超过 8KB 阈值
+    Path(p).write_text("\n".join(f"row {i}: " + "x" * 100 for i in range(100)) + "\n", encoding="utf-8")
+    out = mcp_server.read_text_file(p)
+    assert out["truncated"] is True
+    assert out["total_lines"] == 100
+    assert "omitted_lines" in out
+    assert "[omitted" in out["content"]
+    # head + tail 都在
+    assert "row 0:" in out["content"]
+    assert "row 99:" in out["content"]
+    # 中段被省
+    assert "row 50:" not in out["content"]
+
+
+def test_read_text_file_bad_range_returns_error(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.txt")
+    Path(p).write_text("hi\n", encoding="utf-8")
+    out = mcp_server.read_text_file(p, line_range=[1, 2, 3])  # 错误格式
+    assert out["ok"] is False
+    assert out["code"] == "READ_FAILED"
+
+
+def test_read_text_file_utf8_bom_stripped(tmp_workspace):
+    p = os.path.join(tmp_workspace, "bom.csv")
+    # 写 utf-8 BOM + 内容
+    with open(p, "wb") as f:
+        f.write(b"\xef\xbb\xbfTIME,LABEL\n")
+    out = mcp_server.read_text_file(p)
+    assert out["content"].startswith("TIME,LABEL")  # 没有 BOM

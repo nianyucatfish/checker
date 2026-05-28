@@ -380,3 +380,232 @@ def test_execute_ops_rename_cascade_child_then_parent(tmp_workspace):
     result = fixers.execute_ops(ops, workspace_root=tmp_workspace)
     assert result.errors == []
     assert os.path.exists(os.path.join(new_parent, "new_child.txt"))
+
+
+# -----------------------------
+#  copy op
+# -----------------------------
+
+
+def test_execute_ops_copy_preserves_source(tmp_workspace):
+    """典型场景:混音工程缺人声,从分轨 copy 一份。源文件留下。"""
+    src = os.path.join(tmp_workspace, "stems", "Vocal_A.wav")
+    os.makedirs(os.path.dirname(src))
+    Path(src).write_text("audio bytes", encoding="utf-8")
+    dst_dir = os.path.join(tmp_workspace, "proj")
+
+    result = fixers.execute_ops(
+        [{"type": "copy", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    expected_dst = os.path.join(dst_dir, "Vocal_A.wav")
+    assert os.path.exists(expected_dst)
+    assert os.path.exists(src)  # 源保留
+    assert result.executed[0]["type"] == "copy"
+    assert result.executed[0]["src"] == src
+    assert result.executed[0]["dst"] == expected_dst
+
+
+def test_execute_ops_copy_creates_dst_dir(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.txt")
+    Path(src).write_text("x", encoding="utf-8")
+    dst_dir = os.path.join(tmp_workspace, "new_folder", "deeper")  # 不存在
+
+    result = fixers.execute_ops(
+        [{"type": "copy", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    assert os.path.exists(os.path.join(dst_dir, "a.txt"))
+
+
+def test_execute_ops_copy_rejects_when_dst_exists(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.txt")
+    Path(src).write_text("src", encoding="utf-8")
+    dst_dir = os.path.join(tmp_workspace, "sub")
+    os.makedirs(dst_dir)
+    Path(os.path.join(dst_dir, "a.txt")).write_text("blocker", encoding="utf-8")
+
+    result = fixers.execute_ops(
+        [{"type": "copy", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("目标已存在" in e for e in result.errors)
+    assert os.path.exists(src)
+
+
+def test_execute_ops_copy_rejects_out_of_workspace(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.txt")
+    Path(src).write_text("x", encoding="utf-8")
+    bad_dir = "C:/Windows/Temp" if os.name == "nt" else "/tmp"
+
+    result = fixers.execute_ops(
+        [{"type": "copy", "src": src, "dst_dir": bad_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("路径越界" in e for e in result.errors)
+
+
+# -----------------------------
+#  text_edit op
+# -----------------------------
+
+
+def test_execute_ops_text_edit_basic(tmp_workspace):
+    p = os.path.join(tmp_workspace, "header.csv")
+    Path(p).write_text("TIME ,LABEL\n00:01,Intro\n", encoding="utf-8")
+
+    result = fixers.execute_ops(
+        [{"type": "text_edit", "path": p, "old_string": "TIME ,LABEL", "new_string": "TIME,LABEL"}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    assert Path(p).read_text(encoding="utf-8") == "TIME,LABEL\n00:01,Intro\n"
+    assert result.executed[0]["type"] == "text_edit"
+    assert result.executed[0]["replacements"] == 1
+
+
+def test_execute_ops_text_edit_replace_all(tmp_workspace):
+    p = os.path.join(tmp_workspace, "beat.csv")
+    Path(p).write_text("0:1,a\n0:2,b\n0:3,c\n", encoding="utf-8")
+
+    result = fixers.execute_ops(
+        [{"type": "text_edit", "path": p, "old_string": "0:", "new_string": "00:0", "replace_all": True}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.errors == []
+    assert Path(p).read_text(encoding="utf-8") == "00:01,a\n00:02,b\n00:03,c\n"
+    assert result.executed[0]["replacements"] == 3
+
+
+def test_execute_ops_text_edit_not_found_raises(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.txt")
+    Path(p).write_text("hello world\n", encoding="utf-8")
+    result = fixers.execute_ops(
+        [{"type": "text_edit", "path": p, "old_string": "nonexistent", "new_string": "X"}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("old_string 未找到" in e for e in result.errors)
+    # 文件未被改
+    assert Path(p).read_text(encoding="utf-8") == "hello world\n"
+
+
+def test_execute_ops_text_edit_ambiguous_rejects(tmp_workspace):
+    """old_string 多次出现且没指定 replace_all → 报错,不动文件。"""
+    p = os.path.join(tmp_workspace, "a.txt")
+    Path(p).write_text("foo bar foo\n", encoding="utf-8")
+    result = fixers.execute_ops(
+        [{"type": "text_edit", "path": p, "old_string": "foo", "new_string": "X"}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("出现 2 次" in e for e in result.errors)
+    assert Path(p).read_text(encoding="utf-8") == "foo bar foo\n"
+
+
+def test_execute_ops_text_edit_rejects_disallowed_ext(tmp_workspace):
+    """text_edit 复用 write_text 白名单,.wav 不在允许列表。"""
+    p = os.path.join(tmp_workspace, "a.wav")
+    Path(p).write_text("not actually audio", encoding="utf-8")
+    result = fixers.execute_ops(
+        [{"type": "text_edit", "path": p, "old_string": "not", "new_string": "x"}],
+        workspace_root=tmp_workspace,
+    )
+    assert result.executed == []
+    assert any("拒绝扩展名" in e for e in result.errors)
+
+
+# -----------------------------
+#  simulate_ops:copy / text_edit dry-run
+# -----------------------------
+
+
+def test_simulate_copy_basic(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.txt")
+    Path(src).write_text("x", encoding="utf-8")
+    dst_dir = os.path.join(tmp_workspace, "sub")
+
+    sim = fixers.simulate_ops(
+        [{"type": "copy", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_conflict == []
+    assert sim.would_execute[0]["type"] == "copy"
+    # 源还在(simulate 没动磁盘)
+    assert os.path.exists(src)
+
+
+def test_simulate_copy_src_missing(tmp_workspace):
+    src = os.path.join(tmp_workspace, "ghost.txt")  # 不存在
+    dst_dir = os.path.join(tmp_workspace, "sub")
+
+    sim = fixers.simulate_ops(
+        [{"type": "copy", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_execute == []
+    assert sim.would_conflict[0]["code"] == "SRC_MISSING"
+
+
+def test_simulate_copy_dst_exists(tmp_workspace):
+    src = os.path.join(tmp_workspace, "a.txt")
+    Path(src).write_text("x", encoding="utf-8")
+    dst_dir = os.path.join(tmp_workspace, "sub")
+    os.makedirs(dst_dir)
+    Path(os.path.join(dst_dir, "a.txt")).write_text("blocker", encoding="utf-8")
+
+    sim = fixers.simulate_ops(
+        [{"type": "copy", "src": src, "dst_dir": dst_dir}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_execute == []
+    assert sim.would_conflict[0]["code"] == "DST_EXISTS"
+
+
+def test_simulate_text_edit_not_found(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.txt")
+    Path(p).write_text("hello\n", encoding="utf-8")
+    sim = fixers.simulate_ops(
+        [{"type": "text_edit", "path": p, "old_string": "missing", "new_string": "X"}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_execute == []
+    assert sim.would_conflict[0]["code"] == "EDIT_NOT_FOUND"
+
+
+def test_simulate_text_edit_ambiguous(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.txt")
+    Path(p).write_text("foo foo foo\n", encoding="utf-8")
+    sim = fixers.simulate_ops(
+        [{"type": "text_edit", "path": p, "old_string": "foo", "new_string": "X"}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_execute == []
+    assert sim.would_conflict[0]["code"] == "EDIT_AMBIGUOUS"
+    assert "3 matches" in sim.would_conflict[0]["detail"]
+
+
+def test_simulate_text_edit_replace_all_ok(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.txt")
+    Path(p).write_text("foo foo foo\n", encoding="utf-8")
+    sim = fixers.simulate_ops(
+        [{"type": "text_edit", "path": p, "old_string": "foo", "new_string": "X", "replace_all": True}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_conflict == []
+    assert sim.would_execute[0]["replacements"] == 3
+
+
+def test_simulate_text_edit_ext_not_allowed(tmp_workspace):
+    p = os.path.join(tmp_workspace, "a.wav")
+    Path(p).write_text("not audio", encoding="utf-8")
+    sim = fixers.simulate_ops(
+        [{"type": "text_edit", "path": p, "old_string": "not", "new_string": "X"}],
+        workspace_root=tmp_workspace,
+    )
+    assert sim.would_execute == []
+    assert sim.would_conflict[0]["code"] == "EXT_NOT_ALLOWED"

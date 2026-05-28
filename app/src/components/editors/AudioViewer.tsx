@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, AlertCircle, FileAudio, ZoomIn, ZoomOut, RotateCcw } from "lucide-react";
+import { Loader2, AlertCircle, FileAudio, ZoomIn, ZoomOut, RotateCcw, Play, Pause, Volume2 } from "lucide-react";
 import { getAudioMetadata, getAudioPeaks, rawFileUrl, readCsv } from "../../api";
 import type { AudioMetadataOut, AudioPeaksOut } from "../../api";
 import { Metronome, type BeatMarker } from "../../lib/metronome";
@@ -366,6 +366,11 @@ export function AudioViewer({ path }: Props) {
   const [structure, setStructure] = useState<StructureMarker[]>([]);
   const [metronomeVolPct, setMetronomeVolPct] = useState(150);
   const [renderToggleBusy, setRenderToggleBusy] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState(() => {
+    const saved = Number(localStorage.getItem("audio_qc.audio_volume"));
+    return Number.isFinite(saved) && saved >= 0 && saved <= 1 ? saved : 1;
+  });
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -418,8 +423,35 @@ export function AudioViewer({ path }: Props) {
       });
     return () => {
       cancelled = true;
+      // 释放 <audio> 占用的句柄(sidecar /files/raw 端的文件锁),否则切文件 / 外部
+      // 文件操作可能撞到 Win 文件锁。pause + src 清空 + load() 是浏览器侧的标准释放路径。
+      const a = audioRef.current;
+      if (a) {
+        try {
+          a.pause();
+          a.removeAttribute("src");
+          a.load();
+        } catch { /* ignore */ }
+      }
     };
   }, [path]);
+
+  // 全局 audio:release 事件 —— Explorer 在文件写操作前广播,所有 AudioViewer 释放句柄,
+  // 避免 Win 文件锁阻塞 rename / delete / move 等。
+  useEffect(() => {
+    const onRelease = () => {
+      const a = audioRef.current;
+      if (a) {
+        try {
+          a.pause();
+          a.removeAttribute("src");
+          a.load();
+        } catch { /* ignore */ }
+      }
+    };
+    window.addEventListener("audio:release", onRelease);
+    return () => window.removeEventListener("audio:release", onRelease);
+  }, []);
 
   // 服务端算 peaks
   useEffect(() => {
@@ -500,11 +532,13 @@ export function AudioViewer({ path }: Props) {
     const a = audioRef.current;
     if (!a) return;
     const onPlay = () => {
+      setIsPlaying(true);
       if (beatRender && metronomeRef.current) {
         metronomeRef.current.start(a);
       }
     };
     const onPause = () => {
+      setIsPlaying(false);
       metronomeRef.current?.stop();
     };
     const onSeeked = () => {
@@ -521,6 +555,39 @@ export function AudioViewer({ path }: Props) {
       a.removeEventListener("ended", onPause);
     };
   }, [beatRender, audioUrl]);
+
+  // audio 元素的 volume 同步 + 持久化
+  useEffect(() => {
+    const a = audioRef.current;
+    if (a) a.volume = volume;
+    localStorage.setItem("audio_qc.audio_volume", String(volume));
+  }, [volume]);
+
+  // play/pause toggle
+  const togglePlay = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) a.play().catch((e) => console.warn("[audio] play failed:", e));
+    else a.pause();
+  };
+
+  // 全局空格 → play/pause(本编辑器聚焦时)。在输入框/textarea/可编辑节点内不拦,
+  // 避免抢用户的输入。AudioViewer 卸载即注销。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (t.isContentEditable) return;
+      }
+      e.preventDefault();
+      togglePlay();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // metronome 音量跟随 slider
   useEffect(() => {
@@ -689,6 +756,34 @@ export function AudioViewer({ path }: Props) {
     }
   };
 
+  // agent 的 playback_toggle_beat_render / _structure_render 最终走到这。
+  // App 把 main → renderer IPC 转成 window CustomEvent;AudioViewer idempotent 触发 toggle
+  // (只在状态需要改变时才调)。用 ref 保引用,免 listener 每次 rebind。
+  const toggleBeatRef = useRef(toggleBeat);
+  const toggleStructureRef = useRef(toggleStructure);
+  const beatRenderRef = useRef(beatRender);
+  const structureRenderRef = useRef(structureRender);
+  toggleBeatRef.current = toggleBeat;
+  toggleStructureRef.current = toggleStructure;
+  beatRenderRef.current = beatRender;
+  structureRenderRef.current = structureRender;
+  useEffect(() => {
+    const onBeat = (e: Event) => {
+      const want = !!(e as CustomEvent<{ on: boolean }>).detail?.on;
+      if (want !== beatRenderRef.current) void toggleBeatRef.current();
+    };
+    const onStruct = (e: Event) => {
+      const want = !!(e as CustomEvent<{ on: boolean }>).detail?.on;
+      if (want !== structureRenderRef.current) void toggleStructureRef.current();
+    };
+    window.addEventListener("playback:toggle:beat", onBeat);
+    window.addEventListener("playback:toggle:structure", onStruct);
+    return () => {
+      window.removeEventListener("playback:toggle:beat", onBeat);
+      window.removeEventListener("playback:toggle:structure", onStruct);
+    };
+  }, []);
+
   if (error) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center text-danger gap-2 px-6">
@@ -711,13 +806,37 @@ export function AudioViewer({ path }: Props) {
   return (
     <div className="flex-1 flex flex-col p-6 gap-4 overflow-auto scroll-stable">
       <div className="flex items-center gap-3 text-fg-muted">
-        <FileAudio size={28} />
-        <div className="flex flex-col flex-1">
-          <span className="text-sm">音频预览</span>
-          <span className="text-xs text-fg-subtle">
+        <FileAudio size={28} className="shrink-0" />
+        <div className="flex flex-col flex-1 min-w-0">
+          <span className="text-sm truncate">音频预览</span>
+          <span className="text-xs text-fg-subtle truncate" title="滚轮缩放 · 拖动平移 · 单击跳转 · 播放时自动跟随">
             滚轮缩放 · 拖动平移 · 单击跳转 · 播放时自动跟随
           </span>
         </div>
+        {/* 播放控制(替代原生 audio 条,避免底栏挤压导致控件消失) */}
+        <button
+          onClick={togglePlay}
+          className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-fg-muted hover:text-fg hover:bg-bg-hover"
+          title={isPlaying ? "暂停" : "播放"}
+        >
+          {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+        </button>
+        <div className="flex items-center gap-1 text-xs text-fg-subtle px-2">
+          <Volume2 size={12} />
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={volume}
+            onChange={(e) => setVolume(Number(e.target.value))}
+            className="w-20 selectable"
+            title="播放音量"
+          />
+        </div>
+        <span className="font-mono text-xs text-fg-muted tabular-nums px-1">
+          {formatDuration(currentSec)} / {formatDuration(duration)}
+        </span>
         <div className="flex items-center gap-1 text-xs">
           <button
             onClick={() => zoomBy(1 / 1.5)}
@@ -846,13 +965,13 @@ export function AudioViewer({ path }: Props) {
         </div>
       </div>
 
-      {/* 播放器 */}
+      {/* 隐藏的 <audio> 元素 —— 不显示原生条(底栏挤压时会缩到看不见),
+          play/pause / volume / seek 都在波形上方 toolbar 里操作。 */}
       <audio
         ref={audioRef}
-        controls
         src={audioUrl}
-        className="w-full"
         preload="metadata"
+        className="hidden"
       />
 
       {/* 元信息 */}

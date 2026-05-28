@@ -16,11 +16,27 @@
 
 from __future__ import annotations
 
+import csv
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from sidecar.config import get_config
 from sidecar.tencent_sheet import TencentSheetError, get_client
+
+
+class AmbiguousSongError(TencentSheetError):
+    """同 reviewer 下同 song_name 多行匹配,需要 row_index 消歧。
+
+    携带 candidates:[{row_index, song_name, owner, original_singer}],owner 已打码。
+    """
+
+    def __init__(self, song_name: str, candidates: list[dict]):
+        super().__init__(
+            f"歌 '{song_name}' 有 {len(candidates)} 行匹配,需要 row_index 消歧"
+        )
+        self.song_name = song_name
+        self.candidates = candidates
 
 
 # ============================================================
@@ -90,15 +106,27 @@ def _mask_name(name: str) -> str:
     return n[0] + "xx"
 
 
-def _mask_url(url: str) -> str:
-    """链接打码:保留前 30 字符 + '***'。空字符串保持空。
+def _normalize_zero(value: str) -> str:
+    """录混方常用 "0" 表示"没录混交付"(单份),业务上等同空。
 
-    保留 scheme + host + path 前缀,LLM 能识别"是 baidu 链接 / google drive"等基本属性,
-    但具体 share key / pwd 看不到。
+    专给 pan_mix_link 列用 —— 其他列里 "0" 可能是真数字(如评分),不要全表 normalize。
+    """
+    return "" if value.strip() == "0" else value
+
+
+def _mask_url(url: str) -> str:
+    """链接打码:**仅对格式合法的 URL 打码**,非 URL(空 / "0" / 乱填值)原样返回。
+
+    - 空 → 原样空串
+    - 不是 http(s):// 开头 → 原样返(让 reviewer 一眼看到"录混填了个 0"这种垃圾值,
+      而不是被打码成 "0***" 误以为是合法链接被打了)
+    - 合法 URL → 保留前 30 字符 + '***'(scheme+host+path 前缀,LLM 能识别厂商但拿不到 share key/pwd)
     """
     u = url.strip()
     if not u:
         return ""
+    if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
+        return u
     if len(u) <= 30:
         return u + "***"
     return u[:30] + "***"
@@ -361,6 +389,17 @@ def _validate_headers(header_row) -> None:
         raise TencentSheetError("sheet schema drift detected: " + "; ".join(drifts))
 
 
+def _load_rows() -> list[list[str]]:
+    fixture = get_config().agent_sandbox.sheet_fixture_path.strip()
+    if fixture:
+        path = Path(fixture)
+        if not path.is_file():
+            raise TencentSheetError(f"agent_sandbox.sheet_fixture_path 不存在:{fixture}")
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            return list(csv.reader(f))
+    return get_client().fetch_all()
+
+
 # ============================================================
 #  查询函数(暴露给 agent 工具)
 # ============================================================
@@ -373,7 +412,7 @@ def list_my_pending() -> list[PendingSong]:
             "user.reviewer_name not configured in config.toml; cannot determine current user"
         )
 
-    rows = get_client().fetch_all()
+    rows = _load_rows()
     if not rows:
         return []
     _validate_headers(rows[0])
@@ -395,14 +434,19 @@ def list_my_pending() -> list[PendingSong]:
     return out
 
 
-def get_song_meta(song_name: str) -> SongMeta:
+def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
     """拉本歌的分工表 meta + missing/invalid + 派生事实(1.1 验收用)。
 
     返回的 SongMeta 中人名 / 链接字段值已打码;original_singer 与非 PII 字段不打码。
     sidecar 内部 raw 真值仅在本函数局部变量里使用,不返回上层。
 
+    Args:
+        song_name: 歌名(分工表 col 1)。
+        row_index: 可选;歌名撞车时用 row_index 锁定唯一一行。撞车且未给 row_index → AmbiguousSongError。
+
     Raises:
         TencentSheetError: 配置缺 reviewer_name / song_name 不在当前用户范围 / API 挂等。
+        AmbiguousSongError: 同 song_name 多行匹配且未传 row_index。
     """
     reviewer = get_config().user.reviewer_name.strip()
     if not reviewer:
@@ -410,109 +454,129 @@ def get_song_meta(song_name: str) -> SongMeta:
             "user.reviewer_name not configured in config.toml; cannot determine current user"
         )
 
-    rows = get_client().fetch_all()
+    rows = _load_rows()
     if not rows:
         raise TencentSheetError(f"分工表为空,无法定位歌 '{song_name}'")
     _validate_headers(rows[0])
 
     target = song_name.strip()
-    for row_index, row in enumerate(rows[1:], start=2):
+    matches: list[tuple[int, list[str]]] = []
+    for ri, row in enumerate(rows[1:], start=2):
         if _cell(row, COL_REVIEWER) != reviewer:
             continue
         if _cell(row, COL_SONG_NAME) != target:
             continue
+        matches.append((ri, row))
 
-        # raw 真值(局部用,**不返**给 LLM)
-        raw = {
-            "song_name":              _cell(row, COL_SONG_NAME),
-            "owner":                  _cell(row, COL_OWNER),
-            "original_singer":        _cell(row, COL_ORIGINAL_SINGER),
-            "original_singer_gender": _cell(row, COL_ORIGINAL_SINGER_GENDER),
-            "genre":                  _cell(row, COL_GENRE),
-            "emotion":                _cell(row, COL_EMOTION),
-            "era":                    _cell(row, COL_ERA),
-            "transcribe_type":        _cell(row, COL_TRANSCRIBE_TYPE),
-            "transcribe_reviewer":    _cell(row, COL_TRANSCRIBE_REVIEWER),
-            "mix_owner":              _cell(row, COL_MIX_OWNER),
-            "mentor":                 _cell(row, COL_MENTOR),
-            "difficulty":             _cell(row, COL_DIFFICULTY),
-            "tempo_changes":          _cell(row, COL_TEMPO_CHANGES),
-            "four_pieces":            _cell(row, COL_FOUR_PIECES),
-            "microphone":             _cell(row, COL_MICROPHONE),
-            "sound_card":             _cell(row, COL_SOUND_CARD),
-            "recording_software":     _cell(row, COL_RECORDING_SOFTWARE),
-            "mixer":                  _cell(row, COL_MIXER),
-            "monitoring":             _cell(row, COL_MONITORING),
-            "vocal_a":                _cell(row, COL_VOCAL_A),
-            "vocal_a_gender":         _cell(row, COL_VOCAL_A_GENDER),
-            "a_score":                _cell(row, COL_A_SCORE),
-            "vocal_b":                _cell(row, COL_VOCAL_B),
-            "vocal_b_gender":         _cell(row, COL_VOCAL_B_GENDER),
-            "b_score":                _cell(row, COL_B_SCORE),
-            "backing":                _cell(row, COL_BACKING),
-            "backing_gender":         _cell(row, COL_BACKING_GENDER),
-            "pan_review_link":        _cell(row, COL_PAN_REVIEW_LINK),       # col 30
-            "pan_mix_link":           _cell(row, COL_PAN_MIX_REVIEW_LINK),   # col 32
-        }
+    if not matches:
+        raise TencentSheetError(f"歌 '{song_name}' 不在当前用户的验收范围内")
+    if len(matches) > 1 and row_index is None:
+        # 撞车:同名多行。拿打码后的 owner / original_singer 给上层做消歧提示
+        candidates = [
+            {
+                "row_index": ri,
+                "song_name": _cell(r, COL_SONG_NAME),
+                "owner": _mask_name(_cell(r, COL_OWNER)),
+                "original_singer": _cell(r, COL_ORIGINAL_SINGER),  # 不打码
+            }
+            for ri, r in matches
+        ]
+        raise AmbiguousSongError(song_name=song_name, candidates=candidates)
+    if row_index is not None:
+        sel = next((m for m in matches if m[0] == row_index), None)
+        if sel is None:
+            raise TencentSheetError(f"row_index={row_index} 不在歌 '{song_name}' 的匹配行内")
+        row_index_use, row = sel
+    else:
+        row_index_use, row = matches[0]
 
-        # 1) Missing
-        missing = [f for f in _REQUIRED_META_FIELDS if not raw.get(f, "").strip()]
+    # raw 真值(局部用,**不返**给 LLM)
+    raw = {
+        "song_name":              _cell(row, COL_SONG_NAME),
+        "owner":                  _cell(row, COL_OWNER),
+        "original_singer":        _cell(row, COL_ORIGINAL_SINGER),
+        "original_singer_gender": _cell(row, COL_ORIGINAL_SINGER_GENDER),
+        "genre":                  _cell(row, COL_GENRE),
+        "emotion":                _cell(row, COL_EMOTION),
+        "era":                    _cell(row, COL_ERA),
+        "transcribe_type":        _cell(row, COL_TRANSCRIBE_TYPE),
+        "transcribe_reviewer":    _cell(row, COL_TRANSCRIBE_REVIEWER),
+        "mix_owner":              _cell(row, COL_MIX_OWNER),
+        "mentor":                 _cell(row, COL_MENTOR),
+        "difficulty":             _cell(row, COL_DIFFICULTY),
+        "tempo_changes":          _cell(row, COL_TEMPO_CHANGES),
+        "four_pieces":            _cell(row, COL_FOUR_PIECES),
+        "microphone":             _cell(row, COL_MICROPHONE),
+        "sound_card":             _cell(row, COL_SOUND_CARD),
+        "recording_software":     _cell(row, COL_RECORDING_SOFTWARE),
+        "mixer":                  _cell(row, COL_MIXER),
+        "monitoring":             _cell(row, COL_MONITORING),
+        "vocal_a":                _cell(row, COL_VOCAL_A),
+        "vocal_a_gender":         _cell(row, COL_VOCAL_A_GENDER),
+        "a_score":                _cell(row, COL_A_SCORE),
+        "vocal_b":                _cell(row, COL_VOCAL_B),
+        "vocal_b_gender":         _cell(row, COL_VOCAL_B_GENDER),
+        "b_score":                _cell(row, COL_B_SCORE),
+        "backing":                _cell(row, COL_BACKING),
+        "backing_gender":         _cell(row, COL_BACKING_GENDER),
+        "pan_review_link":        _cell(row, COL_PAN_REVIEW_LINK),       # col 30
+        "pan_mix_link":           _normalize_zero(_cell(row, COL_PAN_MIX_REVIEW_LINK)),   # col 32; "0" 视作空(录混占位)
+    }
 
-        # 2) Invalid format(跑 raw 真值)
-        invalid = []
-        for f, validator in _FIELD_VALIDATORS.items():
-            reason = validator(raw[f])
-            if reason:
-                invalid.append({"field": f, "reason": reason})
+    # 1) Missing
+    missing = [f for f in _REQUIRED_META_FIELDS if not raw.get(f, "").strip()]
 
-        # 3) Derived(用 raw 真值算)
-        backing_count = _parse_backing_count(raw["backing"])
-        derived = DerivedFacts(
-            backing_count=backing_count,
-            expected_backing_files=_expected_backing_files(raw["song_name"], backing_count),
-            has_pan_review_link=bool(raw["pan_review_link"].strip()),
-            has_pan_mix_link=bool(raw["pan_mix_link"].strip()),
-        )
+    # 2) Invalid format(跑 raw 真值)
+    invalid = []
+    for f, validator in _FIELD_VALIDATORS.items():
+        reason = validator(raw[f])
+        if reason:
+            invalid.append({"field": f, "reason": reason})
 
-        # 4) 应用 PII 打码,组装 SongMeta
-        return SongMeta(
-            row_index=row_index,
-            song_name=raw["song_name"],
-            owner=_mask_name(raw["owner"]),
-            original_singer=raw["original_singer"],   # 公开艺人,不打码
-            transcribe_reviewer=_mask_name(raw["transcribe_reviewer"]),
-            mix_owner=_mask_name(raw["mix_owner"]),
-            mentor=_mask_name(raw["mentor"]),
-            vocal_a=_mask_name(raw["vocal_a"]),
-            vocal_b=_mask_name(raw["vocal_b"]),
-            backing=_mask_backing(raw["backing"]),
-            original_singer_gender=raw["original_singer_gender"],
-            vocal_a_gender=raw["vocal_a_gender"],
-            vocal_b_gender=raw["vocal_b_gender"],
-            backing_gender=raw["backing_gender"],
-            a_score=raw["a_score"],
-            b_score=raw["b_score"],
-            genre=raw["genre"],
-            emotion=raw["emotion"],
-            era=raw["era"],
-            transcribe_type=raw["transcribe_type"],
-            difficulty=raw["difficulty"],
-            tempo_changes=raw["tempo_changes"],
-            four_pieces=raw["four_pieces"],
-            microphone=raw["microphone"],
-            sound_card=raw["sound_card"],
-            recording_software=raw["recording_software"],
-            mixer=raw["mixer"],
-            monitoring=raw["monitoring"],
-            pan_review_link=_mask_url(raw["pan_review_link"]),
-            pan_mix_link=_mask_url(raw["pan_mix_link"]),
-            missing_required_fields=missing,
-            invalid_format_fields=invalid,
-            derived=derived,
-        )
+    # 3) Derived(用 raw 真值算)
+    backing_count = _parse_backing_count(raw["backing"])
+    derived = DerivedFacts(
+        backing_count=backing_count,
+        expected_backing_files=_expected_backing_files(raw["song_name"], backing_count),
+        has_pan_review_link=bool(raw["pan_review_link"].strip()),
+        has_pan_mix_link=bool(raw["pan_mix_link"].strip()),
+    )
 
-    raise TencentSheetError(
-        f"歌 '{song_name}' 不在当前用户的验收范围;无法返回 meta"
+    # 4) 应用 PII 打码,组装 SongMeta
+    return SongMeta(
+        row_index=row_index_use,
+        song_name=raw["song_name"],
+        owner=_mask_name(raw["owner"]),
+        original_singer=raw["original_singer"],   # 公开艺人,不打码
+        transcribe_reviewer=_mask_name(raw["transcribe_reviewer"]),
+        mix_owner=_mask_name(raw["mix_owner"]),
+        mentor=_mask_name(raw["mentor"]),
+        vocal_a=_mask_name(raw["vocal_a"]),
+        vocal_b=_mask_name(raw["vocal_b"]),
+        backing=_mask_backing(raw["backing"]),
+        original_singer_gender=raw["original_singer_gender"],
+        vocal_a_gender=raw["vocal_a_gender"],
+        vocal_b_gender=raw["vocal_b_gender"],
+        backing_gender=raw["backing_gender"],
+        a_score=raw["a_score"],
+        b_score=raw["b_score"],
+        genre=raw["genre"],
+        emotion=raw["emotion"],
+        era=raw["era"],
+        transcribe_type=raw["transcribe_type"],
+        difficulty=raw["difficulty"],
+        tempo_changes=raw["tempo_changes"],
+        four_pieces=raw["four_pieces"],
+        microphone=raw["microphone"],
+        sound_card=raw["sound_card"],
+        recording_software=raw["recording_software"],
+        mixer=raw["mixer"],
+        monitoring=raw["monitoring"],
+        pan_review_link=_mask_url(raw["pan_review_link"]),
+        pan_mix_link=_mask_url(raw["pan_mix_link"]),
+        missing_required_fields=missing,
+        invalid_format_fields=invalid,
+        derived=derived,
     )
 
 
@@ -524,7 +588,7 @@ def _list_my_rows(*, accepted: bool):
             "user.reviewer_name not configured in config.toml; cannot determine current user"
         )
 
-    rows = get_client().fetch_all()
+    rows = _load_rows()
     if not rows:
         return ([], [])
     _validate_headers(rows[0])

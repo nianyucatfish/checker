@@ -14,7 +14,7 @@ npm run electron:dev  # 同时跑 Vite + Electron 主窗口
 ```
 
 启动后 Electron 主进程会：
-1. 用项目根的 `venv/Scripts/python.exe` (Win) / `venv/bin/python` (Mac) spawn `python -m sidecar.serve --port 8765`
+1. 用项目根的 `venv/Scripts/python.exe` (Win) / `venv/bin/python` (Mac) spawn `python -m sidecar.serve --port 8775`
 2. 等端口监听就绪
 3. 加载 renderer
 

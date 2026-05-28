@@ -267,6 +267,8 @@ function RenameInput({
 }) {
   const ref = useRef<HTMLInputElement | null>(null);
   const [val, setVal] = useState(initial);
+  // 避免双重提交:Enter / Blur 都触发时只生效一次
+  const settledRef = useRef(false);
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -276,27 +278,37 @@ function RenameInput({
     if (dot > 0) el.setSelectionRange(0, dot);
     else el.select();
   }, [initial]);
+  const settle = (action: "commit" | "cancel") => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    if (action === "commit") onCommit(val.trim());
+    else onCancel();
+  };
   return (
     <input
       ref={ref}
       value={val}
       onChange={(e) => setVal(e.target.value)}
+      // 完整拦截父行的 click/mousedown/focus —— 否则父行会抢焦点导致 onBlur 立即
+      // 触发,user 看到"点不进去"
       onClick={(e) => e.stopPropagation()}
-      // input 自身不该是拖拽 source(否则用户拖动选中文本会变成 drag node)
+      onMouseDown={(e) => e.stopPropagation()}
+      onFocus={(e) => e.stopPropagation()}
       draggable={false}
       onDragStart={(e) => e.preventDefault()}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === "Enter") {
           e.preventDefault();
-          onCommit(val.trim());
+          settle("commit");
         } else if (e.key === "Escape") {
           e.preventDefault();
-          onCancel();
+          settle("cancel");
         }
       }}
-      onBlur={() => onCommit(val.trim())}
-      className="flex-1 bg-bg border border-accent rounded-sm px-1 py-0 text-sm outline-none"
+      // blur:用户名称没改 → cancel;改了 → commit。避免"焦点偶发被抢"误触发 commit
+      onBlur={() => settle(val.trim() === initial.trim() ? "cancel" : "commit")}
+      className="flex-1 bg-bg border border-accent rounded-sm px-1 py-0 text-sm outline-none selectable"
     />
   );
 }

@@ -44,6 +44,58 @@ def test_health():
     assert body["service"] == "sidecar"
 
 
+
+def test_chat_proxies_openai_compat(monkeypatch):
+    from sidecar import api, config
+
+    class DummyResponse:
+        status_code = 200
+        text = '{"ok": true}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "pong"}}]}
+
+    class DummyClient:
+        def __init__(self, timeout, trust_env=True):
+            self.timeout = timeout
+            self.trust_env = trust_env
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def post(self, url, json, headers):
+            assert url == "http://llm.local/v1/chat/completions"
+            assert headers["Authorization"] == "Bearer sk-test"
+            assert json["model"] == "test-model"
+            assert json["messages"] == [{"role": "user", "content": "ping"}]
+            return DummyResponse()
+
+    monkeypatch.setattr(
+        api,
+        "reload_config",
+        lambda: config.Config(
+            test_llm=config.TestLLMConfig(
+                endpoint="http://llm.local",
+                api_key="sk-test",
+                model="test-model",
+            )
+        ),
+    )
+    monkeypatch.setattr(api.httpx, "Client", DummyClient)
+
+    r = client.post("/chat", json={"messages": [{"role": "user", "content": "ping"}]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["message"] == {"role": "assistant", "content": "pong"}
+    assert body["model"] == "test-model"
+
 def test_list_workspace_lists_songs(workspace):
     _song(workspace, "A_x_y")
     _song(workspace, "B_x_y")
@@ -100,29 +152,6 @@ def test_get_audio_metadata(workspace):
 def test_get_audio_metadata_missing():
     r = client.get("/tools/get_audio_metadata", params={"path": "/nope/x.wav"})
     assert r.status_code == 400
-
-
-def test_get_duration_summary_inconsistent(workspace):
-    folder = os.path.join(workspace, "tracks")
-    os.makedirs(folder)
-    _wav(os.path.join(folder, "a.wav"), frames=48000, sr=48000)
-    _wav(os.path.join(folder, "b.wav"), frames=96000, sr=48000)
-    r = client.get("/tools/get_duration_summary", params={"folder": folder})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["inconsistent"] is True
-    assert body["summary"] is not None
-
-
-def test_get_duration_summary_consistent(workspace):
-    folder = os.path.join(workspace, "tracks")
-    os.makedirs(folder)
-    _wav(os.path.join(folder, "a.wav"), frames=48000, sr=48000)
-    _wav(os.path.join(folder, "b.wav"), frames=48000, sr=48000)
-    r = client.get("/tools/get_duration_summary", params={"folder": folder})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["inconsistent"] is False
 
 
 def test_list_dir_returns_immediate_children(workspace):

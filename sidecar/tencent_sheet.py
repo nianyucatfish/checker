@@ -354,6 +354,8 @@ def _extract_rows(j: dict) -> list[list[str]]:
       - text     -> 普通文本
       - number   -> 数字格式(分工表"是否验收"列就是数字 1/0,不是字符串!)
       - location -> 地点 cell,name 是显示名
+      - select   -> 下拉 / 多选标签;value 是 option id 列表,options 给 id→text 映射;
+                   单选取首项,多选用 "/" 拼接(如"情感"列 = "激昂/愤怒")
     我们统一展平成字符串。number 类型的整数特意转成不带小数点的形式
     ("1" 而不是 "1.0"),保持和用户在浏览器里看到的字面值一致 —— 后续判定
     `cell == "1"` 才能命中。
@@ -379,6 +381,14 @@ def _extract_rows(j: dict) -> list[list[str]]:
                         text = str(n)
                 elif isinstance(cv.get("location"), dict):
                     text = cv["location"].get("name", "")
+                elif isinstance(cv.get("select"), dict):
+                    sel = cv["select"]
+                    selected_ids = sel.get("value") or []
+                    options = sel.get("options") or []
+                    id_to_text = {o.get("id"): o.get("text", "") for o in options}
+                    picked = [id_to_text.get(sid, "") for sid in selected_ids]
+                    picked = [p for p in picked if p]
+                    text = "/".join(picked)
             cells.append(text or "")
         out.append(cells)
     return out

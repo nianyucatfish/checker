@@ -2,18 +2,17 @@
 
 ## 项目概览
 
-桌面端音频质检工具,流程:从腾讯文档分工表拉"我负责验收的歌" → 在工作区里挨个查文件命名 / 时长 / 节奏 / 结构 / 混音 → 写回"已验收"标记。当前 v2 重构,从老的 PyQt 单体迁到 Electron + Python sidecar 架构,Phase 4 计划接入 Anthropic agent 自动化人工流程。
+桌面端音频质检工具,流程:从腾讯文档分工表拉"我负责验收的歌" → 在工作区里挨个查文件命名 / 时长 / 节奏 / 结构 / 混音 → 写回"已验收"标记。架构 = Electron + Python sidecar,Phase 4 接入 Anthropic agent 自动化人工流程。老的 PyQt 单体已在 v2 切换完成后归档至 git history。
 
 ## 架构
 
 ```
 仓库根/
-├── app/          v2 前端 — Electron + React (Vite + Tailwind + Monaco)
-├── sidecar/      v2 后端 — Python FastAPI 服务,端口 8765
-├── doc/          设计文档 / 验收清单
+├── app/          前端 — Electron + React (Vite + Tailwind + Monaco)
+├── sidecar/      后端 — Python FastAPI 服务,端口 8775(含质检 core: logic_checker / checker / fixers)
+├── doc/          设计文档 / SOP / 脑暴
 ├── scripts/      一次性探针(probe_tencent*.py)
-├── cache/        运行时缓存(gitignore)
-└── *.py          老 PyQt 单体(main.py / main_window.py / ...),逐步被 v2 替换,新功能不要往老代码加
+└── cache/        运行时缓存(gitignore)
 ```
 
 **v2 数据流**:Electron renderer ↔ Electron main(IPC)↔ sidecar(HTTP /tools/*)↔ 文件系统 / 腾讯文档。
@@ -25,7 +24,7 @@
 cd app && npm run dev
 
 # sidecar dev(独立跑)
-python -m sidecar.serve   # 默认 127.0.0.1:8765, /docs 看 OpenAPI
+python -m sidecar.serve   # 默认 127.0.0.1:8775, /docs 看 OpenAPI
 
 # sidecar 测试(目标:全绿,71 passed)
 pytest sidecar/tests/
@@ -63,9 +62,9 @@ cd app && npm run build
 
 4. **分工表列号写死在常量**:`COL_REVIEWER = 33` / `COL_ACCEPTED = 34` 等。启动时 `_validate_headers` 校验表头,**漂了立刻 raise** 不要默默读错列。学姐改了列序就让工具不可用。
 
-5. **老 PyQt 代码处于维护态**:根目录的 `main.py` / `main_window.py` / `mix_console.py` 等是 v1,新功能进 `app/` + `sidecar/`,不要往老代码加东西。
+5. **质检 core 逻辑全在 `sidecar/logic_checker.py`**:命名 / 时长 / CSV 校验的真规则在这。`sidecar/checker.py` 和 `sidecar/fixers.py` 包它做 v2 编排,不要把规则散到 UI 层。
 
-## Agent 接入(Phase 4,设计中)
+## Agent 接入(Phase 4,进行中)
 
 完整脑暴见 `doc/agent_架构脑暴.md`。核心决定:
 
@@ -84,8 +83,7 @@ cd app && npm run build
 
 ## 当前分支状态
 
-- 主开发分支 `v2`,Phase 2(UI 打磨)末尾
-- 验收清单 `doc/v2_验收清单.md` 走完 §1–§16 + 清理 §17 调试日志后进 Phase 4
+- 主开发分支 `v2`,Phase 4(agent 接入)进行中:`app/electron/agent.ts` AgentRunner + MCP 工具 + db 持久化已搭好,workflow.md 18 态在迭代 SOP
 - `main` 是发布分支,PR 提到 `main`
 
 ## 配置
@@ -96,5 +94,19 @@ cd app && npm run build
 
 - 回复简洁,不重复显而易见的内容
 - 改前先读相关代码,别凭印象改
-- 写工具 / API 加 docstring 时要"双语短描述",中文长篇放设计文档,工具描述要 LLM-friendly
 - 涉及 agent / tool 设计时,**用 GA(Generic Agent)的术语做参照系**(原子工具集 / SOP / L1-L4 记忆 / 上下文压缩),用户对 GA 整体熟悉,但具体机制该解释还是要解释
+
+### MCP 工具 docstring 风格(GA-style)
+
+`sidecar/mcp_server.py` 里的 `@mcp.tool()` docstring 直接做 LLM 工具 description,改 docstring = 改注入 LLM 的工具说明。规则:
+
+1. **1-2 句话**:第一句"做什么 + 返回啥",第二句(可选)关键警告 / 触发场景 / 关键字段
+2. **不写 Args section**:类型签名已自解释。仅当参数有非自明约束(互斥 / 默认 / 特殊格式)才补一行
+3. **Returns 折成 1 行内联**:`Returns {key1, key2, ...}`,不罗列 dataclass 全部字段。LLM 收到 dict 自己看 key
+4. **关键 ErrorCode / Op 类型 / key fields 写在 desc 里**:LLM 看一眼就知能查 / 能改 / 能拿什么,无需翻外部文档
+5. **Failure 写到 1 行**:`On failure: {ok: false, code: "X" | "Y", message: str}`,不另起 Failure modes section
+6. **不写"agent 不会主动做的边界"**:像"不应试图还原打码"/"不要绕过 confirm" 这种,agent 看不到对应工具就做不出来,写出来反而显得 prompt 怪
+7. **关键警告用 CAPS / 短句**:`NEVER pass approved_ops without confirm card hash` 这种值得加;常规说明用普通中文
+8. **场景型工具用 `(1)(2)(3)`**:多触发场景的工具(如未来的 `state_tree_update`)用编号列表
+
+参考范本:`sidecar/mcp_server.py` 现有 10 个工具均按此风格,写新工具直接照抄。

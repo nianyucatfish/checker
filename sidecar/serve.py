@@ -9,7 +9,7 @@ import uvicorn
 def main():
     parser = argparse.ArgumentParser(prog="python -m sidecar.serve")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("SIDECAR_PORT", "8765")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("SIDECAR_PORT", "8775")))
     parser.add_argument("--reload", action="store_true", help="dev mode")
     args = parser.parse_args()
 

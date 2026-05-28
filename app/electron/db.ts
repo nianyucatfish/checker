@@ -31,13 +31,21 @@ function newId(prefix: string): string {
 //  init / schema
 // ============================================================
 
+const SCHEMA_VERSION = 3;
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS session (
-  id          TEXT PRIMARY KEY,
-  title       TEXT NOT NULL,
-  model       TEXT,
-  created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL
+  id                      TEXT PRIMARY KEY,
+  title                   TEXT NOT NULL,
+  model                   TEXT,
+  phase                   TEXT,      -- "A" | "B"
+  song                    TEXT,      -- Phase B 锁定的 song folder
+  -- 软压/硬压发生时写入,LLM 上下文的"活跃起点":turn_index < live_from 的
+  -- message 只贡献 summary 到 trail,不进 messages[];0 = 全量,从未压过。
+  -- 保证 reload 后 LLM messages 跟关闭前一致(否则切歌硬压后会"复活"前一首)。
+  live_from_turn_index    INTEGER NOT NULL DEFAULT 0,
+  created_at              INTEGER NOT NULL,
+  updated_at              INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS message (
@@ -45,13 +53,16 @@ CREATE TABLE IF NOT EXISTS message (
   session_id               TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
   -- turn 顺序,session 内单调递增。0 = 系统消息(如有),1 起为对话
   turn_index               INTEGER NOT NULL,
-  role                     TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
-  -- assistant 才有的元数据;user / system 留 NULL
+  role                     TEXT NOT NULL CHECK (role IN ('user','assistant','system','tool')),
+  -- assistant 才有的元数据;user / system / tool 留 NULL
   finish_reason            TEXT,
   input_tokens             INTEGER,
   output_tokens            INTEGER,
   cache_creation_tokens    INTEGER,
   cache_read_tokens        INTEGER,
+  -- tool 消息的 tool_call_id;其他 role 为 NULL
+  tool_call_id             TEXT,
+  tool_name                TEXT,
   created_at               INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_message_session ON message(session_id, turn_index);
@@ -77,7 +88,32 @@ export function initDb(dataDir: string): Database.Database {
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");      // 多读 + 顺序写,WAL 性价比高
   db.pragma("foreign_keys = ON");        // CASCADE 删 session 时连带清掉 messages/parts
-  db.exec(SCHEMA_SQL);
+  // schema 版本不匹配的迁移策略:能 ALTER 就 ALTER,免得丢用户的历史会话。
+  // 只有 v1 ≤→ v2 那次因为 CHECK 约束变化(role 加 'tool')必须重建;v2→v3 加列,ALTER 即可。
+  const ver = db.pragma("user_version", { simple: true }) as number;
+  if (ver === 0) {
+    db.exec(SCHEMA_SQL);
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  } else if (ver < 2) {
+    console.warn(`[db] schema v${ver} < 2; recreating tables (v1 CHECK 约束不兼容)`);
+    db.exec(`
+      DROP TABLE IF EXISTS part;
+      DROP TABLE IF EXISTS message;
+      DROP TABLE IF EXISTS session;
+    `);
+    db.exec(SCHEMA_SQL);
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  } else {
+    // v2 → v3:只是 session 加一列,ALTER 即可保数据
+    if (ver < 3) {
+      console.log("[db] migrating v2 → v3: adding session.live_from_turn_index");
+      db.exec(
+        "ALTER TABLE session ADD COLUMN live_from_turn_index INTEGER NOT NULL DEFAULT 0",
+      );
+      db.pragma(`user_version = 3`);
+    }
+    db.exec(SCHEMA_SQL); // CREATE IF NOT EXISTS 走过场,顺手补漏 index
+  }
   return db;
 }
 
@@ -101,19 +137,29 @@ export interface SessionRow {
   id: string;
   title: string;
   model: string | null;
+  phase: string | null;
+  song: string | null;
+  live_from_turn_index: number;
   created_at: number;
   updated_at: number;
 }
 
 export function createSession(title: string, model?: string): SessionRow {
   const id = newId("chat");
+  return createSessionWithId(id, title, model);
+}
+
+/** 渲染端自己生成 chatId,主进程不再覆盖。这条用 INSERT OR IGNORE,id 已存在等价 no-op。 */
+export function createSessionWithId(id: string, title: string, model?: string): SessionRow {
   const t = nowMs();
   getDb()
     .prepare(
-      "INSERT INTO session (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+      "INSERT OR IGNORE INTO session (id, title, model, phase, song, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
-    .run(id, title, model ?? null, t, t);
-  return { id, title, model: model ?? null, created_at: t, updated_at: t };
+    .run(id, title, model ?? null, null, null, t, t);
+  const row = getSession(id);
+  if (!row) throw new Error(`createSessionWithId: session ${id} did not insert and was not preexisting`);
+  return row;
 }
 
 export function listSessions(): SessionRow[] {
@@ -131,6 +177,22 @@ export function renameSession(id: string, title: string): void {
   getDb()
     .prepare("UPDATE session SET title = ?, updated_at = ? WHERE id = ?")
     .run(title, nowMs(), id);
+}
+
+/** 把 chat 的 phase / song 同步进 db,reload 后能据此重建 baseSystem。 */
+export function updateSessionPhase(id: string, phase: string | null, song: string | null): void {
+  getDb()
+    .prepare("UPDATE session SET phase = ?, song = ?, updated_at = ? WHERE id = ?")
+    .run(phase, song, nowMs(), id);
+}
+
+/** 软压/硬压时调:把 LLM messages 的"活跃起点 turn_index"持久化,reload 时
+ *  rebuildState 据此过滤 — turn_index < live_from 的 message 只贡献 summary 到 trail,
+ *  不进 messages[],保证恢复态跟关闭前一致。 */
+export function updateSessionLiveFrom(id: string, liveFromTurnIndex: number): void {
+  getDb()
+    .prepare("UPDATE session SET live_from_turn_index = ?, updated_at = ? WHERE id = ?")
+    .run(liveFromTurnIndex, nowMs(), id);
 }
 
 export function touchSession(id: string): void {
@@ -151,23 +213,27 @@ export interface MessageRow {
   id: string;
   session_id: string;
   turn_index: number;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   finish_reason: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cache_creation_tokens: number | null;
   cache_read_tokens: number | null;
+  tool_call_id: string | null;
+  tool_name: string | null;
   created_at: number;
 }
 
 export function appendMessage(args: {
   session_id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   finish_reason?: string;
   input_tokens?: number;
   output_tokens?: number;
   cache_creation_tokens?: number;
   cache_read_tokens?: number;
+  tool_call_id?: string;
+  tool_name?: string;
 }): MessageRow {
   const id = newId("msg");
   const t = nowMs();
@@ -180,8 +246,9 @@ export function appendMessage(args: {
     .prepare(
       `INSERT INTO message
        (id, session_id, turn_index, role, finish_reason,
-        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+        tool_call_id, tool_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -193,6 +260,8 @@ export function appendMessage(args: {
       args.output_tokens ?? null,
       args.cache_creation_tokens ?? null,
       args.cache_read_tokens ?? null,
+      args.tool_call_id ?? null,
+      args.tool_name ?? null,
       t
     );
   touchSession(args.session_id);
@@ -206,6 +275,8 @@ export function appendMessage(args: {
     output_tokens: args.output_tokens ?? null,
     cache_creation_tokens: args.cache_creation_tokens ?? null,
     cache_read_tokens: args.cache_read_tokens ?? null,
+    tool_call_id: args.tool_call_id ?? null,
+    tool_name: args.tool_name ?? null,
     created_at: t,
   };
 }
@@ -242,6 +313,15 @@ export function listMessages(session_id: string): MessageRow[] {
   return getDb()
     .prepare("SELECT * FROM message WHERE session_id = ? ORDER BY turn_index ASC")
     .all(session_id) as MessageRow[];
+}
+
+/** 取 session 当前最大 turn_index;空 session 返回 -1。
+ *  用于 enterPhaseB 硬压时算 live_from 边界(= max + 1)。 */
+export function getMaxTurnIndex(session_id: string): number {
+  const row = getDb()
+    .prepare("SELECT MAX(turn_index) AS m FROM message WHERE session_id = ?")
+    .get(session_id) as { m: number | null };
+  return row?.m ?? -1;
 }
 
 // ============================================================
@@ -298,4 +378,28 @@ export function listParts(message_id: string): PartRow[] {
     .prepare("SELECT * FROM part WHERE message_id = ? ORDER BY part_index ASC")
     .all(message_id) as Array<Omit<PartRow, "content"> & { content: string }>;
   return rows.map((r) => ({ ...r, content: JSON.parse(r.content) as unknown }));
+}
+
+// ============================================================
+//  hydrate (一次性把 session 所有 msg + parts 拉出来)
+// ============================================================
+
+export interface HydratedMessage extends MessageRow {
+  parts: PartRow[];
+}
+
+export interface HydratedSession {
+  session: SessionRow;
+  messages: HydratedMessage[];
+}
+
+/** 一次拉全 session,reload 时给 AgentRunner / UI 重建用。 */
+export function hydrateSession(id: string): HydratedSession | null {
+  const session = getSession(id);
+  if (!session) return null;
+  const messages = listMessages(id).map((m) => ({
+    ...m,
+    parts: listParts(m.id),
+  }));
+  return { session, messages };
 }

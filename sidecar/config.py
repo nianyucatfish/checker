@@ -23,7 +23,7 @@ APP_DIR_NAME = "AudioQC"
 
 
 def _app_config_dir() -> Path:
-    """跨平台拿用户配置目录,不依赖 PyQt(sidecar 解耦)。"""
+    """跨平台拿用户配置目录。"""
     if sys.platform == "win32":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
     elif sys.platform == "darwin":
@@ -68,6 +68,23 @@ class FeishuConfig:
 
 
 @dataclass
+class TestLLMConfig:
+    """测试期 LLM endpoint(OpenAI 兼容代理)。
+
+    与 [anthropic] 分开,production 切回 Anthropic SDK 时 [anthropic] 字段直接生效,
+    本节可清空。当前只用于 sidebar 聊天测试。
+    """
+    endpoint: str = ""
+    api_key: str = ""
+    model: str = "claude-opus-4-7"
+
+
+@dataclass
+class AgentSandboxConfig:
+    sheet_fixture_path: str = ""
+
+
+@dataclass
 class PreferencesConfig:
     execution_mode: str = "confirm"
 
@@ -87,6 +104,8 @@ class Config:
     anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
     tencent_docs: TencentDocsConfig = field(default_factory=TencentDocsConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
+    test_llm: TestLLMConfig = field(default_factory=TestLLMConfig)
+    agent_sandbox: AgentSandboxConfig = field(default_factory=AgentSandboxConfig)
     preferences: PreferencesConfig = field(default_factory=PreferencesConfig)
     user: UserConfig = field(default_factory=UserConfig)
     source_path: Path | None = None  # 实际加载自哪个文件;None 表示全 default
@@ -96,6 +115,8 @@ def _from_raw(raw: dict, source: Path) -> Config:
     a = raw.get("anthropic", {})
     t = raw.get("tencent_docs", {})
     f = raw.get("feishu", {})
+    l = raw.get("test_llm", {})
+    s = raw.get("agent_sandbox", {})
     p = raw.get("preferences", {})
     u = raw.get("user", {})
     return Config(
@@ -115,6 +136,14 @@ def _from_raw(raw: dict, source: Path) -> Config:
         feishu=FeishuConfig(
             app_id=str(f.get("app_id", "")),
             app_secret=str(f.get("app_secret", "")),
+        ),
+        test_llm=TestLLMConfig(
+            endpoint=str(l.get("endpoint", "")),
+            api_key=str(l.get("api_key", "")),
+            model=str(l.get("model", "claude-opus-4-7")),
+        ),
+        agent_sandbox=AgentSandboxConfig(
+            sheet_fixture_path=str(s.get("sheet_fixture_path", "")),
         ),
         preferences=PreferencesConfig(
             execution_mode=str(p.get("execution_mode", "confirm")),

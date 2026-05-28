@@ -10,6 +10,7 @@ import {
   proposeRenames,
   applyRenames,
   padSongToLongest,
+  setWatchRoot,
 } from "./api";
 import type { CheckErrorOut } from "./api";
 
@@ -36,6 +37,31 @@ export default function App() {
   }, []);
 
   const [root, setRoot] = useState<string | null>(null);
+  // root 变化时同步给 AgentRunner + api.ts(写操作前 pause-watch 用)
+  useEffect(() => {
+    void window.electronAPI.agentSetWorkspace(root);
+    setWatchRoot(root);
+  }, [root]);
+
+  // agent.uiTools.openFile → main 通过 webContents.send 到这。复用 handleSelect 的语义。
+  useEffect(() => {
+    const off = window.electronAPI.onUiOpenFile((p) => {
+      setSelectedPath(p);
+      setSelectedIsDir(false);
+      setEditorPath(p);
+    });
+    return off;
+  }, []);
+
+  // agent.uiTools.togglePlayback → 转成 window CustomEvent,AudioViewer 自己监听
+  useEffect(() => {
+    const off = window.electronAPI.onPlaybackToggle((kind, on) => {
+      window.dispatchEvent(
+        new CustomEvent(`playback:toggle:${kind}`, { detail: { on } }),
+      );
+    });
+    return off;
+  }, []);
   const [songs, setSongs] = useState<string[]>([]);
   // selectedPath:左键命中的"行"(可以是 dir 也可以是 file),用于:
   //   - Explorer 内部 selectedSet 同步 + 自动展开祖先
@@ -300,8 +326,8 @@ export default function App() {
         onScan={handleScan}
         onToggleMixConsole={handleToggleMixConsole}
       />
-      <PanelGroup direction="horizontal" className="flex-1">
-        <Panel defaultSize={20} minSize={12} maxSize={40}>
+      <PanelGroup direction="horizontal" className="flex-1" autoSaveId="audio_qc.layout.main">
+        <Panel id="explorer" order={1} defaultSize={20} minSize={12} maxSize={40}>
           <Explorer
             root={root}
             songs={songs}
@@ -319,7 +345,7 @@ export default function App() {
           />
         </Panel>
         <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
-        <Panel minSize={30}>
+        <Panel id="center" order={2} minSize={30}>
           <CenterWithProblemsDrawer
             editorPath={editorPath}
             errorsBySong={errorsBySong}
@@ -328,7 +354,7 @@ export default function App() {
           />
         </Panel>
         <PanelResizeHandle className="w-px bg-border hover:bg-accent transition-colors data-[resize-handle-active]:bg-accent" />
-        <Panel defaultSize={22} minSize={15} maxSize={45}>
+        <Panel id="agent" order={3} defaultSize={22} minSize={15} maxSize={45}>
           <AgentSidebar />
         </Panel>
       </PanelGroup>

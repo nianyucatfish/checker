@@ -51,7 +51,7 @@ export class Metronome {
     this.advanceTo(t);
   }
 
-  /** v ∈ [0, 3+],对应 0%-300%。线性映射,不做 dB 曲线(老 PyQt 也是线性)。 */
+  /** v ∈ [0, 3+],对应 0%-300%。线性映射,不做 dB 曲线。 */
   setVolume(v: number): void {
     const safe = Math.max(0, Number.isFinite(v) ? v : 0);
     this.master.gain.setValueAtTime(safe, this.ctx.currentTime);
