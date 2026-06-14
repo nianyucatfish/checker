@@ -46,18 +46,10 @@ def _candidate_paths() -> list[Path]:
 
 
 @dataclass
-class AnthropicConfig:
-    api_key: str = ""
-    model: str = "claude-sonnet-4-6"
-    base_url: str = ""
-
-
-@dataclass
 class TencentDocsConfig:
     client_id: str = ""
     access_token: str = ""
     open_id: str = ""
-    access_token_expires_at: str = ""
     spreadsheet_id: str = ""
     sheet_id: str = ""
 
@@ -69,11 +61,8 @@ class FeishuConfig:
 
 
 @dataclass
-class TestLLMConfig:
-    """测试期 LLM endpoint(OpenAI 兼容代理)。
-
-    与 [anthropic] 分开,production 切回 Anthropic SDK 时 [anthropic] 字段直接生效,
-    本节可清空。当前只用于 sidebar 聊天测试。
+class LLMConfig:
+    """LLM endpoint(OpenAI 兼容或 Anthropic 原生)。
 
     protocol: "openai"(OpenAI 兼容,默认,覆盖绝大多数厂商)或 "anthropic"(Anthropic 原生
     Messages API)。协议适配在 llm_providers.py,api.py /agent/completion 按它分发。
@@ -106,10 +95,9 @@ class UserConfig:
 
 @dataclass
 class Config:
-    anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
     tencent_docs: TencentDocsConfig = field(default_factory=TencentDocsConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
-    test_llm: TestLLMConfig = field(default_factory=TestLLMConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     agent_sandbox: AgentSandboxConfig = field(default_factory=AgentSandboxConfig)
     preferences: PreferencesConfig = field(default_factory=PreferencesConfig)
     user: UserConfig = field(default_factory=UserConfig)
@@ -117,24 +105,17 @@ class Config:
 
 
 def _from_raw(raw: dict, source: Path) -> Config:
-    a = raw.get("anthropic", {})
     t = raw.get("tencent_docs", {})
     f = raw.get("feishu", {})
-    l = raw.get("test_llm", {})
+    l = raw.get("llm", {})
     s = raw.get("agent_sandbox", {})
     p = raw.get("preferences", {})
     u = raw.get("user", {})
     return Config(
-        anthropic=AnthropicConfig(
-            api_key=str(a.get("api_key", "")),
-            model=str(a.get("model", "claude-sonnet-4-6")),
-            base_url=str(a.get("base_url", "")),
-        ),
         tencent_docs=TencentDocsConfig(
             client_id=str(t.get("client_id", "")),
             access_token=str(t.get("access_token", "")),
             open_id=str(t.get("open_id", "")),
-            access_token_expires_at=str(t.get("access_token_expires_at", "")),
             spreadsheet_id=str(t.get("spreadsheet_id", "")),
             sheet_id=str(t.get("sheet_id", "")),
         ),
@@ -142,7 +123,7 @@ def _from_raw(raw: dict, source: Path) -> Config:
             app_id=str(f.get("app_id", "")),
             app_secret=str(f.get("app_secret", "")),
         ),
-        test_llm=TestLLMConfig(
+        llm=LLMConfig(
             endpoint=str(l.get("endpoint", "")),
             api_key=str(l.get("api_key", "")),
             model=str(l.get("model", "claude-opus-4-7")),
@@ -161,39 +142,68 @@ def _from_raw(raw: dict, source: Path) -> Config:
     )
 
 
-# LLM 配置的可写覆盖:UI 在设置里改的 endpoint/api_key/model/protocol 写到 llm_override.json,
-# 盖在 config.toml 的 [test_llm] 之上。tomllib 只读不可写,JSON 好写;且 api_key 不进示例配置。
-# 路径 = config.toml 同目录(没有 config.toml 就用平台 app config 目录)。
-def _llm_override_path(source: Path | None) -> Path:
-    base = source.parent if source else _app_config_dir()
-    return base / "llm_override.json"
+def config_path_for_write() -> Path:
+    """Return the config.toml path that local settings should update."""
+    cfg = get_config()
+    if cfg.source_path:
+        return cfg.source_path
+    env = os.environ.get("CHECKER_CONFIG")
+    if env:
+        return Path(env)
+    return _app_config_dir() / "config.toml"
 
 
-def llm_override_path() -> Path:
-    """供 api.py 写入用;指向当前生效配置同目录的 llm_override.json。"""
-    return _llm_override_path(get_config().source_path)
+def _toml_string(value: str) -> str:
+    """JSON string syntax is valid for the TOML basic strings we write here."""
+    return json.dumps(value, ensure_ascii=False)
 
 
-def _apply_llm_override(cfg: Config) -> Config:
-    p = _llm_override_path(cfg.source_path)
-    if not p.is_file():
-        return cfg
-    try:
-        ov = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return cfg
-    if not isinstance(ov, dict):
-        return cfg
-    t = cfg.test_llm
-    if ov.get("protocol"):
-        t.protocol = str(ov["protocol"])
-    if ov.get("endpoint"):
-        t.endpoint = str(ov["endpoint"])
-    if ov.get("model"):
-        t.model = str(ov["model"])
-    if ov.get("api_key"):
-        t.api_key = str(ov["api_key"])
-    return cfg
+def _format_llm_section(llm_cfg: LLMConfig) -> str:
+    return "\n".join(
+        [
+            "[llm]",
+            f"protocol = {_toml_string(llm_cfg.protocol)}",
+            f"endpoint = {_toml_string(llm_cfg.endpoint)}",
+            f"api_key = {_toml_string(llm_cfg.api_key)}",
+            f"model = {_toml_string(llm_cfg.model)}",
+            "",
+            "",
+        ]
+    )
+
+
+def write_llm_config(llm_cfg: LLMConfig) -> Path:
+    """Persist the UI-editable LLM config into config.toml's [llm] section."""
+    path = config_path_for_write()
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    lines = text.splitlines(keepends=True)
+
+    start: int | None = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "[llm]":
+            start = i
+            continue
+        if start is not None and i > start and stripped.startswith("[") and stripped.endswith("]"):
+            end = i
+            break
+
+    section = _format_llm_section(llm_cfg)
+    if start is None:
+        sep = "" if not text else ("\n" if text.endswith("\n") else "\n\n")
+        new_text = text + sep + section
+    else:
+        new_text = "".join(lines[:start]) + section + "".join(lines[end:])
+
+    # Validate before replacing the user's config file.
+    tomllib.loads(new_text)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(new_text, encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 def load_config() -> Config:
@@ -208,7 +218,7 @@ def load_config() -> Config:
             raise RuntimeError(f"config file invalid: {path}\n{e}") from e
         cfg = _from_raw(raw, path)
         break
-    return _apply_llm_override(cfg or Config())
+    return cfg or Config()
 
 
 _cached: Config | None = None

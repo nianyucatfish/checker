@@ -227,9 +227,9 @@ def _extract_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
 def _call_llm(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
     from sidecar.config import get_config
 
-    cfg = get_config().test_llm
+    cfg = get_config().llm
     if not cfg.endpoint or not cfg.api_key:
-        raise RuntimeError("test_llm.endpoint/api_key 未配置")
+        raise RuntimeError("llm.endpoint/api_key 未配置")
     payload = {
         "model": cfg.model,
         "messages": messages,
@@ -249,7 +249,7 @@ def _call_llm(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> di
         detail = exc.response.text[:500]
         raise RuntimeError(
             f"test LLM request failed: HTTP {status}. "
-            "Check [test_llm].endpoint/api_key in CHECKER_CONFIG. "
+            "Check [llm].endpoint/api_key in CHECKER_CONFIG. "
             f"Response: {detail}"
         ) from exc
     return data["choices"][0]["message"]

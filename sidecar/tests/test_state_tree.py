@@ -19,12 +19,12 @@ def tmp_cache(monkeypatch):
     shutil.rmtree(d, ignore_errors=True)
 
 
-def test_init_creates_with_18_states(tmp_cache):
+def test_init_creates_with_17_states(tmp_cache):
     p = state_tree.init_state_tree("歌手_望春风_扒谱者")
     assert p.exists()
     text = p.read_text(encoding="utf-8")
     assert text.startswith("# 歌手_望春风_扒谱者\n")
-    assert text.count("- [ ] ") == 18
+    assert text.count("- [ ] ") == 17
     assert text.count("- [x] ") == 0
     assert "- [ ] 1.1 分工表完整性" in text
     assert "- [ ] 3.3 标记已验收" in text
@@ -109,7 +109,7 @@ def test_update_preserves_unrelated_lines(tmp_cache):
     assert "- [ ] 1.5 WAV 物理格式 / 时长 — Mix_A 短 47 帧" in text
     assert "- [x] 2.3 混音台 session 1(分轨 + 总轨)" in text
     assert text.count("- [x] ") == 2
-    assert text.count("- [ ] ") == 16
+    assert text.count("- [ ] ") == 15
 
 
 def test_song_scoped_shared_across_calls(tmp_cache):

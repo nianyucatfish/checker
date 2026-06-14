@@ -1,8 +1,8 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Bot,
   ChevronDown,
   ChevronRight,
-  CornerDownLeft,
   Pencil,
   Plus,
   Send,
@@ -32,10 +32,10 @@ interface HumanCheckTurn {
 }
 type Turn = UserTurn | AssistantTurn | ToolTurn | PhaseTurn | ErrorTurn | HumanCheckTurn;
 
-function ClaudeMark() {
+function AgentAvatar() {
   return (
     <div className="grid size-7 shrink-0 place-items-center rounded-full border border-border bg-bg shadow-sm">
-      <span className="text-[17px] leading-none text-fg">✺</span>
+      <Bot size={15} className="text-fg-muted" />
     </div>
   );
 }
@@ -279,6 +279,7 @@ export function AgentSidebar() {
   // inline 重命名状态:点 ✎ 按钮时把对应 id 设进来,显示 input
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renamingDraft, setRenamingDraft] = useState("");
+  const sessionTriggerRef = useRef<HTMLButtonElement | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
 
   const refreshSessions = useCallback(async () => {
@@ -299,7 +300,12 @@ export function AgentSidebar() {
   useEffect(() => {
     if (!showDropdown) return;
     const onDocMouseDown = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(target) &&
+        !sessionTriggerRef.current?.contains(target)
+      ) {
         setShowDropdown(false);
         setRenamingId(null);
       }
@@ -590,6 +596,7 @@ export function AgentSidebar() {
     <div className="pane agent-shell">
       <div className="pane-header justify-between normal-case tracking-normal relative">
         <button
+          ref={sessionTriggerRef}
           type="button"
           onClick={() => setShowDropdown((v) => !v)}
           className="agent-session-trigger"
@@ -706,14 +713,14 @@ export function AgentSidebar() {
           {!hasConversation && (
             <div className="agent-welcome">
               <div className="flex items-center gap-2">
-                <ClaudeMark />
+                <AgentAvatar />
                 <div>
-                  <div className="font-semibold text-fg">Claude</div>
-                  <div className="text-xs text-fg-subtle">Audio QC agent</div>
+                  <div className="font-semibold text-fg">Agent</div>
+                  <div className="text-xs text-fg-subtle">Audio QC assistant</div>
                 </div>
               </div>
               <p className="mt-3 text-sm leading-6 text-fg-muted">
-                直接说"开始质检 &lt;歌曲名&gt;"即可进入 18 态工作流;或先聊一聊。
+                直接说"开始质检 &lt;歌曲名&gt;"即可进入 17 态工作流;或先聊一聊。
               </p>
             </div>
           )}
@@ -730,9 +737,9 @@ export function AgentSidebar() {
               if (m.kind === "assistant") {
                 return (
                   <div key={i} className="agent-assistant-row">
-                    <ClaudeMark />
+                    <AgentAvatar />
                     <div className="min-w-0 flex-1">
-                      <div className="mb-1 font-semibold text-fg">Claude</div>
+                      <div className="mb-1 font-semibold text-fg">Agent</div>
                       <div className="agent-assistant-text selectable agent-md">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
                       </div>
@@ -824,9 +831,9 @@ export function AgentSidebar() {
             })}
             {sending && (
               <div className="agent-assistant-row">
-                <ClaudeMark />
+                <AgentAvatar />
                 <div className="min-w-0 flex-1">
-                  <div className="mb-1 font-semibold text-fg">Claude</div>
+                  <div className="mb-1 font-semibold text-fg">Agent</div>
                   <div className="agent-thinking">
                     <span /><span /><span />
                   </div>
@@ -843,7 +850,7 @@ export function AgentSidebar() {
             ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Run local tasks with Claude, type ‘#’ for context..."
+            placeholder="输入消息..."
             className="agent-input"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -853,12 +860,8 @@ export function AgentSidebar() {
             }}
           />
           <div className="agent-composer-footer">
-            <div className="flex items-center gap-2 text-xs text-fg-subtle">
-              <span className="text-lg leading-none">＋</span>
-              <span>test_llm · {song ? "Phase B" : "Phase A"}</span>
-              <span className="hidden opacity-70 xl:inline-flex items-center gap-1">
-                <CornerDownLeft size={12} /> 发送
-              </span>
+            <div className="text-xs text-fg-subtle">
+              {song ? "Phase B" : "Phase A"}
             </div>
             {sending ? (
               <button

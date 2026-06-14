@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 
 
-# 18 态白名单 + 标题。顺序即写入顺序。
+# 17 态白名单 + 标题。顺序即写入顺序。
 _STATES: list[tuple[str, str]] = [
     ("1.1", "分工表完整性"),
     ("1.2", "文件夹命名 + 5 目录结构"),

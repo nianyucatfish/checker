@@ -1,20 +1,20 @@
-# Sidecar 运行时依赖（Python 3.11+）
-# 音频核心栈
+# Sidecar runtime dependencies (Python 3.11+)
+# Audio core stack
 numpy>=1.26
 soundfile>=0.12
-mido>=1.3       # midi tick 平移(midi_shifter.py)
+mido>=1.3       # MIDI tick shifting (midi_shifter.py)
 
-# 新增：sidecar HTTP / agent 层
+# Sidecar HTTP / agent layer
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.7
 
-# 文件操作（移到回收站，跨平台）
+# File operations (move to recycle bin / trash, cross-platform)
 send2trash>=1.8
 
-# MCP server(agent 工具暴露;stdio transport,Electron main 起 client subprocess spawn）
+# MCP server (agent tool exposure; stdio transport, spawned by Electron main)
 mcp>=1.0
 
-# 测试
+# Tests
 pytest>=8
 httpx>=0.27

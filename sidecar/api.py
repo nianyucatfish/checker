@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 
 from sidecar import checker, fixers
 from sidecar import workspace as _ws
-from sidecar.config import reload_config, llm_override_path
+from sidecar.config import LLMConfig, reload_config, write_llm_config
 from sidecar import llm_providers as llm
 from sidecar.schemas import (
     AudioMetadata,
@@ -74,17 +74,24 @@ def health():
 
 @app.post("/chat", response_model=ChatOut)
 def chat(inp: ChatIn):
-    cfg = reload_config().test_llm
+    cfg = reload_config().llm
     if not cfg.endpoint or not cfg.api_key:
-        raise HTTPException(status_code=400, detail="test_llm.endpoint/api_key 未配置")
+        raise HTTPException(status_code=400, detail="llm.endpoint/api_key 未配置")
 
-    url = cfg.endpoint.rstrip("/") + "/v1/chat/completions"
-    payload = {
-        "model": cfg.model,
-        "messages": [m.model_dump() for m in inp.messages],
-        "stream": False,
-    }
-    headers = {"Authorization": f"Bearer {cfg.api_key}"}
+    body = {"messages": [m.model_dump() for m in inp.messages]}
+    protocol = (cfg.protocol or "openai").lower()
+    if protocol == "anthropic":
+        url = llm.anthropic_url(cfg.endpoint)
+        payload = llm.to_anthropic_request(body, cfg.model, 1024)
+        headers = llm.anthropic_headers(cfg.api_key)
+    else:
+        url = llm.openai_endpoint_url(cfg.endpoint)
+        payload = {
+            "model": cfg.model,
+            "messages": body["messages"],
+            "stream": False,
+        }
+        headers = llm.openai_headers(cfg.api_key)
     try:
         with httpx.Client(timeout=60, trust_env=False) as client:
             r = client.post(url, json=payload, headers=headers)
@@ -96,7 +103,10 @@ def chat(inp: ChatIn):
         raise HTTPException(status_code=502, detail=f"LLM request failed: {e}") from e
 
     try:
-        content = data["choices"][0]["message"]["content"] or ""
+        if protocol == "anthropic":
+            content = llm.from_anthropic_response(data)["message"].get("content") or ""
+        else:
+            content = data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as e:
         raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
     return ChatOut(message={"role": "assistant", "content": content}, model=cfg.model)
@@ -120,11 +130,12 @@ def _mask_key(key: str) -> str:
 
 
 def _llm_config_view() -> dict:
-    c = reload_config().test_llm
+    c = reload_config().llm
     return {
         "protocol": c.protocol,
         "endpoint": c.endpoint,
         "model": c.model,
+        "api_key": c.api_key,
         "key_set": bool(c.api_key),
         "key_masked": _mask_key(c.api_key),
     }
@@ -132,38 +143,30 @@ def _llm_config_view() -> dict:
 
 @app.get("/config/llm")
 def get_llm_config():
-    """当前 LLM 配置(api_key 只回打码态,不回明文)。设置界面读这个回显。"""
+    """当前 LLM 配置。api_key 仅供本地设置界面回显,由前端默认打码显示。"""
     return _llm_config_view()
 
 
 @app.post("/config/llm")
 def set_llm_config(body: dict):
-    """写 LLM 配置到 llm_override.json(盖在 config.toml 上)。
+    """写 LLM 配置到 config.toml 的 [llm] 段。
 
-    Body: {protocol?, endpoint?, model?, api_key?}。api_key 空/缺则保留现有(不清空)。
+    Body: {protocol?, endpoint?, model?, api_key?}。api_key 缺失则保留现有;空字符串会清空。
     写完即生效(/agent/completion 每次 reload_config)。
     """
-    path = llm_override_path()
-    cur: dict = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                cur = loaded
-        except (OSError, ValueError):
-            cur = {}
-    for k in ("protocol", "endpoint", "model"):
-        if isinstance(body.get(k), str):
-            cur[k] = body[k].strip()
-    ak = body.get("api_key")
-    if isinstance(ak, str) and ak.strip():
-        cur["api_key"] = ak.strip()
+    current = reload_config().llm
+    next_cfg = LLMConfig(
+        protocol=body["protocol"].strip() if isinstance(body.get("protocol"), str) else current.protocol,
+        endpoint=body["endpoint"].strip() if isinstance(body.get("endpoint"), str) else current.endpoint,
+        model=body["model"].strip() if isinstance(body.get("model"), str) else current.model,
+        api_key=body["api_key"].strip() if isinstance(body.get("api_key"), str) else current.api_key,
+    )
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError as e:
+        path = write_llm_config(next_cfg)
+        reload_config()
+    except (OSError, ValueError) as e:
         raise HTTPException(status_code=500, detail=f"写配置失败: {e}") from e
-    return {"ok": True, **_llm_config_view()}
+    return {"ok": True, "config_path": str(path), **_llm_config_view()}
 
 
 @app.post("/agent/completion")
@@ -171,12 +174,12 @@ def agent_completion(body: dict):
     """Proxy LLM call with tool support for the Electron agent loop.
 
     Body: {messages, tools, tool_choice?}. Returns the raw assistant message dict
-    (`content` + optional `tool_calls`). Keeps the test_llm api_key in sidecar,
+    (`content` + optional `tool_calls`). Keeps the llm api_key in sidecar,
     Electron main never sees it.
     """
-    cfg = reload_config().test_llm
+    cfg = reload_config().llm
     if not cfg.endpoint or not cfg.api_key:
-        raise HTTPException(status_code=400, detail="test_llm.endpoint/api_key 未配置")
+        raise HTTPException(status_code=400, detail="llm.endpoint/api_key 未配置")
 
     # 按 protocol 分发(适配在 llm_providers.py);agent 永远只发 OpenAI 形状,差异全在这翻译。
     protocol = (cfg.protocol or "openai").lower()

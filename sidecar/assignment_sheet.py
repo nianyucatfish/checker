@@ -378,12 +378,33 @@ def _cell(row, col_1based: int) -> str:
     return ""
 
 
+def _is_masked_cell(value: str) -> bool:
+    return bool(re.fullmatch(r"\*+", value.strip()))
+
+
+def _header_matches(col: int, actual: str, expected: str) -> bool:
+    if actual == expected:
+        return True
+    # Tencent Docs can redact A1 as asterisks while leaving the song-name column data intact.
+    return col == COL_SONG_NAME and expected == "歌名" and _is_masked_cell(actual)
+
+
+def _normalized_headers(header_row) -> list[str]:
+    headers = list(header_row)
+    if _cell(headers, COL_SONG_NAME) != _EXPECTED_HEADERS[COL_SONG_NAME]:
+        if _is_masked_cell(_cell(headers, COL_SONG_NAME)):
+            while len(headers) < COL_SONG_NAME:
+                headers.append("")
+            headers[COL_SONG_NAME - 1] = _EXPECTED_HEADERS[COL_SONG_NAME]
+    return headers
+
+
 def _validate_headers(header_row) -> None:
     """启动时跑一次,列序漂了立刻让 agent 工具不可用。"""
     drifts = []
     for col, expected in _EXPECTED_HEADERS.items():
         actual = _cell(header_row, col)
-        if actual != expected:
+        if not _header_matches(col, actual, expected):
             drifts.append(f"col {col}: expected '{expected}', got '{actual}'")
     if drifts:
         raise TencentSheetError("sheet schema drift detected: " + "; ".join(drifts))
@@ -592,7 +613,7 @@ def _list_my_rows(*, accepted: bool):
     if not rows:
         return ([], [])
     _validate_headers(rows[0])
-    headers = list(rows[0])
+    headers = _normalized_headers(rows[0])
     out = []
     for row_index, row in enumerate(rows[1:], start=2):
         if _cell(row, COL_REVIEWER) != reviewer:

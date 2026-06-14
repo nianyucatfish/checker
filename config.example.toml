@@ -14,18 +14,6 @@
 
 
 # ============================================================
-# Anthropic API (Phase 4 接 agent 时用)
-# ============================================================
-[anthropic]
-# 从 https://console.anthropic.com 控制台拿
-api_key = ""
-# 默认模型;复杂诊断可换 claude-opus-4-7
-model = "claude-sonnet-4-6"
-# 可选:通过代理访问时填,留空走官方 https://api.anthropic.com
-base_url = ""
-
-
-# ============================================================
 # 腾讯文档(分工表读写)
 # ============================================================
 [tencent_docs]
@@ -34,11 +22,6 @@ base_url = ""
 client_id = ""
 access_token = ""
 open_id = ""
-
-# 可选:access_token 过期时间(ISO 8601 格式),sidecar 用来提前提醒
-# 例: "2026-06-05T09:00:04+08:00"
-# 30 天后过期前去开放平台点"重置"换新的,然后更新这两行
-access_token_expires_at = ""
 
 # 分工表的 ID(从 URL https://docs.qq.com/sheet/{spreadsheet_id} 里抠)
 spreadsheet_id = ""
@@ -56,14 +39,14 @@ app_secret = ""
 
 
 # ============================================================
-# Agent / sidebar LLM。protocol 决定走哪套协议:
+# LLM / Agent / sidebar。protocol 决定走哪套协议:
 #   "openai"   (默认) OpenAI 兼容:OpenAI / DeepSeek / Moonshot / 智谱 / OpenRouter /
 #              Gemini 兼容端点 / Ollama 等。endpoint 填 base(自动补 /v1/chat/completions)
 #              或完整 chat URL;认证走 Bearer。
 #   "anthropic" Anthropic 原生 Messages API。endpoint = "https://api.anthropic.com",
 #              model = claude-*;认证走 x-api-key(协议适配在 sidecar/llm_providers.py)。
 # ============================================================
-[test_llm]
+[llm]
 protocol = "openai"
 endpoint = "http://127.0.0.1:8765"
 api_key = ""

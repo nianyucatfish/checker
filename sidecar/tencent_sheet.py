@@ -181,8 +181,11 @@ class TencentSheetClient:
                     return self._cache
             # 真去 API:先查真实行数,避免末块 range 越界(API 返 400001)
             row_count = self._fetch_row_count()
-            collected: list[list[str]] = []
-            start = 1
+            # Tencent Docs can redact A1 when header + data rows are fetched together
+            # (A1:AK1 returns "歌名", A1:AK2 returns "*******"). Fetch the header
+            # separately, then page data rows from row 2.
+            collected: list[list[str]] = self._fetch_range_uncached(f"A1:{_LAST_COL_LETTER}1")
+            start = 2
             while start <= row_count:
                 end = min(start + _CHUNK_ROWS - 1, row_count)
                 a1 = f"A{start}:{_LAST_COL_LETTER}{end}"
@@ -203,12 +206,24 @@ class TencentSheetClient:
         干净,且 metadata 调用本身很轻。
         """
         url = f"https://docs.qq.com/openapi/spreadsheet/v3/{self.spreadsheet_id}"
-        body_bytes, _ = _http_get_body(url, self._headers())
+        body_bytes, http_status = _http_get_body(url, self._headers())
         body = body_bytes.decode("utf-8", errors="replace")
         try:
             j = json.loads(body)
         except json.JSONDecodeError as e:
             raise TencentSheetError(f"metadata non-JSON: {body[:200]}") from e
+        api_code_raw = j.get("code") if j.get("code") is not None else j.get("ret")
+        if api_code_raw not in (None, 0):
+            msg = j.get("message") or j.get("msg") or "(no message)"
+            raise TencentSheetError(
+                f"metadata api error {api_code_raw}: {msg}",
+                api_code=int(api_code_raw),
+            )
+        if http_status >= 400:
+            raise TencentSheetError(
+                f"metadata http {http_status}: {body[:200]}",
+                http_status=http_status,
+            )
         # 这个 endpoint 实测直接返 {properties: [...]},不带 data/ret 包裹
         props = j.get("properties") or (j.get("data") or {}).get("properties") or []
         for p in props:

@@ -80,7 +80,7 @@ def test_chat_proxies_openai_compat(monkeypatch):
         api,
         "reload_config",
         lambda: config.Config(
-            test_llm=config.TestLLMConfig(
+            llm=config.LLMConfig(
                 endpoint="http://llm.local",
                 api_key="sk-test",
                 model="test-model",

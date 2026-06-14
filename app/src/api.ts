@@ -261,8 +261,10 @@ export interface LlmConfig {
   protocol: string;
   endpoint: string;
   model: string;
+  api_key: string;
   key_set: boolean;
   key_masked: string;
+  config_path?: string;
 }
 
 export async function getLlmConfig(): Promise<LlmConfig> {
@@ -273,8 +275,8 @@ export async function saveLlmConfig(body: {
   protocol: string;
   endpoint: string;
   model: string;
-  api_key?: string;
-}): Promise<LlmConfig & { ok: boolean }> {
+  api_key: string;
+}): Promise<LlmConfig & { ok: boolean; config_path: string }> {
   return postJson("/config/llm", body);
 }
 

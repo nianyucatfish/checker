@@ -112,7 +112,7 @@ def main() -> None:
 
     _write_text(
         CONFIG,
-        f"""# Agent sandbox config. Safe to regenerate; contains no real credentials.\n\n[anthropic]\napi_key = \"\"\nmodel = \"claude-sonnet-4-6\"\nbase_url = \"\"\n\n[tencent_docs]\nclient_id = \"\"\naccess_token = \"\"\nopen_id = \"\"\naccess_token_expires_at = \"\"\nspreadsheet_id = \"\"\nsheet_id = \"\"\n\n[feishu]\napp_id = \"\"\napp_secret = \"\"\n\n[test_llm]\nendpoint = \"http://127.0.0.1:8765\"\napi_key = \"\"\nmodel = \"claude-opus-4-7\"\n\n[agent_sandbox]\nsheet_fixture_path = \"{SHEET_FIXTURE.as_posix()}\"\n\n[preferences]\nexecution_mode = \"auto\"\n\n[user]\nreviewer_name = \"测试员\"\n""",
+        f"""# Agent sandbox config. Safe to regenerate; contains no real credentials.\n\n[tencent_docs]\nclient_id = \"\"\naccess_token = \"\"\nopen_id = \"\"\nspreadsheet_id = \"\"\nsheet_id = \"\"\n\n[feishu]\napp_id = \"\"\napp_secret = \"\"\n\n[llm]\nprotocol = \"openai\"\nendpoint = \"http://127.0.0.1:8765\"\napi_key = \"\"\nmodel = \"claude-opus-4-7\"\n\n[agent_sandbox]\nsheet_fixture_path = \"{SHEET_FIXTURE.as_posix()}\"\n\n[preferences]\nexecution_mode = \"auto\"\n\n[user]\nreviewer_name = \"测试员\"\n""",
     )
 
     print(f"sandbox={SANDBOX}")

@@ -84,11 +84,11 @@ cd app && npm run build
 ## 当前分支状态
 
 - 主开发分支 `v2`,Phase 4(agent 接入)进行中:`app/electron/agent.ts` AgentRunner + MCP 工具 + db 持久化已搭好,workflow.md 18 态在迭代 SOP
-- `main` 是发布分支,PR 提到 `main`
+- 默认在 feature 分支提交改动,推到远端后提 PR 到 `audit-copilot`;提 PR 前先同步远端并处理本地冲突。
 
 ## 配置
 
-`config.toml`(从 `config.example.toml` 复制改),不进 git。字段:`[anthropic]` / `[tencent_docs]` / `[user]` / `[preferences]`。sidecar 启动找配置顺序:`CHECKER_CONFIG` 环境变量 → 仓库根 `config.toml` → 平台 app config 目录。
+`config.toml`(从 `config.example.toml` 复制改),不进 git。字段:`[llm]` / `[tencent_docs]` / `[user]` / `[preferences]`。sidecar 启动找配置顺序:`CHECKER_CONFIG` 环境变量 → 仓库根 `config.toml` → 平台 app config 目录。
 
 ## 给 Claude 的工作偏好
 

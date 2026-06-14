@@ -9,7 +9,7 @@ Run standalone for debugging:
     python -m sidecar.mcp_server
 
 Tool inventory (see doc/prompts/agent_workflow.md):
-- state_tree.*: read (auto-init) / update —— 18 态 markdown 进度本
+- state_tree.*: read (auto-init) / update —— 17 态 markdown 进度本
 - audit.*  : list_errors (MISSING_FILE 附带 workspace 候选清单)
 - read_text_file: 读纯文本,line_range 取片段,>8KB 自动 head+tail 截断
 - sheet.*  : list_my_pending / get_song_meta(写路径 mark_accepted / write_baidu_link 待补,依赖腾讯文档写 API)
@@ -74,7 +74,7 @@ def system_set_workspace(root: str) -> dict[str, Any]:
 
 @mcp.tool()
 def state_tree_read(song: str) -> dict[str, Any]:
-    """Read state markdown at cache/state_tree/<song>.md. **Auto-creates initial md (18 态全 `[ ]`) if missing** —— 进歌第一件事就调它,既看进度又确保文件就位。Scope=song,同一首歌的所有 chat 共享一份 md。
+    """Read state markdown at cache/state_tree/<song>.md. **Auto-creates initial md (17 态全 `[ ]`) if missing** —— 进歌第一件事就调它,既看进度又确保文件就位。Scope=song,同一首歌的所有 chat 共享一份 md。
     Returns {path, text, created} (created=true 表示这次首建)."""
     try:
         existed = state_tree.md_path(song).exists()

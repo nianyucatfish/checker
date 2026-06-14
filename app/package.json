@@ -6,6 +6,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
+    "postinstall": "electron-builder install-app-deps",
     "build": "tsc -b && vite build && electron-builder",
     "preview": "vite preview",
     "electron:dev": "vite",

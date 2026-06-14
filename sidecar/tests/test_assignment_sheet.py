@@ -402,6 +402,29 @@ def test_pending_song_owner_is_masked(fake_sheet):
     assert songs[0].owner != "赵某某"
 
 
+def test_masked_song_name_header_is_accepted(fake_sheet):
+    """Tencent Docs may redact A1, but the song-name column data is still usable."""
+    fake_sheet([_complete_row()])
+    rows = asheet._load_rows()
+    rows[0][0] = "*******"
+
+    songs = asheet.list_my_pending()
+
+    assert len(songs) == 1
+    assert songs[0].song_name == "望春风"
+
+
+def test_dev_rows_normalize_masked_song_name_header(fake_sheet):
+    fake_sheet([_complete_row(accepted="1")])
+    rows = asheet._load_rows()
+    rows[0][0] = "*******"
+
+    headers, items = asheet.list_my_accepted_rows()
+
+    assert headers[0] == "歌名"
+    assert len(items) == 1
+
+
 def test_get_song_meta_song_not_in_reviewer_scope(fake_sheet):
     """别的 reviewer 的歌 → 抛 TencentSheetError(SONG_NOT_FOUND 语义)。"""
     from sidecar.tencent_sheet import TencentSheetError

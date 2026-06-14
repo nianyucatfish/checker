@@ -1,33 +1,15 @@
 import { useEffect, useState } from "react";
-import { Loader2, X } from "lucide-react";
+import { Eye, EyeOff, Loader2, X } from "lucide-react";
 import { getLlmConfig, saveLlmConfig, testLlmConfig } from "../api";
 import { clsx } from "../utils";
-
-interface Preset {
-  name: string;
-  protocol: string;
-  endpoint: string;
-  model: string;
-}
-
-// 厂商预设:选了自动填 endpoint/protocol/model。base 不带 /v1,代理自动补 /v1/chat/completions。
-const PRESETS: Preset[] = [
-  { name: "DeepSeek", protocol: "openai", endpoint: "https://api.deepseek.com", model: "deepseek-chat" },
-  { name: "OpenAI", protocol: "openai", endpoint: "https://api.openai.com", model: "gpt-4o" },
-  { name: "OpenRouter", protocol: "openai", endpoint: "https://openrouter.ai/api", model: "" },
-  { name: "Moonshot / Kimi", protocol: "openai", endpoint: "https://api.moonshot.cn", model: "kimi-k2-0905-preview" },
-  { name: "智谱 GLM", protocol: "openai", endpoint: "https://open.bigmodel.cn/api/paas", model: "glm-4" },
-  { name: "SiliconFlow", protocol: "openai", endpoint: "https://api.siliconflow.cn", model: "" },
-  { name: "Anthropic(原生)", protocol: "anthropic", endpoint: "https://api.anthropic.com", model: "claude-sonnet-4-6" },
-  { name: "Ollama(本地)", protocol: "openai", endpoint: "http://localhost:11434", model: "" },
-];
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(true);
   const [protocol, setProtocol] = useState("openai");
   const [endpoint, setEndpoint] = useState("");
   const [model, setModel] = useState("");
-  const [apiKey, setApiKey] = useState("");       // 新输入的 key,空 = 不改
+  const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
   const [keyMasked, setKeyMasked] = useState("");
   const [keySet, setKeySet] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -40,6 +22,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         setProtocol(c.protocol || "openai");
         setEndpoint(c.endpoint);
         setModel(c.model);
+        setApiKey(c.api_key || "");
         setKeyMasked(c.key_masked);
         setKeySet(c.key_set);
       })
@@ -47,16 +30,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const applyPreset = (name: string) => {
-    const p = PRESETS.find((x) => x.name === name);
-    if (!p) return;
-    setProtocol(p.protocol);
-    setEndpoint(p.endpoint);
-    if (p.model) setModel(p.model);
-  };
-
   const persist = () =>
-    saveLlmConfig({ protocol, endpoint, model, api_key: apiKey || undefined });
+    saveLlmConfig({ protocol, endpoint, model, api_key: apiKey });
 
   const save = async () => {
     setSaving(true);
@@ -65,8 +40,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       const c = await persist();
       setKeyMasked(c.key_masked);
       setKeySet(c.key_set);
-      setApiKey("");
-      setMsg({ ok: true, text: "已保存(下条消息生效)" });
+      setApiKey(c.api_key || apiKey);
+      setMsg({ ok: true, text: `已保存到 ${c.config_path}` });
     } catch (e) {
       setMsg({ ok: false, text: `保存失败: ${e instanceof Error ? e.message : String(e)}` });
     } finally {
@@ -79,7 +54,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setMsg(null);
     try {
       await persist(); // 先存,确保测的是界面上的配置
-      setApiKey("");
       const r = await testLlmConfig();
       setMsg(r.ok
         ? { ok: true, text: `连接成功:${r.preview || "(空响应)"}` }
@@ -93,12 +67,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
 
   const lbl = "text-xs text-fg-muted mb-1";
   const inp = "w-full text-sm rounded border border-border bg-bg px-2 py-1.5 outline-none focus:border-accent";
+  const keyInput = "w-full text-sm rounded border border-border bg-bg py-1.5 pl-2 pr-9 outline-none focus:border-accent";
 
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-8" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-8">
       <div
         className="bg-bg-sidebar border border-border rounded-md flex flex-col w-[480px] max-h-[85vh]"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-2 border-b border-border">
           <div className="text-sm font-medium text-fg">设置 · LLM API</div>
@@ -113,13 +87,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
         ) : (
           <div className="p-4 flex flex-col gap-3 overflow-y-auto">
-            <div>
-              <div className={lbl}>厂商预设(选了自动填 endpoint / 协议 / 模型)</div>
-              <select className={inp} defaultValue="" onChange={(e) => { applyPreset(e.target.value); e.currentTarget.value = ""; }}>
-                <option value="" disabled>选一个预设…</option>
-                {PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-              </select>
-            </div>
             <div>
               <div className={lbl}>协议</div>
               <select className={inp} value={protocol} onChange={(e) => setProtocol(e.target.value)}>
@@ -137,15 +104,26 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </div>
             <div>
               <div className={lbl}>
-                API Key{keySet && <span className="text-fg-subtle">(现有 {keyMasked},留空不改)</span>}
+                API Key{keySet && !showApiKey && <span className="text-fg-subtle"> (当前 {keyMasked})</span>}
               </div>
-              <input
-                className={inp}
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={keySet ? "保留现有 key" : "粘贴 API key"}
-              />
+              <div className="relative">
+                <input
+                  className={keyInput}
+                  type={showApiKey ? "text" : "password"}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="粘贴 API key"
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowApiKey((v) => !v)}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-fg-muted hover:bg-bg-hover hover:text-fg"
+                  title={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+                >
+                  {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
             </div>
 
             {msg && (

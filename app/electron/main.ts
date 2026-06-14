@@ -20,6 +20,7 @@ import { AgentRunner, type UiTools, setDumpLlmContext, isDumpLlmContextOn } from
 import { spawnCaptureWithTimeout } from "./spawnCapture";
 
 const SIDECAR_PORT = 8775; // TODO Phase 5: pick random free port
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
 // 这是个工具型应用,不需要 Electron 默认的 File / Edit / View / Window / Help 菜单。
 // 在所有窗口创建之前就置空,主窗和 mix 窗都不会再画菜单条。
@@ -38,6 +39,29 @@ let lastToolbarButtonRect: ButtonRect | null = null;
 let mixAnimating = false;
 // before-quit 时设 true,允许 mix 窗的 close 事件真正销毁(否则 preventDefault 拦下)
 let isAppQuitting = false;
+
+function resolveDevPython(projectRoot: string): string {
+  const candidates = process.platform === "win32"
+    ? [
+        path.join(projectRoot, "venv", "Scripts", "python.exe"),
+        path.join(projectRoot, ".venv", "Scripts", "python.exe"),
+      ]
+    : [
+        path.join(projectRoot, "venv", "bin", "python"),
+        path.join(projectRoot, ".venv", "bin", "python"),
+      ];
+  const found = candidates.find((p) => fs.existsSync(p));
+  return found ?? candidates[0];
+}
+
+function configureDevUserData() {
+  if (app.isPackaged) return;
+  const userData = path.join(PROJECT_ROOT, "tmp", "electron-user-data");
+  fs.mkdirSync(userData, { recursive: true });
+  app.setPath("userData", userData);
+}
+
+configureDevUserData();
 
 async function waitForPort(port: number, timeoutMs = 10000): Promise<void> {
   const start = Date.now();
@@ -63,12 +87,10 @@ async function waitForPort(port: number, timeoutMs = 10000): Promise<void> {
 }
 
 function spawnSidecar() {
-  // 开发期：直接 venv/Scripts/python.exe -m sidecar.serve
+  // 开发期：直接 venv/.venv 里的 python -m sidecar.serve
   // 打包后：bundled python; TODO Phase 5
-  const projectRoot = path.resolve(__dirname, "..", "..");
-  const py = process.platform === "win32"
-    ? path.join(projectRoot, "venv", "Scripts", "python.exe")
-    : path.join(projectRoot, "venv", "bin", "python");
+  const projectRoot = PROJECT_ROOT;
+  const py = resolveDevPython(projectRoot);
   sidecarProc = spawn(py, ["-X", "utf8", "-m", "sidecar.serve", "--port", String(SIDECAR_PORT)], {
     cwd: projectRoot,
     env: { ...process.env, PYTHONIOENCODING: "utf-8" },
@@ -127,10 +149,8 @@ async function pushWorkspaceToAllBackends(root: string | null): Promise<void> {
 }
 
 async function startMcpClient(): Promise<void> {
-  const projectRoot = path.resolve(__dirname, "..", "..");
-  const py = process.platform === "win32"
-    ? path.join(projectRoot, "venv", "Scripts", "python.exe")
-    : path.join(projectRoot, "venv", "bin", "python");
+  const projectRoot = PROJECT_ROOT;
+  const py = resolveDevPython(projectRoot);
 
   // StdioClientTransport 自己 spawn 子进程并接管 stdin/stdout 做 JSON-RPC,
   // 我们不另起 spawn —— 否则 transport 拿不到正确的句柄。但子进程的 stderr
@@ -160,7 +180,7 @@ async function startMcpClient(): Promise<void> {
 
   // prompt 文本(phase_a / phase_b_header / agent_workflow)都在 doc/prompts/,注入目录由 agent 读取;
   // sidecar baseUrl 也注入,避免常量在 agent.ts 重写一遍
-  const projectRoot2 = path.resolve(__dirname, "..", "..");
+  const projectRoot2 = PROJECT_ROOT;
   // UI 工具实现:闭包到 main 这边的 mainWindow / mixTracks / showMixWindowAnimated 等。
   // agent.ts 只看签名(UiTools 接口),不知道这些细节,保跨进程边界干净。
   const uiTools: UiTools = {
