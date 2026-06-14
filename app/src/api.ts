@@ -257,6 +257,41 @@ export async function sendChat(messages: ChatMessage[]): Promise<ChatOut> {
   return postJson("/chat", { messages });
 }
 
+export interface LlmConfig {
+  protocol: string;
+  endpoint: string;
+  model: string;
+  key_set: boolean;
+  key_masked: string;
+}
+
+export async function getLlmConfig(): Promise<LlmConfig> {
+  return getJson("/config/llm");
+}
+
+export async function saveLlmConfig(body: {
+  protocol: string;
+  endpoint: string;
+  model: string;
+  api_key?: string;
+}): Promise<LlmConfig & { ok: boolean }> {
+  return postJson("/config/llm", body);
+}
+
+/** 用 protocol-aware 的 /agent/completion 发一条极短消息探活当前配置。 */
+export async function testLlmConfig(): Promise<{ ok: boolean; error?: string; preview?: string }> {
+  try {
+    const r = await postJson<{ message?: { content?: string } }>("/agent/completion", {
+      messages: [{ role: "user", content: "ping，用一个词回复" }],
+      tools: [],
+      max_tokens: 16,
+    });
+    return { ok: true, preview: r.message?.content ?? "" };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function selectWorkspace(): Promise<string | null> {
   return window.electronAPI.selectWorkspace();
 }

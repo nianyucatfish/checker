@@ -8,7 +8,7 @@ flow through MCP client → here → existing sidecar domain layers
 Run standalone for debugging:
     python -m sidecar.mcp_server
 
-Tool inventory (see doc/agent_workflow.md):
+Tool inventory (see doc/prompts/agent_workflow.md):
 - state_tree.*: read (auto-init) / update —— 18 态 markdown 进度本
 - audit.*  : list_errors (MISSING_FILE 附带 workspace 候选清单)
 - read_text_file: 读纯文本,line_range 取片段,>8KB 自动 head+tail 截断

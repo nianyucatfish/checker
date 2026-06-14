@@ -3,7 +3,7 @@
 // 结构:
 // - 多 chat 会话(ChatState),按 chatId 索引,持久化到 db.ts(SQLite)
 // - 两阶段 system prompt:Phase A 短(start_qc/sheet_list_my_pending)→ start_qc 后切 Phase B
-//   = PHASE_B_HEADER + doc/agent_workflow.md
+//   = phase_b_header.md + agent_workflow.md;三段 prompt 文本都在 doc/prompts/,构造时注入目录读入
 // - 上下文压缩两层:软压(messages > 30 在 user 边界裁中段,留 summaryTrail)+ 硬压(切歌清空,
 //   只塞上一首 trail 摘要进新会话);LLM 每轮强制 <summary>...</summary>,extractSummary 抽出来续命
 // - 工具调用走 MCP(sidecar 起的 stdio 子进程)+ 本地工具(start_qc / human_check)
@@ -29,83 +29,24 @@ import {
   type PartContentToolResult,
   type PartContentSummary,
 } from "./db";
+import {
+  COMPRESS_KEEP_RECENT,
+  COMPRESS_MAX_LEN,
+  COMPRESS_EVERY,
+  CONTEXT_WIN_CHARS,
+  messagesCost,
+  extractSummary,
+  cleanContent,
+  compressHistoryTags,
+  trimOverflow,
+  buildAnchorMessage,
+} from "./compaction";
+import { mcpResultText } from "./mcpResult";
+import { logTurn, logLlmPrompt, logLlmResponse, setDumpLlmContext, isDumpLlmContextOn } from "./agentDebug";
 
-// 调试日志:每轮 LLM 原始响应落盘 tmp/agent_turns.jsonl,方便对照 cleanContent 前后差别
-// 和排查截断问题。每行一条 JSON: {ts, chatId, turn, finishReason, rawContent, cleanedContent, toolCalls, usage}
-const LOG_PATH = path.resolve(__dirname, "..", "..", "tmp", "agent_turns.jsonl");
-let logReady = false;
-function logTurn(entry: Record<string, unknown>) {
-  try {
-    if (!logReady) {
-      fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
-      logReady = true;
-    }
-    fs.appendFileSync(LOG_PATH, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
-  } catch (e) {
-    console.warn("[agent] logTurn failed:", e);
-  }
-}
-
-// 测试模式:开关默认从环境变量 AUDIO_QC_DUMP_LLM=1 拿初值;运行期可通过开发者菜单
-// 调用 setDumpLlmContext(true/false) 热切换。开启后,每次调 LLM 前把完整 messages + tools
-// 写到 tmp/agent_contexts/<chatId>_t<NNN>.txt。人类可读格式,直观看压缩 / trail / system 长啥样。
-let dumpLlmContextOn = process.env.AUDIO_QC_DUMP_LLM === "1";
-const DUMP_DIR = path.resolve(__dirname, "..", "..", "tmp", "agent_contexts");
-let dumpDirReady = false;
-export function setDumpLlmContext(on: boolean): void {
-  dumpLlmContextOn = !!on;
-  console.log(`[agent] dump LLM context: ${dumpLlmContextOn ? "ON" : "OFF"}`);
-}
-export function isDumpLlmContextOn(): boolean {
-  return dumpLlmContextOn;
-}
-function dumpLlmContext(
-  chatId: string,
-  turn: number,
-  messages: Message[],
-  tools: ToolSchema[],
-) {
-  if (!dumpLlmContextOn) return;
-  try {
-    if (!dumpDirReady) {
-      fs.mkdirSync(DUMP_DIR, { recursive: true });
-      dumpDirReady = true;
-    }
-    const file = path.join(
-      DUMP_DIR,
-      `${chatId}_t${String(turn).padStart(3, "0")}.txt`,
-    );
-    const totalChars = messages.reduce(
-      (s, m) => s + JSON.stringify(m).length,
-      0,
-    );
-    const lines: string[] = [];
-    lines.push(`=== chat=${chatId} turn=${turn} ts=${new Date().toISOString()} ===`);
-    lines.push(`messages: ${messages.length}`);
-    lines.push(`estimated_chars: ${totalChars}`);
-    lines.push(`tools (${tools.length}): ${tools.map((t) => t.function.name).join(", ")}`);
-    lines.push("");
-    messages.forEach((m, i) => {
-      const head =
-        m.role === "tool"
-          ? `[${i}] tool (${m.name ?? "?"}) tool_call_id=${m.tool_call_id ?? "?"}`
-          : `[${i}] ${m.role}`;
-      lines.push(`--- ${head} ---`);
-      if (m.content) {
-        lines.push(typeof m.content === "string" ? m.content : JSON.stringify(m.content));
-      }
-      if (m.role === "assistant" && m.tool_calls) {
-        for (const tc of m.tool_calls) {
-          lines.push(`<tool_call id=${tc.id}> ${tc.function.name}(${tc.function.arguments})`);
-        }
-      }
-      lines.push("");
-    });
-    fs.writeFileSync(file, lines.join("\n"), "utf-8");
-  } catch (e) {
-    console.warn("[agent] dumpLlmContext failed:", e);
-  }
-}
+// 调试落盘(logTurn / GA 风格会话日志 / dump 开关)在 ./agentDebug。这里 re-export 开关,
+// 让 main.ts 仍从 "./agent" 拿(对外门面不变)。
+export { setDumpLlmContext, isDumpLlmContextOn };
 
 type Role = "system" | "user" | "assistant" | "tool";
 
@@ -115,7 +56,7 @@ interface ToolCall {
   function: { name: string; arguments: string };
 }
 
-interface Message {
+export interface Message {
   role: Role;
   content?: string | null;
   tool_calls?: ToolCall[];
@@ -123,7 +64,7 @@ interface Message {
   name?: string;
 }
 
-interface ToolSchema {
+export interface ToolSchema {
   type: "function";
   function: {
     name: string;
@@ -188,45 +129,26 @@ export type UiTurn =
   | { kind: "tool"; name: string; args: unknown; result?: unknown }
   | { kind: "phase"; label: string };
 
-// 上下文压缩(GA 模式 tag-aware truncate,见 llmcore.py:26-89):
-// - 不丢消息,只截老消息里的长字符串(tool_result.content / tool_call.arguments / <tag>...内文)
-// - 保护尾部 KEEP_RECENT 条最近消息原样不动 → 保 OpenAI tool_call→tool 链合规
-// - 节流 COMPRESS_EVERY:每 N 次调 LLM 才真压一次,中间 turn 跳过(GA 同款)
-// - 撑爆兜底:cost > CONTEXT_WIN_CHARS * 3 时再 force 压 + 弹最老 messages 到 60% target
-//   (trim 必破 prefix cache,GA 注释 "compress more btw" 已说明,只在真撑爆时用)
-const COMPRESS_KEEP_RECENT = 10;
-const COMPRESS_MAX_LEN = 800;
-const COMPRESS_EVERY = 5;
-// 估算上下文窗口的"字符数"等价 — DeepSeek/MiniMax 兼容层多在 60K-200K token,
-// 一字符 ≈ 1 token 是粗估;真撑爆是 3 倍 + 60% target 的两层保险,所以这里给小点偏安全
-const CONTEXT_WIN_CHARS = 60_000;
+// 上下文压缩的纯逻辑(tag-aware truncate / 撑爆 trim / anchor / summary 抽取 / cleanContent)
+// 全在 ./compaction。本文件只保留 "何时压" 的节流(compressCd)+ "压完后持久化 / 通知" 的
+// 副作用编排(见 maybeCompact)。压缩参数常量也从 compaction 导入。
 
-const PHASE_A_PROMPT = `你是 Audio QC 助手。
-
-当前你**还没进入质检流程**,本阶段允许的工具非常少:
-- sheet_list_my_pending:列出"我负责验收"的待处理歌曲
-- start_qc:用户选定要质检的歌后调用,切换到完整工作流
-
-行为规则:
-- 用户随便聊就正常聊。
-- 用户说"开始质检 X" / "帮我看 X" 这类意图明确的话 → 先用 sheet_list_my_pending 校验或直接调 start_qc(X)。
-- 不要假装自己能查文件 / 跑 audit。本阶段没那些工具,等 start_qc 后再说。
-- 每轮回复最后一行写 <summary>本轮要点</summary>,≤40 字。
-`;
-
-const PHASE_B_HEADER = `你是 Audio QC agent,已进入质检流程,song 已锁定。
-
-当前 song: {song}
-
-下面是完整工作手册,严格按它推进:
-
----
-
-`;
+// prompt 文本不再内联:三段都在 doc/prompts/ 下,构造时按注入的目录读入(见构造函数)。
+// 读失败给占位字符串(沿用原 workflow 软兜底),不让整个 runner 起不来。
+function readPromptFile(dir: string, name: string): string {
+  try {
+    return fs.readFileSync(path.join(dir, name), "utf-8");
+  } catch (e) {
+    console.warn(`[agent] failed to load prompt ${name}:`, e);
+    return `(prompt file missing: ${name})`;
+  }
+}
 
 export class AgentRunner {
   private chats = new Map<string, ChatState>();
-  private workflowText = "";
+  private phaseAPrompt = "";   // doc/prompts/phase_a.md
+  private phaseBHeader = "";   // doc/prompts/phase_b_header.md(含 {song} 占位)
+  private workflowText = "";   // doc/prompts/agent_workflow.md
   private workspaceRoot: string | null = null;
   // 每个 chat 同时只有一个 human_check 在挂起;resolver 被设上后,
   // executeTool human_check 的 await 会卡住,直到 resolveHumanCheck 调用它。
@@ -238,16 +160,13 @@ export class AgentRunner {
   constructor(
     private mcp: McpClient,
     private getMainWindow: () => BrowserWindow | null,
-    private workflowPath: string,
+    private promptsDir: string,
     private sidecarBase: string,
     private uiTools: UiTools,
   ) {
-    try {
-      this.workflowText = fs.readFileSync(workflowPath, "utf-8");
-    } catch (e) {
-      console.warn("[agent] failed to load workflow:", e);
-      this.workflowText = "(workflow file missing)";
-    }
+    this.phaseAPrompt = readPromptFile(promptsDir, "phase_a.md");
+    this.phaseBHeader = readPromptFile(promptsDir, "phase_b_header.md");
+    this.workflowText = readPromptFile(promptsDir, "agent_workflow.md");
   }
 
   /** Renderer 切换工作区时调,后续 startQc 用它做候选检索。 */
@@ -278,7 +197,8 @@ export class AgentRunner {
       // GA tag-aware truncate 是确定性的:每次 reload 重压一次,内存里的 messages
       // 跟关闭前(已被截断的)一致;不强制就要等到第 5 次 callLlm 节流到才压,前 4 次
       // 用全量原文调 LLM,token 会暴涨。
-      this.compressHistoryTags(s.messages, COMPRESS_KEEP_RECENT, COMPRESS_MAX_LEN, true);
+      compressHistoryTags(s.messages, COMPRESS_KEEP_RECENT, COMPRESS_MAX_LEN);
+      this.compressCd = 0; // 等价原 force=true:reload 重压一次后重置节流
       this.chats.set(chatId, s);
       return s;
     }
@@ -290,8 +210,8 @@ export class AgentRunner {
       chatId,
       phase: "A",
       song: null,
-      baseSystem: PHASE_A_PROMPT,
-      messages: [{ role: "system", content: PHASE_A_PROMPT }],
+      baseSystem: this.phaseAPrompt,
+      messages: [{ role: "system", content: this.phaseAPrompt }],
       messageDbTurnIndexes: [null],
       summaryTrail: [],
       turn: 0,
@@ -302,7 +222,7 @@ export class AgentRunner {
     this.chats.set(chatId, s);
     // 持久化 system seed
     const msgRow = appendMessage({ session_id: chatId, role: "system" });
-    appendPart({ message_id: msgRow.id, type: "text", content: { text: PHASE_A_PROMPT } as PartContentText });
+    appendPart({ message_id: msgRow.id, type: "text", content: { text: this.phaseAPrompt } as PartContentText });
     return s;
   }
 
@@ -314,9 +234,9 @@ export class AgentRunner {
     const phase: "A" | "B" = h.session.phase === "B" ? "B" : "A";
     const song = h.session.song;
     const liveFrom = h.session.live_from_turn_index ?? 0;
-    let baseSystem = PHASE_A_PROMPT;
+    let baseSystem = this.phaseAPrompt;
     if (phase === "B" && song) {
-      baseSystem = PHASE_B_HEADER.replace("{song}", song) + this.workflowText;
+      baseSystem = this.phaseBHeader.replace("{song}", song) + this.workflowText;
     }
 
     // 第一遍:把所有 assistant.summary parts 拼成 trail(不论 turn_index,全保留)。
@@ -484,7 +404,7 @@ export class AgentRunner {
     state.phase = "B";
     state.song = song;
     const newBase =
-      PHASE_B_HEADER.replace("{song}", song) +
+      this.phaseBHeader.replace("{song}", song) +
       this.workflowText;
 
     if (wasPhaseB) {
@@ -534,136 +454,34 @@ export class AgentRunner {
     this.emit({ chatId: state.chatId, type: "phase_change", data: { phase: "B", song } });
   }
 
-  // 软压缩(GA tag-aware truncate,llmcore.py:26-57 port 到 OpenAI Chat Completions 格式):
-  // - 不丢消息,保护尾部 keepRecent 条原样
-  // - 老消息里:
-  //   1) string content 内的 <thinking>/<think>/<tool_use>/<tool_result> tag 内文 → head+tail 截
-  //   2) <history>/<key_info> tag → 整段折成 [...]
-  //   3) tool role 的 content (= stringified tool result) → 整体 head+tail 截
-  //   4) assistant.tool_calls[*].function.arguments → 解析 JSON 截每个 string value,
-  //      解析不了就直接截整体字符串
-  // - 节流 _cd:每 COMPRESS_EVERY 次调用才真压一次;force=true 重置 _cd 立刻压
+  // 调 LLM 前的压缩入口:节流软压 + 撑爆兜底 trim。压缩纯逻辑在 ./compaction,
+  // 这里只管 "何时压"(compressCd 节流)和压完后的副作用(写 live_from / emit compacted)。
   private compressCd = 0;
-  private compressHistoryTags(
-    messages: Message[],
-    keepRecent = COMPRESS_KEEP_RECENT,
-    maxLen = COMPRESS_MAX_LEN,
-    force = false,
-  ): void {
+  private maybeCompact(state: ChatState): void {
+    // 节流:每 COMPRESS_EVERY 次才真软压一次(GA 同款,中间 turn 跳过省开销)
     this.compressCd += 1;
-    if (force) this.compressCd = 0;
-    if (this.compressCd % COMPRESS_EVERY !== 0) return;
-
-    const before = messages.reduce((s, m) => s + JSON.stringify(m).length, 0);
-    const half = Math.floor(maxLen / 2);
-    const truncStr = (s: string): string =>
-      typeof s === "string" && s.length > maxLen
-        ? s.slice(0, half) + "\n...[Truncated]...\n" + s.slice(-half)
-        : s;
-    const histPat = /<(history|key_info)>[\s\S]*?<\/\1>/g;
-    const tagPats: RegExp[] = [
-      /(<thinking>)([\s\S]*?)(<\/thinking>)/g,
-      /(<think>)([\s\S]*?)(<\/think>)/g,
-      /(<tool_use>)([\s\S]*?)(<\/tool_use>)/g,
-      /(<tool_result>)([\s\S]*?)(<\/tool_result>)/g,
-    ];
-    const truncText = (text: string): string => {
-      let t = text.replace(histPat, (_m, name) => `<${name}>[...]</${name}>`);
-      for (const pat of tagPats) {
-        t = t.replace(pat, (_m, open, inner, close) => open + truncStr(inner) + close);
-      }
-      return t;
-    };
-
-    const stopAt = messages.length - keepRecent;
-    for (let i = 0; i < stopAt; i++) {
-      const msg = messages[i];
-      // user / system / assistant.content 里可能有 tag,走 truncText
-      if (typeof msg.content === "string" && msg.content) {
-        msg.content = truncText(msg.content);
-      }
-      // tool role: content 是 stringified JSON tool_result,整体截
-      if (msg.role === "tool" && typeof msg.content === "string") {
-        msg.content = truncStr(msg.content);
-      }
-      // assistant.tool_calls[*].function.arguments: JSON 字符串,逐 value 截
-      if (msg.role === "assistant" && msg.tool_calls) {
-        for (const tc of msg.tool_calls) {
-          const argsStr = tc.function.arguments;
-          if (typeof argsStr !== "string" || argsStr.length <= maxLen) continue;
-          try {
-            const parsed = JSON.parse(argsStr) as Record<string, unknown>;
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              for (const k of Object.keys(parsed)) {
-                const v = parsed[k];
-                if (typeof v === "string") parsed[k] = truncStr(v);
-              }
-              tc.function.arguments = JSON.stringify(parsed);
-            } else {
-              tc.function.arguments = truncStr(argsStr);
-            }
-          } catch {
-            tc.function.arguments = truncStr(argsStr);
-          }
-        }
-      }
+    if (this.compressCd % COMPRESS_EVERY === 0) {
+      compressHistoryTags(state.messages);
     }
-    const after = messages.reduce((s, m) => s + JSON.stringify(m).length, 0);
-    if (after !== before) {
-      console.log(`[agent] compress: ${before} → ${after} chars (-${before - after})`);
-    }
-  }
-
-  // 硬上限兜底(GA trim_messages_history,llmcore.py:77-89):
-  // 先 compress 一次;若 cost 仍超 CONTEXT_WIN_CHARS*3,force 再压一遍 + 弹最老 messages 到
-  // 60% target。pop 时保证首条是 user(否则 OpenAI 拒;且首条不能是 tool 孤儿)。
-  // 弹掉的部分写 session.live_from_turn_index,reload 时 rebuildState 跳过这些 turn_index。
-  private trimMessagesHistory(state: ChatState): void {
-    this.compressHistoryTags(state.messages);
-    let cost = state.messages.reduce((s, m) => s + JSON.stringify(m).length, 0);
-    if (cost <= CONTEXT_WIN_CHARS * 3) return;
-    // 真撑爆 → force 再压一次(trim breaks cache,GA 注释:compress more btw)
-    this.compressHistoryTags(state.messages, 4, COMPRESS_MAX_LEN, true);
-    const target = CONTEXT_WIN_CHARS * 3 * 0.6;
-    cost = state.messages.reduce((s, m) => s + JSON.stringify(m).length, 0);
-    let popped = 0;
-    let newLiveFromTurnIdx: number | null = null;
-    while (state.messages.length > 5 && cost > target) {
-      // 弹掉第 1 条(保留 messages[0] = system),记录 turn_index
-      const dropped = state.messages.splice(1, 1)[0];
-      const droppedIdx = state.messageDbTurnIndexes.splice(1, 1)[0];
-      popped += 1;
-      if (droppedIdx != null) newLiveFromTurnIdx = droppedIdx + 1;
-      // 弹到下一个 user 边界,孤儿 tool / assistant.tool_calls 残留一并清掉
-      while (
-        state.messages.length > 1 &&
-        state.messages[1].role !== "user"
-      ) {
-        const d2 = state.messages.splice(1, 1)[0];
-        const d2Idx = state.messageDbTurnIndexes.splice(1, 1)[0];
-        popped += 1;
-        if (d2Idx != null) newLiveFromTurnIdx = d2Idx + 1;
-        void d2;
-      }
-      cost = state.messages.reduce((s, m) => s + JSON.stringify(m).length, 0);
-      void dropped;
-    }
+    if (messagesCost(state.messages) <= CONTEXT_WIN_CHARS * 3) return;
+    // 真撑爆 → 重置节流再 force 压一遍(keepRecent=4;trim 必破 prefix cache,GA:compress more btw)
+    this.compressCd = 0;
+    compressHistoryTags(state.messages, 4, COMPRESS_MAX_LEN);
+    const { popped, newLiveFromTurnIdx } = trimOverflow(
+      state.messages,
+      state.messageDbTurnIndexes,
+      CONTEXT_WIN_CHARS * 3 * 0.6,
+    );
     if (popped > 0) {
-      console.log(`[agent] trim: popped ${popped} oldest messages, ${cost} chars left`);
-      if (newLiveFromTurnIdx != null) {
-        updateSessionLiveFrom(state.chatId, newLiveFromTurnIdx);
-      }
+      const costAfter = messagesCost(state.messages);
+      console.log(`[agent] trim: popped ${popped} oldest messages, ${costAfter} chars left`);
+      if (newLiveFromTurnIdx != null) updateSessionLiveFrom(state.chatId, newLiveFromTurnIdx);
       this.emit({
         chatId: state.chatId,
         type: "compacted",
-        data: { reason: "trim_overflow", popped, costAfter: cost },
+        data: { reason: "trim_overflow", popped, costAfter },
       });
     }
-  }
-
-  // 调 LLM 前的压缩入口:一站式 compress + 撑爆兜底 trim。
-  private maybeCompact(state: ChatState): void {
-    this.trimMessagesHistory(state);
   }
 
   // ============ 工具组装 ============
@@ -902,11 +720,8 @@ export class AgentRunner {
       if (r.isError) {
         return { ok: false, code: "TOOL_ERROR", content: r.content };
       }
-      // MCP content is array of TextContent / etc. We collapse to first text payload if JSON.
-      const text =
-        Array.isArray(r.content) && r.content.length > 0 && "text" in r.content[0]
-          ? (r.content[0] as { text: string }).text
-          : JSON.stringify(r.content);
+      // MCP content 是 TextContent[] 等;取第一段 text payload,JSON 就解析,否则原样回 {text}
+      const text = mcpResultText(r.content);
       try {
         return JSON.parse(text);
       } catch {
@@ -952,56 +767,7 @@ export class AgentRunner {
   }
 
   // ============ 主循环 ============
-
-  private extractSummary(text: string | null | undefined): string | null {
-    if (!text) return null;
-    const m = text.match(/<summary>([\s\S]*?)<\/summary>/);
-    return m ? m[1].trim() : null;
-  }
-
-  // GA <history> 短期工作记忆(ga.py:504-514):每次调 LLM 前临时往 messages 末尾追加
-  // 一条 user,内容 = 最近 20 条 <summary>(被 compressHistoryTags 折叠规则识别为
-  // <history>,老消息里的 history block 会被压成 [...],只有当前轮完整)+ 漏写警告。
-  // 调完撤掉,不污染 state.messages / 不写 db。
-  private buildAnchorMessage(state: ChatState): Message | null {
-    const lines: string[] = [];
-    if (state.summaryTrail.length > 0) {
-      const recent = state.summaryTrail.slice(-20);
-      lines.push("[WORKING MEMORY]");
-      lines.push("<history>");
-      lines.push(...recent);
-      lines.push("</history>");
-    }
-    if (state.missedSummary) {
-      lines.push(
-        "[DANGER] 上一轮遗漏了 <summary>。本轮必须在回复末尾按协议输出 <summary>≤40字</summary>,内容 = 上次工具结果新信息 + 本次意图。",
-      );
-      state.missedSummary = false; // 一次性,警告完就清
-    }
-    if (lines.length === 0) return null;
-    return { role: "user", content: lines.join("\n") };
-  }
-
-  // MiniMax / 类 ChatML 兼容层有时会把 native function-call 标记泄漏到 content 字段
-  // (例如 `<|DSML|>function_calls<|...|>`). 我们的 tool_calls 已经走结构化字段拿到了,
-  // content 里这些残留只会让前端显示乱码,直接清掉。
-  private cleanContent(text: string | null | undefined): string {
-    if (!text) return "";
-    // DeepSeek/MiniMax 系 native function-call token 既可能用 ASCII `|` 也可能用
-    // 全角 `｜`(U+FF5C);用字符类 [|｜] 一并覆盖。
-    return text
-      // 完整闭合 <|...|> / <｜...｜>
-      .replace(/<[|｜][\s\S]*?[|｜]>/g, "")
-      // 残留未闭合 <|... 到行尾
-      .replace(/<[|｜][^\n]*?(?=\n|$)/g, "")
-      // 孤立的 |> / ｜> 收尾标记
-      .replace(/[|｜]>/g, "")
-      // 配套 XML wrapper
-      .replace(/<\/?DSML>/g, "")
-      .replace(/<\/?function_calls>/g, "")
-      .replace(/<\/?function_call>/g, "")
-      .trim();
-  }
+  // summary 抽取 / anchor 构造 / content 清洗都在 ./compaction(纯函数)。
 
   async send(chatId: string, userText: string): Promise<void> {
     const state = this.getOrCreate(chatId);
@@ -1121,11 +887,7 @@ export class AgentRunner {
       name: "fs_list_dir",
       arguments: { path: this.workspaceRoot, max_depth: 1 },
     });
-    const text =
-      Array.isArray(r.content) && r.content.length > 0 && "text" in r.content[0]
-        ? (r.content[0] as { text: string }).text
-        : "";
-    const data = JSON.parse(text) as { dirs?: Array<{ name: string }> };
+    const data = JSON.parse(mcpResultText(r.content)) as { dirs?: Array<{ name: string }> };
     return (data.dirs ?? []).map((d) => d.name).filter(Boolean);
   }
 
@@ -1250,12 +1012,13 @@ export class AgentRunner {
       const tools = await this.buildTools(state);
       // GA <history> 短期工作记忆:临时往 messages 末尾追加一条 user,调完撤掉,
       // 不污染 state.messages、不写 db。
-      const anchor = this.buildAnchorMessage(state);
+      const anchor = buildAnchorMessage(state.summaryTrail, state.missedSummary);
+      state.missedSummary = false; // 一次性:DANGER 提示已注入(若有),清掉
       if (anchor) {
         state.messages.push(anchor);
         state.messageDbTurnIndexes.push(null);
       }
-      dumpLlmContext(state.chatId, state.turn, state.messages, tools);
+      logLlmPrompt(state.chatId, state.turn, state.song, state.messages, tools);
       let llmOut;
       try {
         llmOut = await this.callLlm(state.messages, tools);
@@ -1270,7 +1033,7 @@ export class AgentRunner {
       }
       const { message: assistant, usage, finishReason, cachedTokens } = llmOut;
       const rawContent = (assistant.content ?? "") as string;
-      const content = this.cleanContent(rawContent);
+      const content = cleanContent(rawContent);
       logTurn({
         chatId: state.chatId,
         turn: state.turn,
@@ -1291,6 +1054,15 @@ export class AgentRunner {
       console.log(
         `[agent] t${state.turn} finish=${finishReason} prompt=${promptTokens} (cache_hit=${cachedTokens}) completion=${completionTokens} msgs=${state.messages.length}`,
       );
+      // GA 风格会话日志:Response 块(配对前面的 Prompt 块),记原始响应 + tool_calls + finish/usage
+      logLlmResponse(state.chatId, state.turn, state.song, {
+        content: rawContent,
+        toolCalls: assistant.tool_calls ?? [],
+        finishReason,
+        promptTokens,
+        completionTokens,
+        cachedTokens,
+      });
       // 先 appendMessage 拿 turn_index,再同步 push 到内存,保 messages 跟 turnIndexes 平行
       const assistantMsg = appendMessage({
         session_id: state.chatId,
@@ -1310,7 +1082,7 @@ export class AgentRunner {
       }
 
       // summary 抽 + GA fallback(ga.py:518-527):LLM 漏写 → 从 tool_calls 派生 + 给下轮 [DANGER]
-      const extracted = this.extractSummary(content);
+      const extracted = extractSummary(content);
       let summaryForTrail: string | null = extracted;
       if (!summaryForTrail) {
         const tcs = assistant.tool_calls ?? [];

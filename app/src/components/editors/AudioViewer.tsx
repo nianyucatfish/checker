@@ -3,6 +3,7 @@ import { Loader2, AlertCircle, FileAudio, ZoomIn, ZoomOut, RotateCcw, Play, Paus
 import { getAudioMetadata, getAudioPeaks, rawFileUrl, readCsv } from "../../api";
 import type { AudioMetadataOut, AudioPeaksOut } from "../../api";
 import { Metronome, type BeatMarker } from "../../lib/metronome";
+import { useDarkTheme, setupWaveformCanvas } from "../../lib/waveform";
 import { clsx } from "../../utils";
 
 interface Props {
@@ -146,29 +147,9 @@ function drawWaveform(
   view: View,
   dark: boolean,
 ) {
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.floor(canvas.clientWidth * dpr);
-  const height = Math.floor(canvas.clientHeight * dpr);
-  if (canvas.width !== width) canvas.width = width;
-  if (canvas.height !== height) canvas.height = height;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.clearRect(0, 0, width, height);
-
-  ctx.fillStyle = dark ? "#1e1e1e" : "#fafafa";
-  ctx.fillRect(0, 0, width, height);
-
-  const centerY = height / 2;
-  const padding = 4 * dpr;
-  const ampHalf = Math.max(1, centerY - padding);
-
-  ctx.strokeStyle = dark ? "#3c3c3c" : "#e5e5e5";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, centerY);
-  ctx.lineTo(width, centerY);
-  ctx.stroke();
+  const w = setupWaveformCanvas(canvas, dark, 4);
+  if (!w) return;
+  const { ctx, width, height, dpr, centerY, ampHalf } = w;
 
   const n = peaks.columns;
   if (n === 0 || view.duration <= 0 || view.visibleSec <= 0) return;
@@ -328,23 +309,6 @@ function drawStructureOverlay(
     }
   }
   ctx.restore();
-}
-
-function useDarkTheme() {
-  const [dark, setDark] = useState(() =>
-    document.documentElement.classList.contains("dark"),
-  );
-  useEffect(() => {
-    const obs = new MutationObserver(() => {
-      setDark(document.documentElement.classList.contains("dark"));
-    });
-    obs.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-    return () => obs.disconnect();
-  }, []);
-  return dark;
 }
 
 export function AudioViewer({ path }: Props) {

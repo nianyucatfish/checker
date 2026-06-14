@@ -9,7 +9,8 @@
     "build": "tsc -b && vite build && electron-builder",
     "preview": "vite preview",
     "electron:dev": "vite",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
@@ -26,6 +27,7 @@
     "vite": "^5.0.0",
     "vite-plugin-electron": "^0.15.0",
     "vite-plugin-electron-renderer": "^0.14.0",
+    "vitest": "^2.1.9",
     "wait-on": "^7.2.0"
   },
   "dependencies": {

@@ -530,18 +530,9 @@ def _exec_create_dir(op: dict, result: AutofixResult) -> None:
     result.executed.append({"type": "create_dir", "path": path})
 
 
-def _exec_write_text(op: dict, result: AutofixResult) -> None:
-    """write_text = 全文原子写(tmp + os.replace)。
-
-    扩展名白名单已由 _validate_op_paths 整批校验;路径越界已拒。本函数只管写。
-    覆盖既有文件不预 backup —— send2trash 不适用(文件还在原路径,只是内容换了),
-    回滚靠 review_log + agent 重新生成内容。
-
-    UTF-8 写,不强制 BOM。CRLF 不保留(content 写啥就写啥)—— 跟 api.py /tools/write_text
-    现行行为一致。
-    """
-    path = result.path_updates.get(op["path"], op["path"])
-    content = op["content"]
+def _atomic_write_text(path: str, content: str) -> int:
+    """全文 UTF-8 原子写(tmp + os.replace,失败清 tmp);newline="" 不转换换行。
+    父目录不存在抛 FileNotFoundError。返回写入字节数。write_text / text_edit 共用。"""
     parent = os.path.dirname(path) or "."
     if not os.path.isdir(parent):
         raise FileNotFoundError(f"父目录不存在:{parent}")
@@ -558,10 +549,25 @@ def _exec_write_text(op: dict, result: AutofixResult) -> None:
             except OSError:
                 pass
         raise
+    return os.path.getsize(path)
+
+
+def _exec_write_text(op: dict, result: AutofixResult) -> None:
+    """write_text = 全文原子写(tmp + os.replace)。
+
+    扩展名白名单已由 _validate_op_paths 整批校验;路径越界已拒。本函数只管写。
+    覆盖既有文件不预 backup —— send2trash 不适用(文件还在原路径,只是内容换了),
+    回滚靠 review_log + agent 重新生成内容。
+
+    UTF-8 写,不强制 BOM。CRLF 不保留(content 写啥就写啥)—— 跟 api.py /tools/write_text
+    现行行为一致。
+    """
+    path = result.path_updates.get(op["path"], op["path"])
+    size = _atomic_write_text(path, op["content"])
     result.executed.append({
         "type": "write_text",
         "path": path,
-        "bytes_written": os.path.getsize(path),
+        "bytes_written": size,
     })
 
 
@@ -596,18 +602,7 @@ def _exec_text_edit(op: dict, result: AutofixResult) -> None:
     else:
         new_text = text.replace(old_string, new_string, 1)
 
-    tmp = path + ".__write_tmp__"
-    try:
-        with open(tmp, "w", encoding="utf-8", newline="") as f:
-            f.write(new_text)
-        os.replace(tmp, path)
-    except Exception:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-        raise
+    _atomic_write_text(path, new_text)
     result.executed.append({
         "type": "text_edit",
         "path": path,

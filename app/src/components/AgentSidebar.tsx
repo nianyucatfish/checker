@@ -266,6 +266,7 @@ export function AgentSidebar() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // cancel 已发出但 turn_done 还没回来的窗口:按钮 disable + 灰掉,避免双击
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -779,6 +780,8 @@ export function AgentSidebar() {
                           setSending(false);
                           setError(err instanceof Error ? err.message : String(err));
                         });
+                      // 卡片处理完会变 disabled,焦点掉到 body → 光标消失;还回聊天输入框
+                      requestAnimationFrame(() => composerRef.current?.focus());
                     }}
                   />
                 );
@@ -837,6 +840,7 @@ export function AgentSidebar() {
 
         <form onSubmit={onSubmit} className="agent-composer">
           <textarea
+            ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Run local tasks with Claude, type ‘#’ for context..."

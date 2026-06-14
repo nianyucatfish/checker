@@ -232,14 +232,11 @@ class LogicChecker:
 
     @staticmethod
     def get_wav_duration_seconds(wav_path):
-        """读取 WAV 时长（秒）。失败返回 None。"""
-        try:
-            with sf.SoundFile(wav_path) as f:
-                if not f.samplerate or f.samplerate <= 0:
-                    return None
-                return float(f.frames) / float(f.samplerate)
-        except Exception:
+        """读取 WAV 时长（秒）。失败返回 None。复用 get_wav_frames_and_rate,不重复开文件。"""
+        frames, sr = LogicChecker.get_wav_frames_and_rate(wav_path)
+        if frames is None or not sr:
             return None
+        return float(frames) / float(sr)
 
     @staticmethod
     def get_wav_frames_and_rate(wav_path):

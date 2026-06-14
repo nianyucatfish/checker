@@ -10,6 +10,7 @@ import {
   Volume2,
 } from "lucide-react";
 import { rawFileUrl } from "../api";
+import { useDarkTheme, setupWaveformCanvas } from "../lib/waveform";
 import { MixEngine, type MixTrackData } from "../lib/mixEngine";
 import { clsx } from "../utils";
 
@@ -31,23 +32,6 @@ function fmtTime(sec: number): string {
   return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 }
 
-function useDarkTheme() {
-  const [dark, setDark] = useState(() =>
-    document.documentElement.classList.contains("dark"),
-  );
-  useEffect(() => {
-    const obs = new MutationObserver(() => {
-      setDark(document.documentElement.classList.contains("dark"));
-    });
-    obs.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-    return () => obs.disconnect();
-  }, []);
-  return dark;
-}
-
 function drawTrackWaveform(
   canvas: HTMLCanvasElement,
   peaks: { mins: Float32Array; maxs: Float32Array },
@@ -55,28 +39,9 @@ function drawTrackWaveform(
   posSec: number,
   dark: boolean,
 ) {
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.floor(canvas.clientWidth * dpr);
-  const height = Math.floor(canvas.clientHeight * dpr);
-  if (canvas.width !== width) canvas.width = width;
-  if (canvas.height !== height) canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = dark ? "#1e1e1e" : "#fafafa";
-  ctx.fillRect(0, 0, width, height);
-
-  const cy = height / 2;
-  const padY = 2 * dpr;
-  const ampHalf = Math.max(1, cy - padY);
-
-  // 中线
-  ctx.strokeStyle = dark ? "#3c3c3c" : "#e5e5e5";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, cy);
-  ctx.lineTo(width, cy);
-  ctx.stroke();
+  const w = setupWaveformCanvas(canvas, dark, 2);
+  if (!w) return;
+  const { ctx, width, height, dpr, centerY: cy, ampHalf } = w;
 
   const n = peaks.mins.length;
   if (n === 0 || durationSec <= 0) return;

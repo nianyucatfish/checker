@@ -17,6 +17,7 @@ import {
   deleteSession,
 } from "./db";
 import { AgentRunner, type UiTools, setDumpLlmContext, isDumpLlmContextOn } from "./agent";
+import { spawnCaptureWithTimeout } from "./spawnCapture";
 
 const SIDECAR_PORT = 8775; // TODO Phase 5: pick random free port
 
@@ -110,6 +111,21 @@ async function pushWorkspaceToMcp(root: string | null): Promise<void> {
   }
 }
 
+// 把工作区同步给两个后端进程:FastAPI(HTTP 工具)+ mcp 子进程(LLM 工具),各自维护 _ws._current。
+// 缺一不可。IPC set-workspace 和 MCP/runner 起来后的 catch-up 都走这里,保证两个后端不漂。
+async function pushWorkspaceToAllBackends(root: string | null): Promise<void> {
+  try {
+    await fetch(`http://127.0.0.1:${SIDECAR_PORT}/agent/workspace`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root }),
+    });
+  } catch (e) {
+    console.warn("[agent] push workspace to sidecar failed:", e);
+  }
+  await pushWorkspaceToMcp(root);
+}
+
 async function startMcpClient(): Promise<void> {
   const projectRoot = path.resolve(__dirname, "..", "..");
   const py = process.platform === "win32"
@@ -142,7 +158,8 @@ async function startMcpClient(): Promise<void> {
     console.log(`  - ${t.name}: ${(t.description ?? "").split("\n")[0]}`);
   }
 
-  // workflow.md 从仓库根加载;sidecar baseUrl 注入,避免常量在 agent.ts 重写一遍
+  // prompt 文本(phase_a / phase_b_header / agent_workflow)都在 doc/prompts/,注入目录由 agent 读取;
+  // sidecar baseUrl 也注入,避免常量在 agent.ts 重写一遍
   const projectRoot2 = path.resolve(__dirname, "..", "..");
   // UI 工具实现:闭包到 main 这边的 mainWindow / mixTracks / showMixWindowAnimated 等。
   // agent.ts 只看签名(UiTools 接口),不知道这些细节,保跨进程边界干净。
@@ -204,7 +221,7 @@ async function startMcpClient(): Promise<void> {
   agentRunner = new AgentRunner(
     mcpClient,
     () => mainWindow,
-    path.join(projectRoot2, "doc", "agent_workflow.md"),
+    path.join(projectRoot2, "doc", "prompts"),
     `http://127.0.0.1:${SIDECAR_PORT}`,
     uiTools,
   );
@@ -215,7 +232,7 @@ async function startMcpClient(): Promise<void> {
   // WORKSPACE_NOT_SET。
   if (currentWorkspaceRoot) {
     agentRunner.setWorkspace(currentWorkspaceRoot);
-    await pushWorkspaceToMcp(currentWorkspaceRoot);
+    await pushWorkspaceToAllBackends(currentWorkspaceRoot);
   }
 }
 
@@ -283,18 +300,7 @@ ipcMain.handle("agent:delete-session", (_e, chatId: string) => {
 ipcMain.handle("agent:set-workspace", async (_e, root: string | null) => {
   currentWorkspaceRoot = root;
   agentRunner?.setWorkspace(root);
-  // 同步推给 sidecar(FastAPI)+ mcp 子进程,两个进程各自维护 _ws._current。
-  // 缺一不可:HTTP 工具走 sidecar,LLM 走 mcp 子进程。
-  try {
-    await fetch(`http://127.0.0.1:${SIDECAR_PORT}/agent/workspace`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ root }),
-    });
-  } catch (e) {
-    console.warn("[agent] push workspace to sidecar failed:", e);
-  }
-  await pushWorkspaceToMcp(root);
+  await pushWorkspaceToAllBackends(root);
 });
 
 async function stopMcpClient(): Promise<void> {
@@ -320,9 +326,10 @@ function createWindow() {
     },
   });
   mainWindow = win;
-  // setApplicationMenu(null) 把默认 F12 / Ctrl+Shift+I + 剪贴板快捷键一起带走了,
-  // 这里手动补回:DevTools 切换 + Ctrl+C/X/V/A 走 webContents 内置 API。
-  // 缺 Ctrl+C 会让"能选中,复制无内容"——选中可视化由 CSS 走,但 clipboard 写入靠这。
+  // setApplicationMenu(null) 把默认 F12 / Ctrl+Shift+I 带走了,这里只补回 DevTools 切换。
+  // 剪贴板快捷键(C/X/V/A)故意不在这拦截:preventDefault 会吞掉 keydown,导致文件树
+  // 自己的 Ctrl+C/X/V(Explorer 内处理)收不到。文本框 / 只读 Monaco / 选区的复制粘贴
+  // 走 Chromium 默认行为(Windows 下表单控件原生支持),不需要 main 代劳。
   win.webContents.on("before-input-event", (e, input) => {
     if (input.type !== "keyDown") return;
     const ctrl = input.control || input.meta;
@@ -332,14 +339,6 @@ function createWindow() {
     if (isF12 || isCtrlShiftI) {
       win.webContents.toggleDevTools();
       e.preventDefault();
-      return;
-    }
-    if (ctrl && !input.alt && !input.shift) {
-      const k = input.key.toLowerCase();
-      if (k === "c") { win.webContents.copy(); e.preventDefault(); return; }
-      if (k === "x") { win.webContents.cut(); e.preventDefault(); return; }
-      if (k === "v") { win.webContents.paste(); e.preventDefault(); return; }
-      if (k === "a") { win.webContents.selectAll(); e.preventDefault(); return; }
     }
   });
   win.on("closed", () => {
@@ -531,43 +530,18 @@ function parseHdropBuffer(buf: Buffer): string[] {
 // 慢点(每次 ~200ms)但只在 Ctrl+V 时调,用户不会有感。
 async function readClipboardFilesWindows(): Promise<string[]> {
   try {
-    const paths = await new Promise<string[]>((resolve) => {
-      const proc = spawn(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "[Console]::OutputEncoding = [Text.Encoding]::UTF8;" +
-            " Get-Clipboard -Format FileDropList | ForEach-Object { $_.FullName }",
-        ],
-        { windowsHide: true },
-      );
-      let stdout = "";
-      proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf-8")));
-      let resolved = false;
-      const finish = () => {
-        if (resolved) return;
-        resolved = true;
-        const out = stdout
-          .split(/\r?\n/)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
-        resolve(out);
-      };
-      proc.on("error", () => {
-        if (!resolved) {
-          resolved = true;
-          resolve([]);
-        }
-      });
-      proc.on("close", finish);
-      setTimeout(() => {
-        if (resolved) return;
-        try { proc.kill(); } catch { /* ignore */ }
-        finish();
-      }, 3000);
-    });
+    const stdout = await spawnCaptureWithTimeout(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8;" +
+          " Get-Clipboard -Format FileDropList | ForEach-Object { $_.FullName }",
+      ],
+      3000,
+    );
+    const paths = stdout.split(/\r?\n/).map((s) => s.trim()).filter((s) => s.length > 0);
     if (paths.length > 0) return paths;
   } catch (e) {
     console.warn("[clipboard] powershell read failed:", e);

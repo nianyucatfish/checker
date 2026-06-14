@@ -6,6 +6,7 @@ Pydantic schemas in sidecar.schemas keep contracts stable for the renderer.
 """
 
 import csv
+import json
 import mimetypes
 import os
 import shutil
@@ -19,7 +20,8 @@ from fastapi.responses import FileResponse
 
 from sidecar import checker, fixers
 from sidecar import workspace as _ws
-from sidecar.config import reload_config
+from sidecar.config import reload_config, llm_override_path
+from sidecar import llm_providers as llm
 from sidecar.schemas import (
     AudioMetadata,
     ApplyRenamesIn,
@@ -111,6 +113,59 @@ def agent_workspace(body: dict):
     return {"ok": True, "current": _ws.get_workspace()}
 
 
+def _mask_key(key: str) -> str:
+    if not key:
+        return ""
+    return ("•" * 4 + key[-4:]) if len(key) >= 4 else "•" * len(key)
+
+
+def _llm_config_view() -> dict:
+    c = reload_config().test_llm
+    return {
+        "protocol": c.protocol,
+        "endpoint": c.endpoint,
+        "model": c.model,
+        "key_set": bool(c.api_key),
+        "key_masked": _mask_key(c.api_key),
+    }
+
+
+@app.get("/config/llm")
+def get_llm_config():
+    """当前 LLM 配置(api_key 只回打码态,不回明文)。设置界面读这个回显。"""
+    return _llm_config_view()
+
+
+@app.post("/config/llm")
+def set_llm_config(body: dict):
+    """写 LLM 配置到 llm_override.json(盖在 config.toml 上)。
+
+    Body: {protocol?, endpoint?, model?, api_key?}。api_key 空/缺则保留现有(不清空)。
+    写完即生效(/agent/completion 每次 reload_config)。
+    """
+    path = llm_override_path()
+    cur: dict = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cur = loaded
+        except (OSError, ValueError):
+            cur = {}
+    for k in ("protocol", "endpoint", "model"):
+        if isinstance(body.get(k), str):
+            cur[k] = body[k].strip()
+    ak = body.get("api_key")
+    if isinstance(ak, str) and ak.strip():
+        cur["api_key"] = ak.strip()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"写配置失败: {e}") from e
+    return {"ok": True, **_llm_config_view()}
+
+
 @app.post("/agent/completion")
 def agent_completion(body: dict):
     """Proxy LLM call with tool support for the Electron agent loop.
@@ -123,17 +178,24 @@ def agent_completion(body: dict):
     if not cfg.endpoint or not cfg.api_key:
         raise HTTPException(status_code=400, detail="test_llm.endpoint/api_key 未配置")
 
-    payload = {
-        "model": cfg.model,
-        "messages": body.get("messages", []),
-        "tools": body.get("tools", []),
-        "tool_choice": body.get("tool_choice", "auto"),
-        "stream": False,
-        # 显式给上限,避免代理默认值过小导致中段截断
-        "max_tokens": body.get("max_tokens", 4096),
-    }
-    headers = {"Authorization": f"Bearer {cfg.api_key}"}
-    url = cfg.endpoint.rstrip("/") + "/v1/chat/completions"
+    # 按 protocol 分发(适配在 llm_providers.py);agent 永远只发 OpenAI 形状,差异全在这翻译。
+    protocol = (cfg.protocol or "openai").lower()
+    max_tokens = body.get("max_tokens", 4096)  # 显式给上限,避免代理默认值过小导致中段截断
+    if protocol == "anthropic":
+        payload = llm.to_anthropic_request(body, cfg.model, max_tokens)
+        headers = llm.anthropic_headers(cfg.api_key)
+        url = llm.anthropic_url(cfg.endpoint)
+    else:
+        payload = {
+            "model": cfg.model,
+            "messages": body.get("messages", []),
+            "tools": body.get("tools", []),
+            "tool_choice": body.get("tool_choice", "auto"),
+            "stream": False,
+            "max_tokens": max_tokens,
+        }
+        headers = llm.openai_headers(cfg.api_key)
+        url = llm.openai_endpoint_url(cfg.endpoint)
 
     # GA llmcore.py:296-349 同款重试策略:
     # - 5xx/429/超时 → 指数退避 1.5 * 2^attempt(封顶 30s),honor Retry-After
@@ -173,20 +235,30 @@ def agent_completion(body: dict):
     if data is None:
         raise HTTPException(status_code=502, detail=f"LLM request failed after {max_retries+1} attempts: {last_err}")
 
-    try:
-        choice = data["choices"][0]
-        msg = choice["message"]
-    except (KeyError, IndexError, TypeError) as e:
-        raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
-    finish_reason = choice.get("finish_reason", "")
-    usage = data.get("usage", {})
-    # 抽取 cache 命中数:覆盖 3 种主流 schema
-    cached = (
-        usage.get("prompt_cache_hit_tokens")
-        or (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
-        or usage.get("cache_read_input_tokens")
-        or 0
-    )
+    if protocol == "anthropic":
+        try:
+            parsed = llm.from_anthropic_response(data)
+        except (KeyError, IndexError, TypeError) as e:
+            raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
+        msg = parsed["message"]
+        finish_reason = parsed["finish_reason"]
+        usage = parsed["usage"]
+        cached = parsed["cached_tokens"]
+    else:
+        try:
+            choice = data["choices"][0]
+            msg = choice["message"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
+        finish_reason = choice.get("finish_reason", "")
+        usage = data.get("usage", {})
+        # 抽取 cache 命中数:覆盖 3 种主流 schema
+        cached = (
+            usage.get("prompt_cache_hit_tokens")
+            or (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            or usage.get("cache_read_input_tokens")
+            or 0
+        )
     print(
         f"[agent_completion] finish={finish_reason} cached={cached} usage={usage}",
         flush=True,

@@ -276,7 +276,7 @@ def _system_prompt(workflow_text: str, workspace: Path, song_folder: Path, song_
 
 
 def run_agent(song_folder: Path, song_name: str, chat_id: str, workspace: Path, max_turns: int) -> int:
-    workflow = (ROOT / "doc" / "agent_workflow.md").read_text(encoding="utf-8")
+    workflow = (ROOT / "doc" / "prompts" / "agent_workflow.md").read_text(encoding="utf-8")
     tools, funcs = _build_tools(workspace)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _system_prompt(workflow, workspace.resolve(), song_folder.resolve(), song_name)},

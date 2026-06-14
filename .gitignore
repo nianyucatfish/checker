@@ -29,6 +29,8 @@ Thumbs.db
 # config.toml 包含凭证(腾讯文档 access_token、Anthropic API key 等),不进 git
 # 模板见 config.example.toml(已提交)
 config.toml
+# 设置界面写的 LLM 覆盖(含 api_key),也不进 git
+llm_override.json
 
 *.mid
 piano_roll_test.py

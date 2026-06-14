@@ -22,6 +22,7 @@ import {
 } from "../api";
 import type { DirEntryOut, CheckErrorOut, AudioDurationItem } from "../api";
 import { clsx } from "../utils";
+import { isPathUnderDir } from "../lib/paths";
 
 interface Props {
   root: string | null;
@@ -65,8 +66,7 @@ function joinPath(parent: string, name: string) {
 
 // 是否 of 在 maybeAncestor 之下(严格,不含相等)。drop 防循环用。
 function isAncestor(maybeAncestor: string, of: string): boolean {
-  if (maybeAncestor === of) return false;
-  return of.startsWith(maybeAncestor + "\\") || of.startsWith(maybeAncestor + "/");
+  return isPathUnderDir(of, maybeAncestor);
 }
 
 function fmtDuration(sec: number) {
@@ -468,11 +468,9 @@ export function Explorer({
   const errorCountFor = useCallback(
     (p: string, isDir: boolean) => {
       if (isDir) {
-        const sep1 = p + "\\";
-        const sep2 = p + "/";
         let n = 0;
         for (const e of allErrors) {
-          if (e.path === p || e.path.startsWith(sep1) || e.path.startsWith(sep2)) n++;
+          if (e.path === p || isPathUnderDir(e.path, p)) n++;
         }
         return n;
       }
@@ -738,9 +736,27 @@ export function Explorer({
         return;
       }
 
-      // 1. 优先读 OS 剪贴板:用户从 Windows 资源管理器 / Finder 复制的文件
-      //    在外部复制 = 始终 copy(系统层面剪贴板没有"剪切"语义,Windows
-      //    所谓的剪切只是高亮显示,实际仍是拷贝;粘贴到我们这里就当复制处理)
+      // 1. 内部"剪切"= 明确的 app 内移动意图,最先处理。放在 OS 剪贴板之前,
+      //    否则 OS 里残留的文件会把剪切覆盖成复制、源不删(用户报的 bug)。
+      if (clipboard?.mode === "cut") {
+        try {
+          await movePaths(clipboard.srcs, dstDir);
+          setClipboard(null); // 剪切后清空
+          const dirs = new Set<string>([dstDir]);
+          for (const s of clipboard.srcs) {
+            const d = dirname(s);
+            if (d) dirs.add(d);
+          }
+          for (const d of dirs) await refreshDir(d);
+          onMutated();
+        } catch (e) {
+          alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        return;
+      }
+
+      // 2. OS 剪贴板:从资源管理器复制的文件,始终当 copy(系统层面没有"剪切"语义)。
+      //    优先于内部 copy —— 外部复制通常是更新的意图。
       let osPaths: string[] = [];
       try {
         osPaths = (await window.electronAPI.clipboardReadFiles()) || [];
@@ -750,8 +766,7 @@ export function Explorer({
       }
       if (osPaths.length > 0) {
         try {
-          const r = await copyPaths(osPaths, dstDir);
-          console.log("[explorer] copyPaths result:", r);
+          await copyPaths(osPaths, dstDir);
           await refreshDir(dstDir);
           onMutated();
         } catch (e) {
@@ -760,31 +775,15 @@ export function Explorer({
         return;
       }
 
-      // 2. 内部剪贴板(Explorer 自己 Ctrl+C / Ctrl+X 写入)
-      if (!clipboard) {
-        console.log("[explorer] doPaste: no OS files and no internal clipboard");
-        return;
-      }
-      try {
-        if (clipboard.mode === "copy") {
+      // 3. 内部 copy
+      if (clipboard?.mode === "copy") {
+        try {
           await copyPaths(clipboard.srcs, dstDir);
-        } else {
-          await movePaths(clipboard.srcs, dstDir);
-          // 剪切后清空剪贴板
-          setClipboard(null);
+          await refreshDir(dstDir);
+          onMutated();
+        } catch (e) {
+          alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
         }
-        // 刷新目标目录 + 源目录(剪切的话源没了)
-        const dirs = new Set<string>([dstDir]);
-        if (clipboard.mode === "cut") {
-          for (const s of clipboard.srcs) {
-            const d = dirname(s);
-            if (d) dirs.add(d);
-          }
-        }
-        for (const d of dirs) await refreshDir(d);
-        onMutated();
-      } catch (e) {
-        alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
     [clipboard, refreshDir, onMutated],

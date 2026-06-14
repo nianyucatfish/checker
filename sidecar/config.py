@@ -12,6 +12,7 @@ sidecar 启动本身不依赖配置(凭证仅在调到对应外部 API 时才需
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tomllib
@@ -73,10 +74,14 @@ class TestLLMConfig:
 
     与 [anthropic] 分开,production 切回 Anthropic SDK 时 [anthropic] 字段直接生效,
     本节可清空。当前只用于 sidebar 聊天测试。
+
+    protocol: "openai"(OpenAI 兼容,默认,覆盖绝大多数厂商)或 "anthropic"(Anthropic 原生
+    Messages API)。协议适配在 llm_providers.py,api.py /agent/completion 按它分发。
     """
     endpoint: str = ""
     api_key: str = ""
     model: str = "claude-opus-4-7"
+    protocol: str = "openai"
 
 
 @dataclass
@@ -141,6 +146,7 @@ def _from_raw(raw: dict, source: Path) -> Config:
             endpoint=str(l.get("endpoint", "")),
             api_key=str(l.get("api_key", "")),
             model=str(l.get("model", "claude-opus-4-7")),
+            protocol=str(l.get("protocol", "openai")),
         ),
         agent_sandbox=AgentSandboxConfig(
             sheet_fixture_path=str(s.get("sheet_fixture_path", "")),
@@ -155,7 +161,43 @@ def _from_raw(raw: dict, source: Path) -> Config:
     )
 
 
+# LLM 配置的可写覆盖:UI 在设置里改的 endpoint/api_key/model/protocol 写到 llm_override.json,
+# 盖在 config.toml 的 [test_llm] 之上。tomllib 只读不可写,JSON 好写;且 api_key 不进示例配置。
+# 路径 = config.toml 同目录(没有 config.toml 就用平台 app config 目录)。
+def _llm_override_path(source: Path | None) -> Path:
+    base = source.parent if source else _app_config_dir()
+    return base / "llm_override.json"
+
+
+def llm_override_path() -> Path:
+    """供 api.py 写入用;指向当前生效配置同目录的 llm_override.json。"""
+    return _llm_override_path(get_config().source_path)
+
+
+def _apply_llm_override(cfg: Config) -> Config:
+    p = _llm_override_path(cfg.source_path)
+    if not p.is_file():
+        return cfg
+    try:
+        ov = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return cfg
+    if not isinstance(ov, dict):
+        return cfg
+    t = cfg.test_llm
+    if ov.get("protocol"):
+        t.protocol = str(ov["protocol"])
+    if ov.get("endpoint"):
+        t.endpoint = str(ov["endpoint"])
+    if ov.get("model"):
+        t.model = str(ov["model"])
+    if ov.get("api_key"):
+        t.api_key = str(ov["api_key"])
+    return cfg
+
+
 def load_config() -> Config:
+    cfg: Config | None = None
     for path in _candidate_paths():
         if not path.is_file():
             continue
@@ -164,8 +206,9 @@ def load_config() -> Config:
                 raw = tomllib.load(fh)
         except tomllib.TOMLDecodeError as e:
             raise RuntimeError(f"config file invalid: {path}\n{e}") from e
-        return _from_raw(raw, path)
-    return Config()
+        cfg = _from_raw(raw, path)
+        break
+    return _apply_llm_override(cfg or Config())
 
 
 _cached: Config | None = None

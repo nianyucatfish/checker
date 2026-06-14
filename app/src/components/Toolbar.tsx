@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, Settings } from "lucide-react";
 import { clsx } from "../utils";
+import { SettingsModal } from "./SettingsModal";
 import {
   devSheetStatus,
   devRefreshSheet,
@@ -166,6 +167,7 @@ export function Toolbar({
   // (重启 Electron 后 main 端会回到环境变量默认,renderer 端持久化做"上次怎么开就怎么开")。
   const DUMP_LLM_LS_KEY = "audio_qc.dump_llm";
   const [dumpLlmOn, setDumpLlmOn] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -421,6 +423,17 @@ export function Toolbar({
       {/* 占位 */}
       <div className="flex-1" />
 
+      <button
+        onClick={() => setShowSettings(true)}
+        title="设置(API / 模型)"
+        className={clsx(
+          "h-7 px-2 inline-flex items-center gap-1 rounded-sm",
+          "text-fg-muted hover:text-fg hover:bg-bg-hover",
+        )}
+      >
+        <Settings size={14} />
+      </button>
+
       {/* 提示文字:F5 快捷键 */}
       <span className="text-xs text-fg-subtle hidden md:inline">
         {scanning ? "扫描中..." : applying ? "操作中..." : "F5 重新扫描"}
@@ -513,6 +526,8 @@ export function Toolbar({
           </div>
         </div>
       )}
+
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );
 }

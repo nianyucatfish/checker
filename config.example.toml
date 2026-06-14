@@ -56,10 +56,15 @@ app_secret = ""
 
 
 # ============================================================
-# 测试 LLM(OpenAI 兼容代理,sidebar 聊天用)
-# Production 切回 Anthropic SDK 时本节可清空,用上面 [anthropic]
+# Agent / sidebar LLM。protocol 决定走哪套协议:
+#   "openai"   (默认) OpenAI 兼容:OpenAI / DeepSeek / Moonshot / 智谱 / OpenRouter /
+#              Gemini 兼容端点 / Ollama 等。endpoint 填 base(自动补 /v1/chat/completions)
+#              或完整 chat URL;认证走 Bearer。
+#   "anthropic" Anthropic 原生 Messages API。endpoint = "https://api.anthropic.com",
+#              model = claude-*;认证走 x-api-key(协议适配在 sidecar/llm_providers.py)。
 # ============================================================
 [test_llm]
+protocol = "openai"
 endpoint = "http://127.0.0.1:8765"
 api_key = ""
 model = "claude-opus-4-7"
