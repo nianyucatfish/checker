@@ -20,7 +20,14 @@ from fastapi.responses import FileResponse
 
 from sidecar import checker, fixers
 from sidecar import workspace as _ws
-from sidecar.config import LLMConfig, reload_config, write_llm_config
+from sidecar.config import (
+    LLMConfig,
+    TencentDocsConfig,
+    UserConfig,
+    reload_config,
+    write_llm_config,
+    write_tencent_user_config,
+)
 from sidecar import llm_providers as llm
 from sidecar.schemas import (
     AudioMetadata,
@@ -167,6 +174,54 @@ def set_llm_config(body: dict):
     except (OSError, ValueError) as e:
         raise HTTPException(status_code=500, detail=f"写配置失败: {e}") from e
     return {"ok": True, "config_path": str(path), **_llm_config_view()}
+
+
+def _tencent_config_view() -> dict:
+    c = reload_config()
+    td = c.tencent_docs
+    u = c.user
+    return {
+        "client_id": td.client_id,
+        "access_token": td.access_token,
+        "open_id": td.open_id,
+        "spreadsheet_id": td.spreadsheet_id,
+        "sheet_id": td.sheet_id,
+        "access_token_expires_at": td.access_token_expires_at,
+        "reviewer_name": u.reviewer_name,
+        "token_set": bool(td.access_token),
+        "token_masked": _mask_key(td.access_token),
+    }
+
+
+@app.get("/config/tencent")
+def get_tencent_config():
+    """腾讯文档凭证 + 用户名。access_token 由前端默认打码显示。"""
+    return _tencent_config_view()
+
+
+@app.post("/config/tencent")
+def set_tencent_config(body: dict):
+    """写腾讯文档凭证和本机用户身份；缺失字段保留现有值。"""
+    c = reload_config()
+    td = c.tencent_docs
+    u = c.user
+    next_td = TencentDocsConfig(
+        client_id=body["client_id"].strip() if isinstance(body.get("client_id"), str) else td.client_id,
+        access_token=body["access_token"].strip() if isinstance(body.get("access_token"), str) else td.access_token,
+        open_id=body["open_id"].strip() if isinstance(body.get("open_id"), str) else td.open_id,
+        spreadsheet_id=body["spreadsheet_id"].strip() if isinstance(body.get("spreadsheet_id"), str) else td.spreadsheet_id,
+        sheet_id=body["sheet_id"].strip() if isinstance(body.get("sheet_id"), str) else td.sheet_id,
+        access_token_expires_at=body["access_token_expires_at"].strip() if isinstance(body.get("access_token_expires_at"), str) else td.access_token_expires_at,
+    )
+    next_u = UserConfig(
+        reviewer_name=body["reviewer_name"].strip() if isinstance(body.get("reviewer_name"), str) else u.reviewer_name,
+    )
+    try:
+        path = write_tencent_user_config(next_td, next_u)
+        reload_config()
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=f"写配置失败: {e}") from e
+    return {"ok": True, "config_path": str(path), **_tencent_config_view()}
 
 
 @app.post("/agent/completion")
