@@ -280,6 +280,35 @@ export async function saveLlmConfig(body: {
   return postJson("/config/llm", body);
 }
 
+export interface TencentDocsConfig {
+  client_id: string;
+  access_token: string;
+  open_id: string;
+  spreadsheet_id: string;
+  sheet_id: string;
+  access_token_expires_at: string;
+  reviewer_name: string;
+  token_set: boolean;
+  token_masked: string;
+  config_path?: string;
+}
+
+export async function getTencentDocsConfig(): Promise<TencentDocsConfig> {
+  return getJson("/config/tencent");
+}
+
+export async function saveTencentDocsConfig(body: {
+  client_id?: string;
+  access_token?: string;
+  open_id?: string;
+  spreadsheet_id?: string;
+  sheet_id?: string;
+  access_token_expires_at?: string;
+  reviewer_name?: string;
+}): Promise<TencentDocsConfig & { ok: boolean; config_path: string }> {
+  return postJson("/config/tencent", body);
+}
+
 /** 用 protocol-aware 的 /agent/completion 发一条极短消息探活当前配置。 */
 export async function testLlmConfig(): Promise<{ ok: boolean; error?: string; preview?: string }> {
   try {

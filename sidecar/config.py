@@ -49,6 +49,7 @@ def _candidate_paths() -> list[Path]:
 class TencentDocsConfig:
     client_id: str = ""
     access_token: str = ""
+    access_token_expires_at: str = ""
     open_id: str = ""
     spreadsheet_id: str = ""
     sheet_id: str = ""
@@ -114,6 +115,7 @@ def _from_raw(raw: dict, source: Path) -> Config:
     return Config(
         tencent_docs=TencentDocsConfig(
             client_id=str(t.get("client_id", "")),
+            access_token_expires_at=str(t.get("access_token_expires_at", "")),
             access_token=str(t.get("access_token", "")),
             open_id=str(t.get("open_id", "")),
             spreadsheet_id=str(t.get("spreadsheet_id", "")),
@@ -158,6 +160,28 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _replace_section(full_text: str, section_name: str, new_section_text: str) -> str:
+    """在 TOML 文本中查找 [section_name] 段并替换。不存在则追加到末尾。"""
+    lines = full_text.splitlines(keepends=True)
+
+    start: int | None = None
+    end = len(lines)
+    target = f"[{section_name}]"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == target:
+            start = i
+            continue
+        if start is not None and i > start and stripped.startswith("[") and stripped.endswith("]"):
+            end = i
+            break
+
+    if start is None:
+        sep = "" if not full_text else ("\n" if full_text.endswith("\n") else "\n\n")
+        return full_text + sep + new_section_text
+    return "".join(lines[:start]) + new_section_text + "".join(lines[end:])
+
+
 def _format_llm_section(llm_cfg: LLMConfig) -> str:
     return "\n".join(
         [
@@ -172,38 +196,61 @@ def _format_llm_section(llm_cfg: LLMConfig) -> str:
     )
 
 
-def write_llm_config(llm_cfg: LLMConfig) -> Path:
-    """Persist the UI-editable LLM config into config.toml's [llm] section."""
-    path = config_path_for_write()
-    text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    lines = text.splitlines(keepends=True)
+def _format_tencent_docs_section(td_cfg: TencentDocsConfig) -> str:
+    return "\n".join(
+        [
+            "[tencent_docs]",
+            f"client_id = {_toml_string(td_cfg.client_id)}",
+            f"access_token = {_toml_string(td_cfg.access_token)}",
+            f"access_token_expires_at = {_toml_string(td_cfg.access_token_expires_at)}",
+            f"open_id = {_toml_string(td_cfg.open_id)}",
+            f"spreadsheet_id = {_toml_string(td_cfg.spreadsheet_id)}",
+            f"sheet_id = {_toml_string(td_cfg.sheet_id)}",
+            "",
+            "",
+        ]
+    )
 
-    start: int | None = None
-    end = len(lines)
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped == "[llm]":
-            start = i
-            continue
-        if start is not None and i > start and stripped.startswith("[") and stripped.endswith("]"):
-            end = i
-            break
 
-    section = _format_llm_section(llm_cfg)
-    if start is None:
-        sep = "" if not text else ("\n" if text.endswith("\n") else "\n\n")
-        new_text = text + sep + section
-    else:
-        new_text = "".join(lines[:start]) + section + "".join(lines[end:])
+def _format_user_section(u_cfg: UserConfig) -> str:
+    return "\n".join(
+        [
+            "[user]",
+            f"reviewer_name = {_toml_string(u_cfg.reviewer_name)}",
+            "",
+            "",
+        ]
+    )
 
-    # Validate before replacing the user's config file.
+
+def _atomic_write(path: Path, new_text: str) -> Path:
+    """校验 TOML → 写临时文件 → os.replace 原子替换。"""
     tomllib.loads(new_text)
-
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(new_text, encoding="utf-8")
     tmp.replace(path)
     return path
+
+
+def write_llm_config(llm_cfg: LLMConfig) -> Path:
+    """Persist the UI-editable LLM config into config.toml's [llm] section."""
+    path = config_path_for_write()
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    new_text = _replace_section(text, "llm", _format_llm_section(llm_cfg))
+    return _atomic_write(path, new_text)
+
+
+def write_tencent_user_config(
+    td_cfg: TencentDocsConfig,
+    u_cfg: UserConfig,
+) -> Path:
+    """把腾讯文档凭证 + 用户名写入 config.toml，保留其他段不变。"""
+    path = config_path_for_write()
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    new_text = _replace_section(text, "tencent_docs", _format_tencent_docs_section(td_cfg))
+    new_text = _replace_section(new_text, "user", _format_user_section(u_cfg))
+    return _atomic_write(path, new_text)
 
 
 def load_config() -> Config:
