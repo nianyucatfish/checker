@@ -929,9 +929,13 @@ export function Explorer({
         e.preventDefault();
         doDelete(sel);
       } else if (mod && (e.key === "c" || e.key === "C")) {
+        // 文本拖选优先:用户在 AudioViewer / pane-header 等只读区拖选了文本,
+        // Cmd+C 应该走浏览器默认复制文本,不要被这里吞掉去复制文件路径。
+        if ((window.getSelection()?.toString() ?? "").length > 0) return;
         e.preventDefault();
         doCopy(sel);
       } else if (mod && (e.key === "x" || e.key === "X")) {
+        if ((window.getSelection()?.toString() ?? "").length > 0) return;
         e.preventDefault();
         doCut(sel);
       }

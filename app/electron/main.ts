@@ -22,9 +22,35 @@ import { spawnCaptureWithTimeout } from "./spawnCapture";
 const SIDECAR_PORT = 8775; // TODO Phase 5: pick random free port
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
-// 这是个工具型应用,不需要 Electron 默认的 File / Edit / View / Window / Help 菜单。
-// 在所有窗口创建之前就置空,主窗和 mix 窗都不会再画菜单条。
-Menu.setApplicationMenu(null);
+// 这是个工具型应用,不需要 Electron 默认的 File / View / Window / Help 菜单。
+// macOS 上必须保留一个最小应用菜单(含 Edit role),否则 textarea / input 里的
+// Cmd+C / V / X / A 全部失效 —— 这些标准快捷键的 accelerator 是绑在系统菜单 Edit role 上的,
+// 不像 Windows 下 Chromium 表单控件原生处理。Explorer 自己的文件级 Ctrl/Cmd+C/V/A
+// 监听对 input/textarea 已 return(见 Explorer.tsx),不会跟这里的 Edit menu 抢。
+if (process.platform === "darwin") {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: "appMenu" },
+      {
+        label: "Edit",
+        submenu: [
+          { role: "undo" },
+          { role: "redo" },
+          { type: "separator" },
+          { role: "cut" },
+          { role: "copy" },
+          { role: "paste" },
+          { role: "pasteAndMatchStyle" },
+          { role: "delete" },
+          { role: "selectAll" },
+        ],
+      },
+    ]),
+  );
+} else {
+  // Windows / Linux:保持置空,Chromium 默认行为已覆盖文本控件剪贴板。
+  Menu.setApplicationMenu(null);
+}
 
 let sidecarProc: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;

@@ -39,7 +39,7 @@ export function Center({ selectedPath, selectedIsDir }: Props) {
   if (selectedIsDir) {
     return (
       <div className="pane bg-bg">
-        <div className="pane-header">{basename(selectedPath)}</div>
+        <div className="pane-header selectable">{basename(selectedPath)}</div>
         <div className="flex-1 flex flex-col items-center justify-center text-fg-muted gap-2">
           <FolderOpen size={32} />
           <p>选中目录：{basename(selectedPath)}</p>
@@ -79,7 +79,7 @@ export function Center({ selectedPath, selectedIsDir }: Props) {
 
   return (
     <div className="pane bg-bg">
-      <div className="pane-header">{basename(selectedPath)}</div>
+      <div className="pane-header selectable">{basename(selectedPath)}</div>
       <ErrorBoundary label={`Center / ${ext || "无扩展"}`} key={selectedPath}>
         {body}
       </ErrorBoundary>

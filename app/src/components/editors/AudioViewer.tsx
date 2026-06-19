@@ -939,7 +939,7 @@ export function AudioViewer({ path }: Props) {
       />
 
       {/* 元信息 */}
-      <div className="grid grid-cols-2 gap-x-8 gap-y-4 max-w-md">
+      <div className="grid grid-cols-2 gap-x-8 gap-y-4 max-w-md selectable">
         <Field label="时长" value={formatDuration(meta.duration_seconds)} />
         <Field label="采样率" value={formatHz(meta.samplerate)} />
         <Field label="通道数" value={String(meta.channels)} />
