@@ -102,6 +102,8 @@ function HumanCheckCard({
     turn.decisions.map(() => ({ choice: "", note: "" })),
   );
   const [page, setPage] = useState(0);
+  // useRef 必须在任何 early return 之前调,否则 resolved 后 hook 数变了 React 会崩。
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const isResolved = !!turn.resolved;
   if (isResolved) {
@@ -144,6 +146,9 @@ function HumanCheckCard({
 
   const cur = turn.decisions[page];
   const curAns = answers[page];
+  // 含 "note" 字样的选项(如 prompt 模板里的"有小问题(详见 note)")要求用户
+  // 先在 textarea 写明细再翻页,不立刻提交。其他选项保留秒翻。
+  const needsNote = (opt: string) => opt.toLowerCase().includes("note");
 
   const updateCur = (patch: Partial<HumanCheckAnswer>) => {
     setAnswers((arr) => arr.map((a, i) => (i === page ? { ...a, ...patch } : a)));
@@ -175,11 +180,11 @@ function HumanCheckCard({
         </span>
       </div>
       {turn.reason && page === 0 && (
-        <div className="text-xs text-fg-muted leading-5 whitespace-pre-wrap selectable">
+        <div className="text-xs text-fg-muted leading-5 whitespace-pre-wrap break-all selectable">
           {turn.reason}
         </div>
       )}
-      <div className="text-xs text-fg leading-5 whitespace-pre-wrap font-medium selectable">
+      <div className="text-xs text-fg leading-5 whitespace-pre-wrap break-all font-medium selectable">
         {cur.question}
       </div>
       {cur.options.length > 0 && (
@@ -189,7 +194,15 @@ function HumanCheckCard({
             return (
               <button
                 key={k}
-                onClick={() => advanceOrSubmit({ choice: opt, note: curAns.note })}
+                onClick={() => {
+                  if (needsNote(opt)) {
+                    // 点了"含 note"选项 → 先存 choice,把焦点送到 textarea 让用户写明细
+                    updateCur({ choice: opt });
+                    setTimeout(() => textareaRef.current?.focus(), 0);
+                  } else {
+                    advanceOrSubmit({ choice: opt, note: curAns.note });
+                  }
+                }}
                 className={`text-left text-xs px-2 py-1.5 rounded border transition-colors break-all ${
                   active
                     ? "border-accent bg-accent/15 text-fg"
@@ -203,11 +216,20 @@ function HumanCheckCard({
         </div>
       )}
       <textarea
+        ref={textareaRef}
         value={curAns.note}
         onChange={(e) => updateCur({ note: e.target.value })}
-        placeholder="或自填(可与选项并存,或单独提交)..."
+        placeholder={
+          needsNote(curAns.choice)
+            ? "请在此写明具体小问题,写完点右下「下一题 →」提交"
+            : "或自填(可与选项并存,或单独提交)..."
+        }
         rows={2}
-        className="w-full text-xs rounded border border-border bg-bg px-2 py-1.5 outline-none focus:border-accent selectable"
+        className={`w-full text-xs rounded border bg-bg px-2 py-1.5 outline-none focus:border-accent selectable ${
+          needsNote(curAns.choice)
+            ? "border-accent ring-1 ring-accent/30"
+            : "border-border"
+        }`}
       />
       <div className="flex gap-2 items-center pt-1">
         <button
