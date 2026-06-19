@@ -34,7 +34,7 @@
 
 ### 核心原则:延迟反馈 + 移动/拷贝/删除/改名,不凭空创建
 
-0. **写操作先 simulate**:文件写操作不裸跑,统一交给 `fix_execute_plan`。先 `simulate=True` 干跑,检查 `would_conflict` / `predicted_path_updates`;无冲突后再 `simulate=False` 请求真执行。程序会按用户配置决定是否弹确认卡,agent 不需要知道也不能控制;若返回用户拒绝 / 未批准,不要改 ops 重试,先问用户或把原因写入当前 state note。
+(写操作 simulate → execute 的细节见 invariant 4 + 通用约定段,此处不重复。)
 
 1. **特殊情况总规则**:遇到拿不准、证据不足、或虽然能猜但猜错代价高的情况,**不要擅自处理**。在当前 state 的 note 里记清楚"看到了什么 / 为什么特殊 / 需要用户决定什么",然后继续能跑的部分;只有工作根本推不下去时才当场问用户。
 2. **能往后拖就往后拖**:任何态搞不定都在 note 里记一笔继续跑,1.7 复检时把所有 `[ ]` 行的 note 一次性给用户看。即便存在"后续强依赖前置"(典型 2.6/2.7 渲染依赖 1.6 CSV syntax 过),也优先推到那一态再让失败暴露,不要提前阻塞;只有情况复杂到工作根本无法继续(下一态拿不到任何能跑的输入)时才阻塞用户。
@@ -61,20 +61,7 @@
 ## 进度
 - [ ] 1.1 分工表完整性
 - [ ] 1.2 文件夹命名 + 5 目录结构
-- [ ] 1.3 各目录文件齐全度
-- [ ] 1.4 文件命名归一化
-- [ ] 1.5 WAV 物理格式 / 时长
-- [ ] 1.6 CSV 简单格式
-- [ ] 1.7 复检
-- [ ] 2.1 乐器音源对照表 vs 混音工程文件名
-- [ ] 2.3 混音台 session 1(分轨 + 总轨)
-- [ ] 2.4 混音台 session 2(源文件 + 总轨)
-- [ ] 2.5 MIDI vs WAV 对齐
-- [ ] 2.6 渲染节奏
-- [ ] 2.7 渲染结构
-- [ ] 2.8 音频质量通听
-- [ ] 3.1 上传到百度网盘
-- [ ] 3.2 写网盘链接到分工表
+- ... (中间 13 态 1.3-3.2 略,真实列表以 `state_tree_read` 返回为准 / 各态标题见本手册)
 - [ ] 3.3 标记已验收
 ```
 
@@ -124,7 +111,7 @@ Part 1 的每个自动态都走同一个循环:
    **错位文件会同时产生两条 error**:期望目录里报 MISSING(带 candidates),错位目录里报 EXTRA_FILE / EXTRA_FILE_OR_FORMAT(`path` 字段就是错位文件本体的完整路径)。走 MISSING.candidates 一线 Move 回去最省事,Move 完两条 error 同时消失,**不要先看 EXTRA 就 Delete**。真要 Delete 的前提:这个 EXTRA 的 `path` 没出现在任何 MISSING 的 candidates 里(即真无主)。
 2. 必要时再叫两个观察工具补上下文:`fs_list_dir(path)` 看目录树,`read_text_file(path)` 读 CSV / 文本(`Beat.csv` 长用 `line_range`)。
 3. 根据错误原文 + 目录 + 文件内容,自构造 ops(`rename` / `delete` / `move` / `copy` / `write_text` / `text_edit`),交给 `fix_execute_plan`;先 `simulate=True` 干跑,无冲突后再 `simulate=False` 请求执行。文本类修复优先 `text_edit` 精确替换,大段重写才退回 `write_text`。
-4. 每修一轮重新 `audit_list_errors` 全量复扫;清零或剩余只能人工判断 → 写 note 推进下一态。
+4. 每修一轮重新 `audit_list_errors` 全量复扫。**输出统一**:错误清零 → `state_tree_update(state, done=true)`;有遗留(agent 修不了 / 需人工判)→ `state_tree_update(state, done=false, note=...)`,note 概括"N 处问题: ..." 留给 1.7 用户拍板。各态步骤里不再单列 ✅/❌ 样例,看本节 + invariant 5 即可。
 
 ### 1.1 分工表完整性
 
@@ -135,11 +122,6 @@ Part 1 的每个自动态都走同一个循环:
 2. `fs_list_dir(path="", max_depth=1)` 看工作区,有无 `{prefix}` / `{prefix}(混)` 配对
 3. 判**交付形态**: `mix_owner` 和 `pan_mix_link` 是配套字段,都空 → 单份;都非空 → 双份;**一个空一个有 → 数据不一致,note 让用户核对**。再用工作区有无 `(混)` 文件夹 cross-check。
 4. 单份交付时 `mix_owner` / `pan_mix_link` 报缺要**豁免**(`missing_required_fields` 里的它俩忽略);其他必填缺 → 写 note,推下一态。
-
-**输出**:
-- ✅ 单份齐: `state_tree_update(song, "1.1", done=true, note="单份交付")`
-- ✅ 双份齐: `state_tree_update(song, "1.1", done=true, note="双份交付,(混) 待 1.2 合并")`
-- ❌ 不一致 / 必填缺: `state_tree_update(song, "1.1", done=false, note="单份但 pan_mix_link 非空且非占位,数据可疑;另缺 emotion,需扒曲补")`
 
 **注意**:
 - `调音台` / `监听` 默认必填。报缺时不要假定"对方没有就跳过",note 标"待用户确认是否真无";用户明确"没有"后才写"无"占位
@@ -168,10 +150,6 @@ Part 1 的每个自动态都走同一个循环:
 3. **缺子目录 → note 里记一笔**(agent 不创建空目录;由用户/扒曲补)
 4. 多余文件夹 → 自构造 `DeleteOp` → simulate → execute
 5. 重扫,无错 → done;有残留无法 auto-fix → note 里记一笔,标 `[ ]`,不阻塞,**继续 1.3**
-
-**输出**:
-- ✅ 文件夹命名对 + 5 子目录齐: `state_tree_update(song, "1.2", done=true)`
-- ❌ 命名错改不了 / 缺子目录 / 双文件夹合并冲突: `state_tree_update(song, "1.2", done=false, note="缺 midi 子目录,需扒曲补")`
 
 ### 1.3 各目录文件齐全度
 
@@ -237,10 +215,6 @@ Part 1 的每个自动态都走同一个循环:
 2. agent 根据错误原文、文件名白名单和目录清单自行构造 RenameOp 批 → simulate → execute
 3. 解决不了的(重名 / 模糊匹配多义 / 完全不识别)→ note 里记一笔,**不阻塞**,继续 1.5
 
-**输出**:
-- ✅ 全部命名归一化通过: `state_tree_update(song, "1.4", done=true)`
-- ❌ 有重名 / 模糊匹配多义改不了: `state_tree_update(song, "1.4", done=false, note="BASS 和 BASS_2 重名,无法判断哪个保留")`
-
 ### 1.5 WAV 物理格式 / 时长
 
 **目标**:所有 WAV 物理参数 / 时长合规。
@@ -278,10 +252,6 @@ agent 这一态修不了任何一个 —— 物理参数 / 时长底层错误都
 3. 模型自己判断是否能确定性改写:表头大小写、空格、BOM、`0:2→00:02` 这类 → `text_edit(old_string, new_string)` 精确替换;表头列序乱掉等大段重构 → `write_text`;多列 beat、秒数小数、段落语义不明等不要硬改。
 4. 可改 → 构造 edit / write op 走 simulate → execute;不可改 → note 里记一笔,**不阻塞**,继续 1.7。
 
-**输出**:
-- ✅ 三份 CSV syntax 全对: `state_tree_update(song, "1.6", done=true)`
-- ❌ 有 syntax 错改不了(多列 / 段落语义不明等): `state_tree_update(song, "1.6", done=false, note="Beat.csv 第 3 列存在异常,无法确定是否合法,需用户确认")`
-
 ### 1.7 复检(关键态,必须真做完)
 
 **目标**:1.1-1.6 累积下来的所有 note 一次性给用户看,用户决定每条怎么处理。这是 Part 1 唯一阻塞用户的人工节点。
@@ -291,12 +261,11 @@ agent 这一态修不了任何一个 —— 物理参数 / 时长底层错误都
 2. `state_tree_read(song)` 拿全文,扫出 1.1-1.6 所有 `[ ]` 行及其 note
 3. 全是 `[x]`(无遗留 note)→ `state_tree_update(song, "1.7", done=true)` → 进 Part 2
 4. 有 `[ ]` → `human_check(state="1.7", reason="Part 1 累积的问题清单,请逐条决定", decisions=[{question: <某条 note 概括,如"1.5 三目录时长不一致">, options: [<本条候选处置,如 "扒曲重导" / "UI 统一时长按钮" / "暂不处理">]}, ...])` 阻塞
-5. 收 `answers`(与 decisions 等长,每条 `{choice, note}`):**严格遵守 invariant 5 —— 错误是否客观消除是唯一判据,choice 字面 ≠ done**。逐条按下面分类:
-   - 当条 `choice` 语义 = "**该错误其实不存在 / 已豁免**"(如 `tempo_changes 缺失 → 确认无速度变化`、`pan_review_link 误报 → 已确认有效链接`)→ audit 误报或人工豁免,**对应 1.x 行翻 `[x]`**,note 追加"用户豁免: ..."
-   - 当条 `choice` 语义 = "**暂不处理 / 留着遗留**"(错误客观还在,只是用户决定不修)→ 对应 1.x 行**保持 `[ ]`**,note 追加"用户决定暂不处理"。注意:"暂不处理"≠"错误消失",1.x 不翻 `[x]`
-   - 当条 `choice` 语义 = "**用户外部去修**"(如"扒曲重导")→ 1.x 保持 `[ ]`,note 写"用户决定: ...,等用户修完续"
-   - 当条 `choice` 语义 = "**可在 UI 内做的修复**"(如"UI 统一时长按钮")→ agent 调对应工具修,看 audit 结果再决定该行翻不翻;修完错误归零再 `[x]`,否则 `[ ]`
-   - 当条 `note` 非空 → 永远写进对应 1.x note,优先级高于 choice
+5. 收 `answers`(每条 `{choice, note}`),按 **invariant 5 判 done**:错误是否客观消除是唯一判据,**choice 字面 ≠ done**。四类语义:
+   - **"错误不存在 / 已豁免"**(audit 误报 / 用户确认无问题)→ 1.x 行翻 `[x]`,note "用户豁免: ..."
+   - **"暂不处理" / "外部去修"**(错误客观还在 — 包括扒曲重导这种)→ 1.x **保持 `[ ]`**,note 写处理决定
+   - **"可在 UI 内修"**(如统一时长按钮)→ agent 调对应工具修,看 audit 结果决定翻不翻
+   - 当条 `note` 非空 → 永远写进 1.x note,优先级高于 choice
 6. 卡片返回 `ok: false, code: USER_CANCELLED` → agent 退出 workflow,不写 md
 
 **输出**:
