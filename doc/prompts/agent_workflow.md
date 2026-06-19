@@ -22,21 +22,15 @@
 
 ### 模式判定:workflow 模式 vs 诊断模式
 
-进 Phase B 默认是 **workflow 模式**(按 state_tree 推进 17 态)。但用户**直接指令了具体目标 + 具体问题**时切到 **诊断模式**,典型句式:
+默认 **workflow 模式**(按 state_tree 推 17 态)。用户**直接指了具体目标 + 具体问题**(如"帮我看 X 的命名错误"、"修下 Z 的 CSV 格式"、"X 的时长对不对")时切 **诊断模式**:
 
-- "帮我看看 X 文件夹的命名错误"
-- "查一下 Y 目录有没有缺文件"
-- "修一下 Z 的 CSV 格式"
-- "X 的时长对不对"
+- 只做用户指的那件事,针对性 `audit_list_errors` / `fs_list_dir` / `read_text_file` + 必要时 simulate → execute
+- 不调 `state_tree_*`(诊断不算 SOP 推进)
+- 不扫其他态(不顺便补 1.1)
+- 一句话报告:"X 看了下,N 处问题,已修 M 处,剩 K 处:..."
+- 完成等用户,不自动续 workflow
 
-诊断模式行为:
-- **只做用户指的那一件事**:针对性 `audit_list_errors` / `fs_list_dir` / `read_text_file`,必要时构造 ops 走 simulate → execute 修
-- **不调** `state_tree_read` / `state_tree_update`(诊断不算 SOP 推进,不动进度本)
-- **不扫其他态**(不要顺便补 1.1,不要回头查 1.3,只看用户指的)
-- **一句话报告结果**:"X 看了一下,N 处问题,已修 M 处,剩 K 处:..."
-- 完成后**等用户**,不自动续 workflow
-
-只有用户说"开始质检 X" / "继续 workflow" / "按流程走"时才进/续 workflow 模式。
+只有用户说"开始质检 X" / "继续 workflow" / "按流程走"时才进 workflow 模式。
 
 ### 核心原则:延迟反馈 + 移动/拷贝/删除/改名,不凭空创建
 
@@ -92,7 +86,6 @@
 ```
 - [x] 1.2 文件夹命名 + 5 目录结构
 - [ ] 1.3 各目录文件齐全度 — 缺 BG(干声).wav,工作区无 orphan,需联系扒曲补
-- [ ] 1.5 WAV 物理格式 — Mix_A 比 Mix_B 短 47 帧,等用户决定 pad 还是返工
 ```
 
 未解决的态留 `[ ]` 推下一态(SOP "能往后拖就往后拖"),1.7 复检阶段拿所有 `[ ]` + note 一次性让用户拍板;切勿为了"看起来推进"提前打 `[x]`。md 按歌持久,跨 chat 进度都还在;进歌第一件事是 `state_tree_read(song)`,**从第一个"`[ ]` 且无 note"的态续起**:
@@ -195,15 +188,11 @@ Part 1 的每个自动态都走同一个循环:
 
 **midi**:`Vocal_midi` + `Mix_midi` 必需(只查存在);`BG_midi` 可选(由实际伴唱情况决定,见 `SongMeta.derived.backing_count`)。
 
-**midi / 音源 缺失的合法例外**(audit 不一定识别,看到 MISSING 不要硬修):
+**midi / 音源 合法缺失例外**:实录 / 采样轨道(典型:采样鼓)可能没 midi 和音源。看到 midi MISSING 或对照表"音源"列空白时,先 `fs_list_dir(song/混音工程原文件)` 查 `.amxd`:
 
-实录歌曲 / 采样轨道(典型:采样鼓)**可以没有 midi 和音源**,条件是混音工程原文件下应有对应的 `.amxd` 文件作为替代凭证,同时 `乐器音源对照表.csv` 里该轨"音源"列要有备注(说明实录 / 采样,而非空填)。
-
-**agent 判定流程**:看到 midi MISSING 或音源对照表里某轨"音源"列空白时,先 `fs_list_dir(song/混音工程原文件)` 看有没有 `.amxd` 文件:
-
-- 有 `.amxd` + 对照表对应轨道有备注 → 合法缺失,note 标"实录/采样,有 amxd 凭证"继续推进,不要构造 MoveOp
-- 有 `.amxd` 但对照表没备注 → 备注遗漏,note 标"待补对照表备注"(可在 1.6 / 2.1 阶段提议 text_edit 补)
-- 没有 `.amxd` → 当作真缺,走 1.3 步骤 2 的正常 MISSING 处理流程(看 candidates,无候选就 note 等用户/扒曲补)
+- 有 `.amxd` + 对照表备注非空 → 合法缺失,note 标"实录/采样,有 amxd 凭证"推进,不构造 MoveOp
+- 有 `.amxd` 但备注空 → note 标"待补对照表备注"(可在 1.6 / 2.1 用 text_edit 补)
+- 无 `.amxd` → 当真缺,走步骤 2 正常 MISSING 处理
 
 **csv**:`Beat.csv` + `Structure.csv` 必需。
 
@@ -278,19 +267,10 @@ agent 这一态修不了任何一个 —— 物理参数 / 时长底层错误都
 **目标**:Beat.csv / Structure.csv / 乐器音源对照表.csv 的 syntax 全对(乐器对照表语义留 2.1;Beat/Structure 的语义不单独复核,2.6/2.7 渲染听感会暴露错标)。
 
 **规格**:
-- 通用:内容从 1 行 A 列开始,无空行空列;编码 utf-8 优先(否则容易乱码)
-- **Beat.csv**:
-  - 表头**严格** `TIME,LABEL`(全大写,英文逗号,无空格)
-  - 严格 2 列
-  - 时间格式 = **小数秒**(如 `1.234` / `12.0`),**不是** mm:ss;不强校验数值,节奏正误留 2.6 渲染时听
-  - 数据行标签内容代码不校验
-- **Structure.csv**:
-  - 表头标签必须是 `{Intro, Verse, Chorus, Bridge, Outro}` 子集(首字母大写)
-  - 列数与表头列数严格一致
-  - 时间格式 `\d{2}:\d{2}`(英文冒号,**两位**,`00:02` 不是 `0:2`)
-- **乐器音源对照表.csv**(混音工程原文件下):
-  - 表头**严格** `乐器,音源`
-  - 严格 2 列
+- 通用:1A 起,无空行空列,utf-8 优先
+- **Beat.csv**:表头严格 `TIME,LABEL`,2 列,时间用**小数秒**(`1.234`,**不是** mm:ss);标签内容代码不校验,节奏正误留 2.6 渲染
+- **Structure.csv**:表头标签是 `{Intro, Verse, Chorus, Bridge, Outro}` 子集(首字母大写),列数与表头一致,时间格式 `\d{2}:\d{2}`(英文冒号,两位,`00:02` 不是 `0:2`)
+- **乐器音源对照表.csv**(混音工程原文件下):表头严格 `乐器,音源`,2 列
 
 **步骤**:
 1. `audit_list_errors(song_path)` 全量列错,模型自行识别 CSV 问题。
@@ -358,14 +338,11 @@ agent 这一态修不了任何一个 —— 物理参数 / 时长底层错误都
 
 ### 通用模式(2.x)
 
-1. 调 UI / playback 工具准备场景(`mix_load_song` / `ui_open_file` / `playback_toggle_*`)
-2. `human_check(state="2.x", reason=..., decisions=[{question, options}, ...])` 阻塞
-3. 收 `answers`:
-   - 所有 choice 全是"通过"语义 → 该态 `[x]`,note 可为空
-   - 任一 choice 是"不通过"语义或 note 非空 → 该态保持 `[ ]`,note 写用户反馈
-   - 返回 `code: USER_CANCELLED` → agent 直接退出
-4. 退出态时清理(关 toggle 等,见各态)
-5. `state_tree_update(song, "2.x", done, note=summary)`
+各态步骤里已写"开 UI → human_check → 关 UI",这里只规定收 `answers` 后怎么判:
+
+- 所有 choice 是"通过"语义 + 所有 note 为空 → 该态 `[x]`,done=true
+- 任一 choice 是"不通过"语义,或任一 note 非空 → 该态保持 `[ ]`,done=false,note 写反馈摘要
+- 返回 `code: USER_CANCELLED` → agent 直接退出 workflow
 
 ### 2.1 乐器音源对照表 vs 混音工程文件名
 
@@ -517,15 +494,12 @@ agent 这一态修不了任何一个 —— 物理参数 / 时长底层错误都
 2. 有冲突 → 调整 ops 后重新 simulate;无冲突 → 用同一批 ops 调 `fix_execute_plan(..., simulate=False)` 请求真执行
 3. 若执行返回用户拒绝 / 未批准,不要改 ops 重试或绕过确认;先问用户,或把拒绝原因写入当前 state note
 
-**op shape**(字段名是 `type`,**不是** `op`!):
+**op shape**(字段名是 `type`,**不是** `op`!)。完整 op type 列表 + 字段见 `fix_execute_plan` 工具描述,这里只示范两个典型:
 
 ```json
 [
-  {"type": "rename", "src": "飞儿乐队_你的微笑_吴行健/混音工程源文件", "dst": "飞儿乐队_你的微笑_吴行健/混音工程原文件"},
-  {"type": "move",   "src": "飞儿乐队_你的微笑_吴行健/csv/X_Vocal_midi.mid", "dst_dir": "飞儿乐队_你的微笑_吴行健/midi"},
-  {"type": "copy",   "src": "飞儿乐队_你的微笑_吴行健/分轨wav/X_Vocal_A.wav", "dst_dir": "飞儿乐队_你的微笑_吴行健/混音工程原文件"},
-  {"type": "delete", "path": "飞儿乐队_你的微笑_吴行健/extra.wav"},
-  {"type": "text_edit", "path": "飞儿乐队_你的微笑_吴行健/csv/Beat.csv", "old_string": "time,label", "new_string": "TIME,LABEL"}
+  {"type": "rename", "src": "x/混音工程源文件", "dst": "x/混音工程原文件"},
+  {"type": "text_edit", "path": "x/csv/Beat.csv", "old_string": "time,label", "new_string": "TIME,LABEL"}
 ]
 ```
 
@@ -538,12 +512,7 @@ agent 这一态修不了任何一个 —— 物理参数 / 时长底层错误都
 
 ### 升级路径(返工联系)
 
-QC 员发现需要返工的问题(WAV 不合规 / 文件缺失 / 命名严重错乱等),联系流程:
-
-1. 第一线:**扒曲负责人**(姓名见分工表;QC 员通过 chat 外部渠道联系,**agent 不直接发消息**)
-2. 联系不上 → 找 **夏凡老师**
-
-agent 在 note 里写明 "需联系扒曲负责人 X 返工:..." 即可,不主动调任何通知工具。
+返工问题(WAV 不合规 / 缺文件 / 命名严重错乱)由 QC 员**外部渠道**联系扒曲负责人(分工表查名),联系不上找夏凡老师。agent 只在 note 写"需联系扒曲负责人 X 返工:..." 即可,不主动调通知工具。
 
 ---
 
