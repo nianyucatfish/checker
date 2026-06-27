@@ -302,6 +302,12 @@ function MidiWebview({ path }: { path: string }) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 relative bg-bg">
+      <div className="flex items-center gap-3 px-3 py-1.5 border-b border-border text-xs text-fg-subtle bg-bg-sidebar/50 shrink-0 selectable">
+        <span className="font-mono text-fg-muted shrink-0">MIDI</span>
+        <span className="truncate" title="滚轮缩放 · Shift+滚轮 横向滚动 · 跟 wav 预览一致">
+          滚轮缩放 · Shift+滚轮 横向滚动
+        </span>
+      </div>
       <webview
         ref={wvRef as unknown as React.Ref<HTMLElement>}
         src={srcRef.current}

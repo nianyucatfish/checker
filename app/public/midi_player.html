@@ -562,7 +562,11 @@
         let compareAudioBuffer = null;
         const COMPARE_VIZ_MODES = ['waveform', 'cqt'];
 
-        const PIXELS_PER_STEP = 50;
+        // 时间→像素比例。可变(滚轮 zoom 改这个),原默认 50。
+        let PIXELS_PER_STEP = 50;
+        const PIXELS_PER_STEP_DEFAULT = 50;
+        const PIXELS_PER_STEP_MIN = 10;
+        const PIXELS_PER_STEP_MAX = 400;
         const DRAG_PIXEL_THRESHOLD = 3;
 
         const compareTrackRow = document.getElementById('compare-track-row');
@@ -585,20 +589,88 @@
         };
 
         // --- Initialization ---
-        function bindHorizontalScrollControls() {
+        // 滚轮:普通 = zoom(以鼠标位置为锚,跟 AudioViewer 一致),Shift+滚轮 / trackpad deltaX = 横向滚动
+        function bindScrollAndZoomControls() {
             const scrollBar = document.getElementById('timeline-scrollbar-container');
             const trackArea = document.getElementById('tracks-scroll-area');
-            const handleHorizontalWheel = (e) => {
+            const handleWheel = (e) => {
                 if (!scrollBar) return;
                 const deltaX = Number.isFinite(e.deltaX) ? e.deltaX : 0;
                 const deltaY = Number.isFinite(e.deltaY) ? e.deltaY : 0;
-                const horizontalDelta = Math.abs(deltaX) > 0 ? deltaX : (e.shiftKey ? deltaY : 0);
-                if (!horizontalDelta) return;
-                scrollBar.scrollLeft += horizontalDelta;
-                e.preventDefault();
+                // 横向:trackpad 的 deltaX,或 Shift+deltaY
+                if (Math.abs(deltaX) > 0 || (e.shiftKey && Math.abs(deltaY) > 0)) {
+                    const horizontalDelta = Math.abs(deltaX) > 0 ? deltaX : deltaY;
+                    scrollBar.scrollLeft += horizontalDelta;
+                    e.preventDefault();
+                    return;
+                }
+                // 普通 deltaY → zoom
+                if (Math.abs(deltaY) > 0) {
+                    e.preventDefault();
+                    const factor = deltaY < 0 ? 1.2 : 1 / 1.2;
+                    applyPixelsPerStep(PIXELS_PER_STEP * factor, e.clientX);
+                }
             };
-            scrollBar.addEventListener('wheel', handleHorizontalWheel, { passive: false });
-            trackArea.addEventListener('wheel', handleHorizontalWheel, { passive: false });
+            scrollBar.addEventListener('wheel', handleWheel, { passive: false });
+            trackArea.addEventListener('wheel', handleWheel, { passive: false });
+        }
+
+        // 改 PIXELS_PER_STEP + 重建所有 track 的 magenta visualizer + 重算依赖宽度。
+        // anchorClientX 给的话以那一点为不动点(保持鼠标位置对应的时间不变)。
+        function applyPixelsPerStep(newValue, anchorClientX) {
+            const old = PIXELS_PER_STEP;
+            const clamped = Math.max(PIXELS_PER_STEP_MIN, Math.min(PIXELS_PER_STEP_MAX, newValue));
+            if (clamped === old) return;
+            PIXELS_PER_STEP = clamped;
+
+            const ratio = PIXELS_PER_STEP / old;
+            const scrollBar = document.getElementById('timeline-scrollbar-container');
+
+            let newScrollLeft = scrollBar ? scrollBar.scrollLeft * ratio : 0;
+            if (typeof anchorClientX === 'number' && scrollBar) {
+                const rect = scrollBar.getBoundingClientRect();
+                const cursorOffset = anchorClientX - rect.left;
+                const oldAbsX = scrollBar.scrollLeft + cursorOffset;
+                newScrollLeft = oldAbsX * ratio - cursorOffset;
+            }
+
+            // 每个 track 重建 magenta visualizer(NoteSequence 还在内存,重建很轻)+ 更新 clipBox 宽度
+            tracks.forEach(t => {
+                if (!t.notes || !t.dom || !t.dom.canvas) return;
+                const trackSeq = {
+                    notes: t.notes.map(n => ({
+                        ...n,
+                        startTime: n.startTime - t.minStart,
+                        endTime: n.endTime - t.minStart
+                    })),
+                    totalTime: t.clipDuration
+                };
+                t.visualizer = new mm.PianoRollCanvasVisualizer(trackSeq, t.dom.canvas, {
+                    noteHeight: 6,
+                    pixelsPerTimeStep: PIXELS_PER_STEP,
+                    noteRGB: t.isDrum ? '156, 39, 176' : '33, 150, 243',
+                    activeNoteRGB: '255, 87, 34'
+                });
+                t.dom.clipBox.style.width = (t.clipDuration * PIXELS_PER_STEP) + 'px';
+                updateTrackClipPosition(t);
+            });
+
+            // compare wave / spectrogram / cqt 也按新 PIXELS_PER_STEP 重画
+            if (typeof compareAudioBuffer !== 'undefined' && compareAudioBuffer && typeof renderCompareVisualization === 'function') {
+                renderCompareVisualization(compareAudioBuffer);
+            }
+
+            // 更新 timeline scroll content 宽度
+            if (typeof updateTimelineMetrics === 'function') updateTimelineMetrics();
+
+            // 套上新 scrollLeft(锚点保持)
+            if (scrollBar) scrollBar.scrollLeft = Math.max(0, newScrollLeft);
+
+            // 推 playhead 到新位置;播放中下一帧 RAF 自动修
+            if (typeof updatePlayheads === 'function') {
+                const sec = (typeof pauseOffset === 'number' ? pauseOffset : 0);
+                updatePlayheads(sec);
+            }
         }
 
         async function init() {
@@ -626,7 +698,7 @@
                     : Math.min(pauseOffset, totalDurationForDisplay);
                 updatePlayheads(currentShown);
             });
-            bindHorizontalScrollControls();
+            bindScrollAndZoomControls();
 
             compareWavTrigger.addEventListener('click', (e) => {
                 e.stopPropagation();
