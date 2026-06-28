@@ -564,9 +564,11 @@
 
         // 时间→像素比例。可变(滚轮 zoom 改这个),原默认 50。
         let PIXELS_PER_STEP = 50;
+        let atMinZoom = false;               // 当前是否已缩到最远(resize 时据此保持贴合视口)
         const PIXELS_PER_STEP_DEFAULT = 50;
-        const PIXELS_PER_STEP_MIN = 10;
+        const PIXELS_PER_STEP_MIN = 1;       // 绝对下限;实际下限按窗口宽度算(见 getMinPixelsPerStep)
         const PIXELS_PER_STEP_MAX = 400;
+        const FIT_VISIBLE_SECONDS = 180;     // 最远缩放目标:一屏铺下 ~3 分钟
         const DRAG_PIXEL_THRESHOLD = 3;
 
         const compareTrackRow = document.getElementById('compare-track-row');
@@ -615,11 +617,25 @@
             trackArea.addEventListener('wheel', handleWheel, { passive: false });
         }
 
+        // 最小 px/秒:最远缩放显示 min(FIT_VISIBLE_SECONDS, 整首歌长) 秒,随窗口宽度自适应。
+        // 歌短于 3 分钟时下限收紧到"刚好铺满整首",不让缩放缩出歌尾之外的空白。
+        function getMinPixelsPerStep() {
+            const viewport = document.querySelector('.track-timeline');
+            const w = viewport ? viewport.clientWidth : 0;
+            if (!w) return PIXELS_PER_STEP_MIN;
+            const fitSeconds = Math.min(FIT_VISIBLE_SECONDS, totalDuration || FIT_VISIBLE_SECONDS);
+            if (fitSeconds <= 0) return PIXELS_PER_STEP_DEFAULT;
+            // 不低于绝对下限,也不超过默认(放大方向不归这管)
+            return Math.max(PIXELS_PER_STEP_MIN, Math.min(PIXELS_PER_STEP_DEFAULT, w / fitSeconds));
+        }
+
         // 改 PIXELS_PER_STEP + 重建所有 track 的 magenta visualizer + 重算依赖宽度。
         // anchorClientX 给的话以那一点为不动点(保持鼠标位置对应的时间不变)。
         function applyPixelsPerStep(newValue, anchorClientX) {
             const old = PIXELS_PER_STEP;
-            const clamped = Math.max(PIXELS_PER_STEP_MIN, Math.min(PIXELS_PER_STEP_MAX, newValue));
+            const min = getMinPixelsPerStep();
+            const clamped = Math.max(min, Math.min(PIXELS_PER_STEP_MAX, newValue));
+            atMinZoom = clamped <= min + 1e-6;   // 记录是否贴到最远,供 resize 重新贴合
             if (clamped === old) return;
             PIXELS_PER_STEP = clamped;
 
@@ -628,8 +644,12 @@
 
             let newScrollLeft = scrollBar ? scrollBar.scrollLeft * ratio : 0;
             if (typeof anchorClientX === 'number' && scrollBar) {
-                const rect = scrollBar.getBoundingClientRect();
-                const cursorOffset = anchorClientX - rect.left;
+                // note 画布原点在 .track-timeline 视口左缘(左边隔着 sidebar + vscroll +
+                // padding ≈ 222px),不是整宽的 scrollBar 左缘。必须用 timeline 视口量
+                // cursorOffset,否则锚点偏到鼠标左侧,缩放不以鼠标为中心。
+                const viewport = document.querySelector('.track-timeline');
+                const rect = (viewport || scrollBar).getBoundingClientRect();
+                const cursorOffset = Math.max(0, anchorClientX - rect.left);
                 const oldAbsX = scrollBar.scrollLeft + cursorOffset;
                 newScrollLeft = oldAbsX * ratio - cursorOffset;
             }
@@ -673,6 +693,27 @@
             }
         }
 
+        // 窗口/侧栏拉伸 → 视口宽变了:重夹缩放下限,按新尺寸重算 scroll 宽度 + 画布偏移。
+        // 已在最小缩放时滚轮会因 clamped===old 早退、不重算,所以 resize 必须独立处理。
+        // rAF 去抖:拖拽时一帧只跑一次,避免重建 visualizer 风暴。
+        let _resizeRaf = 0;
+        function handleViewportResize() {
+            if (_resizeRaf) return;
+            _resizeRaf = requestAnimationFrame(() => {
+                _resizeRaf = 0;
+                const min = getMinPixelsPerStep();
+                // 已缩到最远 → 重新贴合新视口(歌装得下就始终铺满、不可拖);
+                // 视口变大把当前值顶到新下限之下 → 也提到下限。
+                const target = (atMinZoom || PIXELS_PER_STEP < min) ? min : PIXELS_PER_STEP;
+                if (target !== PIXELS_PER_STEP) {
+                    applyPixelsPerStep(target);        // 内部会重建 + 重算 metrics + 套 transform
+                } else {
+                    updateTimelineMetrics();           // 重算 scroll-content 宽(gutter / minWidth 随新尺寸变)
+                    updateTrackViewportTransforms();    // scrollLeft 被浏览器夹回后重套 transform,内容归位
+                }
+            });
+        }
+
         async function init() {
             const status = document.getElementById('status');
             try {
@@ -699,6 +740,7 @@
                 updatePlayheads(currentShown);
             });
             bindScrollAndZoomControls();
+            window.addEventListener('resize', handleViewportResize);
 
             compareWavTrigger.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -1691,7 +1733,17 @@
             totalDurationForDisplay = totalDuration;
 
             const scrollContent = document.getElementById('timeline-scroll-content');
-            const width = Math.max(totalDuration * PIXELS_PER_STEP + 120, 800);
+            // 底部滚动条是整卡片宽,真实 note 视口窄(左侧 sidebar+vscroll)。scroll-content
+            // 要补上这段差值,max scrollLeft 才能把歌尾对齐到 timeline 视口右缘(否则滚不到底)。
+            const scrollBar = document.getElementById('timeline-scrollbar-container');
+            const viewport = document.querySelector('.track-timeline');
+            const gutter = (scrollBar && viewport && viewport.clientWidth > 0)
+                ? Math.max(0, scrollBar.clientWidth - viewport.clientWidth)
+                : 0;
+            // 下限取滚动条自身宽度(不是魔数 800):整首歌装得下时 scroll-content 正好等于
+            // 视口,max scrollLeft = 0,不会凭空多出可拖动的空白(面板窄于 800 时尤其明显)。
+            const minWidth = (scrollBar && scrollBar.clientWidth > 0) ? scrollBar.clientWidth : 800;
+            const width = Math.max(totalDuration * PIXELS_PER_STEP + gutter, minWidth);
             scrollContent.style.width = width + 'px';
 
             const currentShown = Math.min(pauseOffset, totalDurationForDisplay);
