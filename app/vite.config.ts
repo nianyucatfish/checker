@@ -7,9 +7,10 @@ import renderer from "vite-plugin-electron-renderer";
 // - chokidar 间接依赖 fsevents (Mac 原生模块,rollup 打包会失败)
 // - electron 是 runtime,只能 require
 // - better-sqlite3 是 native .node 模块,必须运行时 require 而不是被 rollup 包起来
-const NODE_EXTERNALS = ["electron", "chokidar", "fsevents", "better-sqlite3"];
+const NODE_EXTERNALS = ["electron", "chokidar", "fsevents", "better-sqlite3", "yauzl"];
 
 export default defineConfig({
+  base: "./",
   plugins: [
     react(),
     electron([

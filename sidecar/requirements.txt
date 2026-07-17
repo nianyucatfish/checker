@@ -15,6 +15,5 @@ send2trash>=1.8
 # MCP server (agent tool exposure; stdio transport, spawned by Electron main)
 mcp>=1.0
 
-# Tests
-pytest>=8
+# HTTP client used by the completion proxy and FastAPI TestClient
 httpx>=0.27

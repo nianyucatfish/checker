@@ -15,7 +15,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { readCsv, writeCsv } from "../../api";
-import { clsx } from "../../utils";
+import { clsx, appAlert } from "../../utils";
 
 interface Props {
   path: string;
@@ -258,7 +258,7 @@ export function CsvViewer({ path }: Props) {
       setDirty(false);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      alert(`保存失败：${msg}`);
+      await appAlert(`保存失败：${msg}`);
     } finally {
       setSaving(false);
     }

@@ -87,6 +87,21 @@ def test_load_config_ignores_legacy_llm_override(tmp_path, monkeypatch):
     assert cfg.llm.api_key == "toml-key"
 
 
+def test_candidate_paths_preserve_env_repo_platform_order(tmp_path, monkeypatch):
+    explicit = tmp_path / "explicit.toml"
+    fallback = tmp_path / "platform"
+    monkeypatch.setenv("CHECKER_CONFIG", str(explicit))
+    monkeypatch.setattr(cfgmod.paths, "app_config_dir", lambda: fallback)
+
+    candidates = cfgmod._candidate_paths()
+
+    assert candidates == [
+        explicit,
+        cfgmod.paths.repo_root() / "config.toml",
+        fallback / "config.toml",
+    ]
+
+
 def test_config_path_for_write_uses_env_when_no_config_loaded(tmp_path, monkeypatch):
     path = tmp_path / "custom.toml"
     monkeypatch.setenv("CHECKER_CONFIG", str(path))

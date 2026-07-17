@@ -592,7 +592,7 @@ export class AgentRunner {
       function: {
         name: "playback_toggle_beat_render",
         description:
-          "Overlay strong/weak beat lines + metronome click on the CURRENTLY OPEN wav in AudioViewer (data source: 同歌 csv/Beat.csv)。前置:Beat.csv 已过 1.6 syntax 校验;当前主窗口正在显示某 wav (先 ui_open_file 总轨某 wav)。退出 2.6 前必须再调一次 on=false 关掉。Returns {ok, code?, message?}.",
+          "Overlay strong/weak beat lines + metronome click on the CURRENTLY OPEN wav in AudioViewer (data source: 同歌 csv/Beat.csv)。前置:Beat.csv 已过 1.6 syntax 校验;当前主窗口正在显示某 wav (先 ui_open_file 总轨某 wav)。退出 2.6 前必须再调一次 on=false 关掉。Returns {ok, code?, message?}. On failure: {ok:false, code: 'NO_WAV_OPEN' | 'NO_SONG_STRUCTURE' | 'BUSY' | 'RENDER_FAILED' | 'UI_TIMEOUT' | 'NO_MAIN_WINDOW'};NO_WAV_OPEN → 先 ui_open_file 打开 wav 再重试。",
         parameters: {
           type: "object",
           properties: {
@@ -608,7 +608,7 @@ export class AgentRunner {
       function: {
         name: "playback_toggle_structure_render",
         description:
-          "Overlay green dashed段落分隔线 + 段落标签 on the CURRENTLY OPEN wav in AudioViewer (data source: 同歌 csv/Structure.csv)。前置同 playback_toggle_beat_render。退出 2.7 前必须 on=false 关掉。Returns {ok, code?, message?}.",
+          "Overlay green dashed段落分隔线 + 段落标签 on the CURRENTLY OPEN wav in AudioViewer (data source: 同歌 csv/Structure.csv)。前置同 playback_toggle_beat_render。退出 2.7 前必须 on=false 关掉。Returns {ok, code?, message?}. On failure 同 playback_toggle_beat_render。",
         parameters: {
           type: "object",
           properties: {

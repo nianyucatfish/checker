@@ -21,7 +21,7 @@ import {
   revealInFolder,
 } from "../api";
 import type { DirEntryOut, CheckErrorOut, AudioDurationItem } from "../api";
-import { clsx } from "../utils";
+import { clsx, appAlert, appConfirm } from "../utils";
 import { isPathUnderDir } from "../lib/paths";
 
 interface Props {
@@ -693,7 +693,7 @@ export function Explorer({
         onSelect(dst, isDir);
         onMutated();
       } catch (e) {
-        alert(`重命名失败: ${e instanceof Error ? e.message : String(e)}`);
+        await appAlert(`重命名失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
     [refreshDir, onSelect, onMutated],
@@ -708,24 +708,38 @@ export function Explorer({
         paths.length === 1
           ? `确定将 "${basename(paths[0])}" 移到回收站?`
           : `确定将这 ${paths.length} 个项目移到回收站?`;
-      if (!window.confirm(msg)) return;
+      if (!(await appConfirm(msg))) return;
       try {
         const r = await deletePaths(paths);
         const parents = new Set(paths.map(dirname).filter(Boolean));
         for (const p of parents) await refreshDir(p);
         onMutated();
         if (r.errors.length > 0) {
-          alert(`部分删除失败:\n${r.errors.join("\n")}`);
+          await appAlert(`部分删除失败:\n${r.errors.join("\n")}`);
         }
       } catch (e) {
-        alert(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
+        await appAlert(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
     [refreshDir, onMutated],
   );
 
-  const doCopy = (paths: string[]) => setClipboard({ srcs: paths, mode: "copy" });
-  const doCut = (paths: string[]) => setClipboard({ srcs: paths, mode: "cut" });
+  // 复制/剪切同时接管 OS 剪贴板(路径写成纯文本,整体替换):清掉外部复制残留
+  // 的文件列表,否则 doPaste 的"OS 文件优先"分支会一直粘旧的外部文件;顺带
+  // 支持把路径粘进文本框。
+  const takeOverOsClipboard = (paths: string[]) => {
+    void window.electronAPI.clipboardWriteText?.(paths.join("\n"))?.catch(() => {
+      /* ignore */
+    });
+  };
+  const doCopy = (paths: string[]) => {
+    setClipboard({ srcs: paths, mode: "copy" });
+    takeOverOsClipboard(paths);
+  };
+  const doCut = (paths: string[]) => {
+    setClipboard({ srcs: paths, mode: "cut" });
+    takeOverOsClipboard(paths);
+  };
 
   const doPaste = useCallback(
     async (target: string, targetIsDir: boolean) => {
@@ -750,13 +764,14 @@ export function Explorer({
           for (const d of dirs) await refreshDir(d);
           onMutated();
         } catch (e) {
-          alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
+          await appAlert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
         }
         return;
       }
 
       // 2. OS 剪贴板:从资源管理器复制的文件,始终当 copy(系统层面没有"剪切"语义)。
-      //    优先于内部 copy —— 外部复制通常是更新的意图。
+      //    优先于内部 copy —— doCopy/doCut 都会接管(清掉)OS 剪贴板的文件列表,
+      //    所以这里还能读到文件 ⇒ 外部复制发生在内部复制之后,是更新的意图。
       let osPaths: string[] = [];
       try {
         osPaths = (await window.electronAPI.clipboardReadFiles()) || [];
@@ -770,7 +785,7 @@ export function Explorer({
           await refreshDir(dstDir);
           onMutated();
         } catch (e) {
-          alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
+          await appAlert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
         }
         return;
       }
@@ -782,7 +797,7 @@ export function Explorer({
           await refreshDir(dstDir);
           onMutated();
         } catch (e) {
-          alert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
+          await appAlert(`粘贴失败: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     },
@@ -1032,7 +1047,7 @@ export function Explorer({
       } catch (e) {
         const verb =
           payload.kind === "internal" ? (payload.copy ? "复制" : "移动") : "导入";
-        alert(`${verb}失败: ${e instanceof Error ? e.message : String(e)}`);
+        await appAlert(`${verb}失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
     [refreshDir, onMutated],

@@ -13,7 +13,7 @@ agent 通过 `state_tree_read` / `update` 推进进度,前端按 md 渲染 check
     - [ ] 1.1 分工表完整性
     - [ ] 1.2 文件夹命名 + 5 目录结构
     ...
-    - [ ] 3.3 标记已验收
+    - [ ] 3 收尾:上传网盘 + 填链接 + 标记验收
 
 状态值:
 - `[x]` —— 完成
@@ -27,8 +27,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from sidecar import paths
 
-# 17 态白名单 + 标题。顺序即写入顺序。
+
+# 15 态白名单 + 标题。顺序即写入顺序。
 _STATES: list[tuple[str, str]] = [
     ("1.1", "分工表完整性"),
     ("1.2", "文件夹命名 + 5 目录结构"),
@@ -37,16 +39,14 @@ _STATES: list[tuple[str, str]] = [
     ("1.5", "WAV 物理格式 / 时长"),
     ("1.6", "CSV 简单格式"),
     ("1.7", "复检"),
-    ("2.1", "乐器音源对照表 vs 混音工程文件名"),
+    ("2.1", "三方对照:音源表 ↔ 混音工程文件 ↔ 分轨"),
     ("2.3", "混音台 session 1(分轨 + 总轨)"),
     ("2.4", "混音台 session 2(源文件 + 总轨)"),
     ("2.5", "MIDI vs WAV 对齐"),
     ("2.6", "渲染节奏"),
     ("2.7", "渲染结构"),
     ("2.8", "音频质量通听"),
-    ("3.1", "上传到百度网盘"),
-    ("3.2", "写网盘链接到分工表"),
-    ("3.3", "标记已验收"),
+    ("3", "收尾:上传网盘 + 填链接 + 标记验收"),
 ]
 
 _VALID_STATE_IDS = frozenset(sid for sid, _ in _STATES)
@@ -76,8 +76,8 @@ def _expand_file_ref(spec: str) -> str:
         return f"[ref_error: 行号无效 start={start} end={end}]"
     path = Path(raw_path)
     if not path.is_absolute():
-        # 相对路径以仓库根解析(state_tree.py 在 sidecar/,根 = parent.parent)
-        path = (Path(__file__).resolve().parent.parent / path).resolve()
+        # 开发模式基于仓库根；打包后由 Electron 注入只读 resource root。
+        path = (paths.resource_root() / path).resolve()
     if not path.is_file():
         return f"[ref_error: 文件不存在:{path}]"
     try:
@@ -98,10 +98,10 @@ def _expand_file_refs(text: str) -> str:
     return _FILE_REF_RE.sub(lambda m: _expand_file_ref(m.group("spec")), text)
 
 # 匹配一行:`- [ ] 1.4 文件命名归一化 — note here`
-# group(1) = " " or "x";group(2) = "1.4";group(3) = "文件命名归一化"(到 — 为止 / 行尾);
-# group(4) = note(可选)
+# group(1) = " " or "x";group(2) = "1.4"(顶层态如 "3" 不带小数点);
+# group(3) = "文件命名归一化"(到 — 为止 / 行尾);group(4) = note(可选)
 _LINE_RE = re.compile(
-    r"^- \[([ x])\] (\d+\.\d+) (.+?)(?:\s—\s(.*))?$"
+    r"^- \[([ x])\] (\d+(?:\.\d+)?) (.+?)(?:\s—\s(.*))?$"
 )
 
 
@@ -110,8 +110,8 @@ class StateTreeError(ValueError):
 
 
 def _cache_root() -> Path:
-    """`<repo_root>/cache/`,与 review_log / sheet_cache 同级。tests 用 monkeypatch 重定向。"""
-    return Path(__file__).resolve().parent.parent / "cache"
+    """兼容旧测试钩子；实际 durable root 统一由 sidecar.paths 选择。"""
+    return paths.data_dir()
 
 
 def _sanitize(component: str) -> str:
@@ -143,12 +143,63 @@ def _initial_content(song: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _migrate_legacy_content(text: str) -> str:
+    """把旧 17 态进度本迁成 15 态；新格式原样返回。"""
+    lines = text.splitlines()
+    if not any(
+        (match := _LINE_RE.match(line)) and match.group(2) in ("3.1", "3.2", "3.3")
+        for line in lines
+    ):
+        return text
+    legacy: dict[str, tuple[bool, str | None]] = {}
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        match = _LINE_RE.match(lines[i])
+        if not match or match.group(2) not in ("3.1", "3.2", "3.3"):
+            line = lines[i]
+            if match and match.group(2) == "2.1" and match.group(3) != dict(_STATES)["2.1"]:
+                old_note = f";旧 note:{match.group(4)}" if match.group(4) else ""
+                line = (
+                    "- [ ] 2.1 三方对照:音源表 ↔ 混音工程文件 ↔ 分轨"
+                    f" — 流程升级,新增分轨三方齐全性待补查{old_note}"
+                )
+            kept.append(line)
+            i += 1
+            continue
+
+        state_id = match.group(2)
+        note_lines = [match.group(4)] if match.group(4) else []
+        i += 1
+        while i < len(lines) and not _LINE_RE.match(lines[i]) and not lines[i].startswith("#"):
+            note_lines.append(lines[i].removeprefix("  "))
+            i += 1
+        legacy[state_id] = (match.group(1) == "x", "\n".join(note_lines).strip() or None)
+
+    all_done = len(legacy) == 3 and all(done for done, _ in legacy.values())
+    details = []
+    for state_id in ("3.1", "3.2", "3.3"):
+        if state_id not in legacy:
+            details.append(f"{state_id}旧记录缺失")
+            continue
+        done, note = legacy[state_id]
+        details.append(f"{state_id}{'已完成' if done else '未完成'}" + (f"({note})" if note else ""))
+    suffix = "" if all_done and not any(note for _, note in legacy.values()) else f" — 旧进度迁移:{';'.join(details)}"
+    kept.append(f"- [{'x' if all_done else ' '}] 3 收尾:上传网盘 + 填链接 + 标记验收{suffix}")
+    return "\n".join(kept) + "\n"
+
+
 def init_state_tree(song: str) -> Path:
-    """建文件(已存在则保留),返回路径。幂等 —— 重复调安全。父目录自动创建。"""
+    """建文件并迁移旧格式,返回路径。幂等。父目录自动创建。"""
     p = md_path(song)
     if not p.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(_initial_content(song), encoding="utf-8")
+    else:
+        text = p.read_text(encoding="utf-8")
+        migrated = _migrate_legacy_content(text)
+        if migrated != text:
+            p.write_text(migrated, encoding="utf-8")
     return p
 
 

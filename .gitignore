@@ -38,13 +38,16 @@ asset/ide_config.json
 那些你很冒险的梦_Beat.csv
 怪物_Structure.csv
 
-# Local-only reference codebase (not part of this project)
+# Local-only reference codebase and Claude Code worktrees (not part of this project)
 GenericAgent/
+.claude/
 
 # Node / Electron / Vite
 node_modules/
 app/dist/
 app/dist-electron/
+app/release/
+packaging/staging/
 app/tsconfig.*.tsbuildinfo
 *.log
 
@@ -54,6 +57,7 @@ cache/
 # 8. 本地参考资料(不进 git)
 doc/v2_验收清单.md
 doc/音乐学院数据要求.md
+doc/llm_*.md
 
 # 9. 本地临时测试沙盒
 tmp/

@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from sidecar import checker, fixers
+from sidecar import checker, fixers, paths
 from sidecar import workspace as _ws
 from sidecar.config import (
     LLMConfig,
@@ -224,6 +224,27 @@ def set_tencent_config(body: dict):
     return {"ok": True, "config_path": str(path), **_tencent_config_view()}
 
 
+@app.get("/tools/sheet_mode")
+def sheet_mode():
+    """分工表可用性(纯配置检查,不打 API)。前端徽章 + 降级提示用。
+
+    configured = (凭证齐 或 配了 fixture)且 reviewer 已配;false = 本地降级模式,
+    表格核对 / 写回交用户人工,QC 本身照跑。
+    """
+    from sidecar.tencent_sheet import missing_config_fields
+
+    c = reload_config()
+    credentials = len(missing_config_fields()) == 0
+    fixture = bool(c.agent_sandbox.sheet_fixture_path.strip())
+    reviewer_set = bool(c.user.reviewer_name.strip())
+    return {
+        "configured": (credentials or fixture) and reviewer_set,
+        "credentials": credentials,
+        "fixture": fixture,
+        "reviewer_set": reviewer_set,
+    }
+
+
 @app.post("/agent/completion")
 def agent_completion(body: dict):
     """Proxy LLM call with tool support for the Electron agent loop.
@@ -326,8 +347,7 @@ def agent_completion(body: dict):
     try:
         import json as _json
         import time as _time
-        from pathlib import Path as _Path
-        dump_path = _Path(__file__).resolve().parent.parent / "tmp" / "agent_upstream.jsonl"
+        dump_path = paths.agent_upstream_log_path()
         dump_path.parent.mkdir(parents=True, exist_ok=True)
         with dump_path.open("a", encoding="utf-8") as f:
             f.write(_json.dumps({"ts": _time.time(), "finish": finish_reason, "data": data}, ensure_ascii=False) + "\n")
@@ -591,8 +611,7 @@ def tool_write_midi(body: dict):
         raise HTTPException(status_code=400, detail=f"invalid base64: {e}")
     # 调试副本:每次写 midi 也存一份到 tmp/last_midi_save.mid,方便事后对比
     try:
-        from pathlib import Path as _Path
-        dbg_dir = _Path(__file__).resolve().parent.parent / "tmp"
+        dbg_dir = paths.midi_debug_dir()
         dbg_dir.mkdir(parents=True, exist_ok=True)
         (dbg_dir / "last_midi_save.mid").write_bytes(data)
         (dbg_dir / "last_midi_save.meta.txt").write_text(
@@ -644,8 +663,7 @@ def tool_shift_midi_per_track_save(body: dict):
         raise HTTPException(status_code=400, detail=f"midi shift failed: {e}")
     # 调试副本
     try:
-        from pathlib import Path as _Path
-        dbg_dir = _Path(__file__).resolve().parent.parent / "tmp"
+        dbg_dir = paths.midi_debug_dir()
         dbg_dir.mkdir(parents=True, exist_ok=True)
         (dbg_dir / "last_midi_save.mid").write_bytes(new_bytes)
         (dbg_dir / "last_midi_save.meta.txt").write_text(

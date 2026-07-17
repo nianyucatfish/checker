@@ -443,3 +443,53 @@ def test_get_song_meta_reads_col_30_not_col_29(fake_sheet):
     fake_sheet([row])
     meta = asheet.get_song_meta("望春风")
     assert "pan_review_link" in meta.missing_required_fields
+
+
+# ============================================================
+#  表格降级:配置缺失 → TencentNotConfiguredError → SHEET_NOT_CONFIGURED
+# ============================================================
+
+
+def test_list_my_pending_without_reviewer_raises_not_configured(monkeypatch):
+    """reviewer_name 未配置 → TencentNotConfiguredError(不是通用 TencentSheetError)。"""
+    from sidecar import config as sidecar_config
+    from sidecar.tencent_sheet import TencentNotConfiguredError
+
+    monkeypatch.setattr(sidecar_config, "_cached", sidecar_config.Config())
+    with pytest.raises(TencentNotConfiguredError):
+        asheet.list_my_pending()
+
+
+def test_get_song_meta_without_credentials_raises_not_configured(monkeypatch):
+    """reviewer 已配但腾讯凭证空(无 fixture)→ get_client 抛 TencentNotConfiguredError。"""
+    from sidecar import config as sidecar_config
+    from sidecar import tencent_sheet
+    from sidecar.tencent_sheet import TencentNotConfiguredError
+
+    cfg = sidecar_config.Config()
+    cfg.user.reviewer_name = "杨航"
+    monkeypatch.setattr(sidecar_config, "_cached", cfg)
+    monkeypatch.setattr(tencent_sheet, "_client", None)
+
+    with pytest.raises(TencentNotConfiguredError):
+        asheet.get_song_meta("望春风")
+
+
+def test_mcp_sheet_tools_map_not_configured_code(monkeypatch):
+    """mcp 层把 TencentNotConfiguredError 映射为 SHEET_NOT_CONFIGURED(agent 的降级信号)。"""
+    from sidecar import config as sidecar_config
+    from sidecar import mcp_server, tencent_sheet
+
+    monkeypatch.setattr(sidecar_config, "_cached", sidecar_config.Config())
+    monkeypatch.setattr(tencent_sheet, "_client", None)
+
+    out = mcp_server.sheet_list_my_pending()
+    assert out["ok"] is False
+    assert out["code"] == "SHEET_NOT_CONFIGURED"
+
+    cfg = sidecar_config.Config()
+    cfg.user.reviewer_name = "杨航"
+    monkeypatch.setattr(sidecar_config, "_cached", cfg)
+    out2 = mcp_server.sheet_get_song_meta("望春风")
+    assert out2["ok"] is False
+    assert out2["code"] == "SHEET_NOT_CONFIGURED"

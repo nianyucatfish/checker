@@ -148,6 +148,32 @@ export interface AgentEvent {
   data?: unknown;
 }
 
+export interface OfflineUpdateManifest {
+  schema: 1;
+  product: "Audio QC";
+  version: string;
+  platform: "windows" | "macos";
+  arch: "x64" | "arm64";
+  status: "unsigned-draft";
+  managedRoots: string[];
+  files: Array<{ path: string; sha256: string }>;
+}
+
+export interface OfflineUpdateInfo {
+  currentVersion: string;
+  platform: "windows" | "macos";
+  arch: "x64" | "arm64";
+  packaged: boolean;
+  signatureStatus: "unsigned-draft";
+}
+
+export interface OfflineUpdateInspection {
+  zipPath: string;
+  manifest: OfflineUpdateManifest;
+  fileCount: number;
+  signatureStatus: "unsigned-draft";
+}
+
 // 会话列表项;主进程 listSessions 返回的精简形(不含 model / created_at)。
 export interface SessionInfo {
   id: string;
@@ -173,13 +199,36 @@ declare global {
       revealInFolder: (path: string) => Promise<void>;
       openExternal: (url: string) => Promise<void>;
       openPath: (path: string) => Promise<void>;
+      showAlert: (message: string) => Promise<void>;
+      showConfirm: (message: string) => Promise<boolean>;
       getPathForFile: (file: File) => string;
+      updateInfo: () => Promise<{
+        currentVersion: string;
+        platform: "windows" | "macos";
+        arch: "x64" | "arm64";
+        packaged: boolean;
+        signatureStatus: "unsigned-draft";
+      }>;
+      updateSelectZip: () => Promise<string | null>;
+      updateInspect: (zipPath: string) => Promise<{
+        zipPath: string;
+        manifest: {
+          version: string;
+          platform: "windows" | "macos";
+          arch: "x64" | "arm64";
+          status: "unsigned-draft";
+        };
+        fileCount: number;
+        signatureStatus: "unsigned-draft";
+      }>;
+      updateApply: () => Promise<{ ok: boolean }>;
       fsWatch: (root: string) => Promise<void>;
       fsUnwatch: () => Promise<void>;
       fsPauseWatch: () => Promise<void>;
       fsResumeWatch: (root: string) => Promise<void>;
       onFsChanged: (cb: (dirs: string[]) => void) => () => void;
       clipboardReadFiles: () => Promise<string[]>;
+      clipboardWriteText: (text: string) => Promise<void>;
       mixToggle: (
         rect: { x: number; y: number; w: number; h: number } | null,
       ) => Promise<void>;
@@ -210,8 +259,12 @@ declare global {
       onAgentEvent: (cb: (ev: AgentEvent) => void) => () => void;
       onUiOpenFile: (cb: (path: string) => void) => () => void;
       onPlaybackToggle: (
-        cb: (kind: "beat" | "structure", on: boolean) => void,
+        cb: (reqId: number, kind: "beat" | "structure", on: boolean) => void,
       ) => () => void;
+      playbackToggleResult: (
+        reqId: number,
+        result: { ok: boolean; code?: string; message?: string },
+      ) => void;
       agentGetDumpLlm: () => Promise<boolean>;
       agentSetDumpLlm: (on: boolean) => Promise<void>;
     };
@@ -307,6 +360,19 @@ export async function saveTencentDocsConfig(body: {
   reviewer_name?: string;
 }): Promise<TencentDocsConfig & { ok: boolean; config_path: string }> {
   return postJson("/config/tencent", body);
+}
+
+// 分工表可用性(纯配置检查,sidecar 不打腾讯 API)。configured=false = 本地降级
+// 模式:表格核对/写回交用户人工,QC 照跑。AgentSidebar 徽章用。
+export interface SheetMode {
+  configured: boolean;
+  credentials: boolean;
+  fixture: boolean;
+  reviewer_set: boolean;
+}
+
+export async function getSheetMode(): Promise<SheetMode> {
+  return getJson("/tools/sheet_mode");
 }
 
 /** 用 protocol-aware 的 /agent/completion 发一条极短消息探活当前配置。 */

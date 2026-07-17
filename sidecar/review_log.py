@@ -30,15 +30,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from sidecar import paths
+
 
 def _log_path() -> Path:
-    """`<repo_root>/cache/review_log.jsonl`。
-
-    跟 tencent_sheet 的 _disk_cache_path 同级,方便开发期手动查看 / 删除。
-    打包后如要换路径,改这一处即可。tests 通过 monkeypatch 这个函数重定向。
-    """
-    repo_root = Path(__file__).resolve().parent.parent
-    return repo_root / "cache" / "review_log.jsonl"
+    """review log 路径；开发期仍在 repo cache，打包可由 CHECKER_LOG_DIR 注入。"""
+    return paths.review_log_path()
 
 
 def append(

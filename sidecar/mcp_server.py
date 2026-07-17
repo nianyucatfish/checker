@@ -9,7 +9,7 @@ Run standalone for debugging:
     python -m sidecar.mcp_server
 
 Tool inventory (see doc/prompts/agent_workflow.md):
-- state_tree.*: read (auto-init) / update —— 17 态 markdown 进度本
+- state_tree.*: read (auto-init) / update —— 15 态 markdown 进度本
 - audit.*  : list_errors (MISSING_FILE 附带 workspace 候选清单)
 - read_text_file: 读纯文本,line_range 取片段,>8KB 自动 head+tail 截断
 - sheet.*  : list_my_pending / get_song_meta(写路径 mark_accepted / write_baidu_link 待补,依赖腾讯文档写 API)
@@ -45,7 +45,7 @@ except ImportError as e:  # pragma: no cover
 from sidecar import assignment_sheet, checker, fixers, state_tree
 from sidecar import workspace as _ws
 from sidecar.config import get_config
-from sidecar.tencent_sheet import TencentSheetError
+from sidecar.tencent_sheet import TencentNotConfiguredError, TencentSheetError
 
 logger = logging.getLogger("sidecar.mcp")
 
@@ -74,7 +74,7 @@ def system_set_workspace(root: str) -> dict[str, Any]:
 
 @mcp.tool()
 def state_tree_read(song: str) -> dict[str, Any]:
-    """Read state markdown at cache/state_tree/<song>.md. **Auto-creates initial md (17 态全 `[ ]`) if missing** —— 进歌第一件事就调它,既看进度又确保文件就位。Scope=song,同一首歌的所有 chat 共享一份 md。
+    """Read state markdown at cache/state_tree/<song>.md. **Auto-creates initial md (15 态全 `[ ]`) if missing** —— 进歌第一件事就调它,既看进度又确保文件就位。Scope=song,同一首歌的所有 chat 共享一份 md。
     Returns {path, text, created} (created=true 表示这次首建)."""
     try:
         existed = state_tree.md_path(song).exists()
@@ -101,7 +101,7 @@ def state_tree_update(
     任何"缺/未消/无法修/失败/待用户/待补"等未解决问题 → `done=false`,note 写遗留原因,推下一态(1.7 复检阶段统一处理)。
     `done=true` 同时 note 含未消除字眼是常见错误,会被人工识别为标错。
     `note`: None 不动现有,空串清空,非空替换(支持 `{{file:path:start:end}}` 服务端展开).
-    Valid state_id: 1.1-1.7 / 2.1-2.8 / 3.1-3.3. **Requires state_tree_read first to init md.**
+    Valid state_id: 1.1-1.7 / 2.1 / 2.3-2.8 / 3. **Requires state_tree_read first to init/migrate md.**
     Returns {path, text} 含更新后全文. On failure: {ok: false, code: "INVALID_STATE"|"INVALID_PATH"|"NOT_INITIALIZED"|"MD_CORRUPT", message: str}."""
     try:
         text = state_tree.update_state_tree(song, state_id, done, note)
@@ -202,7 +202,8 @@ def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[st
     Scope: only songs in current reviewer's range (身份隐藏 boundary).
     Key fields for 1.1: missing_required_fields, invalid_format_fields, derived.backing_count.
     歌名撞车(同 reviewer 下同 song_name 多行) → {ok: false, code: "AMBIGUOUS_SONG", candidates: [{row_index, song_name, owner, original_singer}]}, 用 candidates 里的 row_index 再调一次。
-    On failure: {ok: false, code: "SONG_NOT_FOUND" | "AMBIGUOUS_SONG" | "SHEET_FETCH_FAILED", message: str}."""
+    On failure: {ok: false, code: "SONG_NOT_FOUND" | "AMBIGUOUS_SONG" | "SHEET_NOT_CONFIGURED" | "SHEET_FETCH_FAILED", message: str}。
+    SHEET_NOT_CONFIGURED(本机没配腾讯凭证/负责人,本场别再调 sheet_*)/ SHEET_FETCH_FAILED(重试一次仍挂)/ SONG_NOT_FOUND 都**不阻塞 QC**:按工作手册 1.1 降级分支走(本地推断交付形态 + 完整性欠账给用户人工核对)。"""
     try:
         meta = assignment_sheet.get_song_meta(song_name, row_index=row_index)
     except assignment_sheet.AmbiguousSongError as e:
@@ -212,6 +213,8 @@ def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[st
             "message": str(e),
             "candidates": e.candidates,
         }
+    except TencentNotConfiguredError as e:
+        return {"ok": False, "code": "SHEET_NOT_CONFIGURED", "message": str(e)}
     except TencentSheetError as e:
         msg = str(e)
         # 区分 "不在范围" 与 "API 挂"
@@ -229,9 +232,12 @@ def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[st
 def sheet_list_my_pending() -> dict[str, Any]:
     """List songs in current reviewer's range that are not yet marked accepted.
     Reviewer name read from config, NEVER appears in args/results (身份隐藏 boundary).
-    Returns {songs: [{row_index, song_name, owner}, ...]}; on failure: {ok: false, code: "SHEET_FETCH_FAILED", message: str}."""
+    Returns {songs: [{row_index, song_name, owner}, ...]}; on failure: {ok: false, code: "SHEET_NOT_CONFIGURED" | "SHEET_FETCH_FAILED", message: str}。
+    SHEET_NOT_CONFIGURED = 本机没配腾讯凭证/负责人身份,本场别再调 sheet_*,让用户直接给歌名 → start_qc(纯本地解析,不依赖表格);SHEET_FETCH_FAILED = 临时故障,可重试一次。"""
     try:
         rows = assignment_sheet.list_my_pending()
+    except TencentNotConfiguredError as e:
+        return {"ok": False, "code": "SHEET_NOT_CONFIGURED", "message": str(e)}
     except TencentSheetError as e:
         return {
             "ok": False,

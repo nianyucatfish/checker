@@ -11,7 +11,8 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AgentEvent, HydratedTurn, SessionInfo } from "../api";
+import { AgentEvent, HydratedTurn, SessionInfo, getSheetMode } from "../api";
+import { appConfirm } from "../utils";
 
 // 通过 IPC 接 Electron main 的 AgentRunner;事件 → Turn 流水。
 // chatId 持久化在 localStorage,mount 时调 agentHydrate 把 db 里的历史 turns 拉回来。
@@ -584,7 +585,7 @@ export function AgentSidebar() {
   }
 
   async function onDeleteSession(id: string) {
-    if (!confirm("确定删除这个会话?所有消息记录会一并清除。")) return;
+    if (!(await appConfirm("确定删除这个会话?所有消息记录会一并清除。"))) return;
     try {
       await window.electronAPI.agentDeleteSession(id);
       const remaining = sessions.filter((s) => s.id !== id);
@@ -608,6 +609,29 @@ export function AgentSidebar() {
     }
   }
 
+  // 分工表可用性徽章:configured=false 显示"表格·本地"提示降级模式(QC 照跑,
+  // 表格核对/写回人工)。SettingsModal 保存腾讯配置后 dispatch "sheet-config-changed"
+  // 这里重查;null = sidecar 还没回话,不显示。
+  const [sheetConfigured, setSheetConfigured] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      getSheetMode()
+        .then((m) => {
+          if (!cancelled) setSheetConfigured(m.configured);
+        })
+        .catch(() => {
+          if (!cancelled) setSheetConfigured(null);
+        });
+    };
+    refresh();
+    window.addEventListener("sheet-config-changed", refresh);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("sheet-config-changed", refresh);
+    };
+  }, []);
+
   const headerLabel = currentTitle && currentTitle !== "新会话" && currentTitle !== "chat"
     ? currentTitle
     : song
@@ -627,6 +651,14 @@ export function AgentSidebar() {
           <span className="truncate">聊天 · {headerLabel}</span>
           <ChevronDown size={12} className={`shrink-0 transition-transform ${showDropdown ? "rotate-180" : ""}`} />
         </button>
+        {sheetConfigured === false && (
+          <span
+            className="shrink-0 text-[10px] leading-none px-1.5 py-1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400"
+            title="腾讯文档未配置或不完整:质检照常本地跑,分工表核对/写回由你人工完成。可在 设置 → 腾讯文档·用户 里配置。"
+          >
+            表格·本地
+          </span>
+        )}
         <button
           type="button"
           onClick={onNewSession}
@@ -742,7 +774,7 @@ export function AgentSidebar() {
                 </div>
               </div>
               <p className="mt-3 text-sm leading-6 text-fg-muted">
-                直接说"开始质检 &lt;歌曲名&gt;"即可进入 17 态工作流;或先聊一聊。
+                直接说"开始质检 &lt;歌曲名&gt;"即可进入 15 态工作流;或先聊一聊。
               </p>
             </div>
           )}

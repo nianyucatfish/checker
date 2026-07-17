@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sidecar.config import get_config
-from sidecar.tencent_sheet import TencentSheetError, get_client
+from sidecar.tencent_sheet import TencentNotConfiguredError, TencentSheetError, get_client
 
 
 class AmbiguousSongError(TencentSheetError):
@@ -429,8 +429,8 @@ def list_my_pending() -> list[PendingSong]:
     """列出当前 reviewer 待验收的歌。owner 字段返打码版。"""
     reviewer = get_config().user.reviewer_name.strip()
     if not reviewer:
-        raise TencentSheetError(
-            "user.reviewer_name not configured in config.toml; cannot determine current user"
+        raise TencentNotConfiguredError(
+            "user.reviewer_name not configured; 请在 设置 → 腾讯文档·用户 里填「验收负责人姓名」"
         )
 
     rows = _load_rows()
@@ -471,8 +471,8 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
     """
     reviewer = get_config().user.reviewer_name.strip()
     if not reviewer:
-        raise TencentSheetError(
-            "user.reviewer_name not configured in config.toml; cannot determine current user"
+        raise TencentNotConfiguredError(
+            "user.reviewer_name not configured; 请在 设置 → 腾讯文档·用户 里填「验收负责人姓名」"
         )
 
     rows = _load_rows()
@@ -605,8 +605,8 @@ def _list_my_rows(*, accepted: bool):
     """整行版"我的歌"过滤器,共用核心。dev panel 用,**不**给 agent。"""
     reviewer = get_config().user.reviewer_name.strip()
     if not reviewer:
-        raise TencentSheetError(
-            "user.reviewer_name not configured in config.toml; cannot determine current user"
+        raise TencentNotConfiguredError(
+            "user.reviewer_name not configured; 请在 设置 → 腾讯文档·用户 里填「验收负责人姓名」"
         )
 
     rows = _load_rows()

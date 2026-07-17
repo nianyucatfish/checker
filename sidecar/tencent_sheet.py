@@ -43,6 +43,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from sidecar import paths
 from sidecar.config import get_config
 
 
@@ -107,13 +108,8 @@ def _http_get_body(url: str, headers: dict[str, str]) -> tuple[bytes, int]:
 
 
 def _disk_cache_path() -> Path:
-    """磁盘 cache 文件位置: <repo_root>/cache/sheet_cache.json
-
-    放仓库内方便开发期手动查看 / 删除;.gitignore 已包含 cache/。
-    打包后如要换路径,改这一处即可(不影响调用方)。
-    """
-    repo_root = Path(__file__).resolve().parent.parent
-    return repo_root / "cache" / "sheet_cache.json"
+    """磁盘 cache 路径；开发期仍在 repo cache，打包可由 CHECKER_CACHE_DIR 注入。"""
+    return paths.sheet_cache_path()
 
 
 class TencentSheetError(Exception):
@@ -135,6 +131,14 @@ class TencentSheetError(Exception):
         super().__init__(message)
         self.http_status = http_status
         self.api_code = api_code
+
+
+class TencentNotConfiguredError(TencentSheetError):
+    """凭证 / 身份配置缺失 —— 区别于网络 / API 故障。
+
+    mcp_server 据此返回 SHEET_NOT_CONFIGURED,agent 看到它就整场走本地降级
+    (不再重试表格);SHEET_FETCH_FAILED 才是"临时挂,可重试"。
+    """
 
 
 # ============================================================
@@ -418,23 +422,29 @@ _client: Optional[TencentSheetClient] = None
 _client_lock = threading.Lock()
 
 
+def missing_config_fields() -> list[str]:
+    """腾讯凭证缺失字段清单;空列表 = 凭证齐。get_client / api.py sheet_mode 共用同一套判据。"""
+    cfg = get_config().tencent_docs
+    return [
+        k for k, v in {
+            "client_id": cfg.client_id,
+            "access_token": cfg.access_token,
+            "open_id": cfg.open_id,
+            "spreadsheet_id": cfg.spreadsheet_id,
+            "sheet_id": cfg.sheet_id,
+        }.items() if not v
+    ]
+
+
 def get_client() -> TencentSheetClient:
-    """取(或懒构建)进程内单例。配置不全时抛 TencentSheetError。"""
+    """取(或懒构建)进程内单例。配置不全时抛 TencentNotConfiguredError。"""
     global _client
     with _client_lock:
         if _client is None:
             cfg = get_config().tencent_docs
-            missing = [
-                k for k, v in {
-                    "client_id": cfg.client_id,
-                    "access_token": cfg.access_token,
-                    "open_id": cfg.open_id,
-                    "spreadsheet_id": cfg.spreadsheet_id,
-                    "sheet_id": cfg.sheet_id,
-                }.items() if not v
-            ]
+            missing = missing_config_fields()
             if missing:
-                raise TencentSheetError(
+                raise TencentNotConfiguredError(
                     "tencent_docs config incomplete; missing fields: "
                     + ", ".join(missing)
                 )

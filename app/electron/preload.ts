@@ -6,6 +6,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   revealInFolder: (path: string) => ipcRenderer.invoke("shell:show-item-in-folder", path),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
   openPath: (path: string) => ipcRenderer.invoke("shell:open-path", path),
+  // 原生 alert()/confirm() 在 Electron 有 focus 后遗症(关闭后 input 收不到键盘,
+  // 切出窗口再回来才恢复),统一走主进程 dialog.showMessageBox。renderer 侧别直接
+  // 调这两个,用 utils.ts 的 appAlert / appConfirm。
+  showAlert: (message: string) =>
+    ipcRenderer.invoke("dialog:alert", message) as Promise<void>,
+  showConfirm: (message: string) =>
+    ipcRenderer.invoke("dialog:confirm", message) as Promise<boolean>,
   // 把 dataTransfer.files 里的 File 对象解成本地绝对路径(Electron 32+ 的官方做法,
   // 替代之前 contextIsolation 下被禁的 file.path)。OS 拖来的临时 / blob 文件
   // 没有本地路径时返回空字符串。
@@ -16,6 +23,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return "";
     }
   },
+  updateInfo: () => ipcRenderer.invoke("update:info"),
+  updateSelectZip: () => ipcRenderer.invoke("update:select-zip"),
+  updateInspect: (zipPath: string) => ipcRenderer.invoke("update:inspect", zipPath),
+  updateApply: () => ipcRenderer.invoke("update:apply"),
   fsWatch: (root: string) => ipcRenderer.invoke("fs:watch", root),
   fsUnwatch: () => ipcRenderer.invoke("fs:unwatch"),
   fsPauseWatch: () => ipcRenderer.invoke("fs:pause-watch"),
@@ -24,6 +35,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 没文件返回 []。给 Explorer Ctrl+V 跨进程粘贴用。
   clipboardReadFiles: () =>
     ipcRenderer.invoke("clipboard:read-files") as Promise<string[]>,
+  // 内部复制/剪切时把路径写成纯文本接管 OS 剪贴板(整体替换,清掉残留的文件
+  // 列表),否则 doPaste 的"OS 文件优先"会一直粘旧的外部文件。
+  clipboardWriteText: (text: string) =>
+    ipcRenderer.invoke("clipboard:write-text", text) as Promise<void>,
   // 注意:返回 unsubscribe 函数,在 useEffect cleanup 里调用避免重复订阅
   onFsChanged: (cb: (dirs: string[]) => void) => {
     const listener = (_e: unknown, dirs: string[]) => cb(dirs);
@@ -96,11 +111,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("ui:open-file", listener);
     return () => ipcRenderer.off("ui:open-file", listener);
   },
-  onPlaybackToggle: (cb: (kind: "beat" | "structure", on: boolean) => void) => {
-    const listener = (_e: unknown, kind: "beat" | "structure", on: boolean) => cb(kind, on);
+  onPlaybackToggle: (
+    cb: (reqId: number, kind: "beat" | "structure", on: boolean) => void,
+  ) => {
+    const listener = (
+      _e: unknown,
+      reqId: number,
+      kind: "beat" | "structure",
+      on: boolean,
+    ) => cb(reqId, kind, on);
     ipcRenderer.on("playback:toggle", listener);
     return () => ipcRenderer.off("playback:toggle", listener);
   },
+  // playback:toggle 的回执:App 桥接层处理完(送达 AudioViewer / 重试超时)后调,
+  // main 侧 togglePlayback 的 Promise 才 resolve,agent 拿到真实成败。
+  playbackToggleResult: (
+    reqId: number,
+    result: { ok: boolean; code?: string; message?: string },
+  ) => ipcRenderer.send("playback:toggle-result", reqId, result),
   // ---------- agent dev toggles ----------
   agentGetDumpLlm: () => ipcRenderer.invoke("agent:get-dump-llm") as Promise<boolean>,
   agentSetDumpLlm: (on: boolean) => ipcRenderer.invoke("agent:set-dump-llm", on) as Promise<void>,

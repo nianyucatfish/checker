@@ -39,8 +39,6 @@ _TAG_TO_CODE = {
     "列数错误": ErrorCode.CSV_COLUMN_COUNT_WRONG,
     "时间格式错误": ErrorCode.CSV_TIME_FORMAT_WRONG,
     "格式错误": ErrorCode.MIX_PROJ_INST_NAME_EMPTY,
-    "命名冗余": ErrorCode.MIX_PROJ_NUM_REDUNDANT,
-    "命名缺失": ErrorCode.MIX_PROJ_NUM_MISSING,
 }
 
 _TAG_PATTERN = re.compile(r"^\[([^\]]+)\]\s*(.*)$", re.DOTALL)
@@ -57,8 +55,6 @@ def _machine_fixable(code: str) -> bool:
         ErrorCode.CSV_HEADER_WRONG,
         ErrorCode.CSV_TIME_FORMAT_WRONG,  # mm:ss 缺零之类
         ErrorCode.MIX_PROJ_INST_NAME_EMPTY,
-        ErrorCode.MIX_PROJ_NUM_REDUNDANT,
-        ErrorCode.MIX_PROJ_NUM_MISSING,
         ErrorCode.BG_COMBO_INVALID,       # 通常是命名问题
     )
 

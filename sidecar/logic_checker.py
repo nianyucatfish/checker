@@ -763,10 +763,9 @@ class LogicChecker:
                 except Exception as e:
                     add_error(instr_map_path, f"[读取错误] {e}")
 
-            # --- 第三步：检查 WAV 文件 (格式 + 命名逻辑) ---
-
-            # 用于统计每个乐器的文件信息 { "乐器名": [ {"file": "文件名", "has_num": True/False}, ... ] }
-            instrument_groups = {}
+            # --- 第三步：检查 WAV 文件 (格式 + 命名文法) ---
+            # 序号齐全性（单轨不带序号 / 多轨必带序号）不在此查：
+            # 需要结合乐器音源对照表判断，归 2.1 语义层由 agent 处理。
 
             for wav_file in found_wavs:
                 wav_full_path = os.path.join(mix_proj_root, wav_file)
@@ -790,15 +789,9 @@ class LogicChecker:
                 # 只以最后一个下划线分割
                 if "_" in content_part:
                     inst_base, last = content_part.rsplit("_", 1)
-                    if last.isdigit():
-                        inst_name = inst_base
-                        has_num = True
-                    else:
-                        inst_name = content_part
-                        has_num = False
+                    inst_name = inst_base if last.isdigit() else content_part
                 else:
                     inst_name = content_part
-                    has_num = False
 
                 if not inst_name:
                     add_error(
@@ -806,31 +799,5 @@ class LogicChecker:
                         "[格式错误] 乐器名不能为空，命名应为 '歌曲名_乐器名' 或 '歌曲名_乐器名_序号'",
                     )
                     continue
-
-                if inst_name not in instrument_groups:
-                    instrument_groups[inst_name] = []
-                instrument_groups[inst_name].append(
-                    {"file": wav_file, "has_num": has_num}
-                )
-
-            # 4.3 校验“单轨无序号，多轨有序号”的逻辑
-            for inst_name, items in instrument_groups.items():
-                count = len(items)
-                if count == 1:
-                    # 只有一个轨道 -> 不用写序号
-                    item = items[0]
-                    if item["has_num"]:
-                        add_error(
-                            os.path.join(mix_proj_root, item["file"]),
-                            f"[命名冗余] 乐器 '{inst_name}' 只有一条轨道，不应包含序号",
-                        )
-                elif count > 1:
-                    # 有多个轨道 -> 必须写序号
-                    for item in items:
-                        if not item["has_num"]:
-                            add_error(
-                                os.path.join(mix_proj_root, item["file"]),
-                                f"[命名缺失] 乐器 '{inst_name}' 有 {count} 条轨道，必须通过序号区分",
-                            )
 
         return error_map

@@ -53,3 +53,25 @@ def test_fetch_all_fetches_header_separately(monkeypatch, tmp_path):
         ["望春风", "张三"],
         ["月亮", "李四"],
     ]
+
+
+def test_disk_cache_path_uses_cache_override(tmp_path, monkeypatch):
+    from sidecar import tencent_sheet
+
+    monkeypatch.setenv("CHECKER_CACHE_DIR", str(tmp_path))
+    assert tencent_sheet._disk_cache_path() == tmp_path / "sheet_cache.json"
+
+
+def test_get_client_missing_config_raises_not_configured(monkeypatch):
+    """凭证缺失 → TencentNotConfiguredError(TencentSheetError 子类,mcp 映射 SHEET_NOT_CONFIGURED)。"""
+    from sidecar import config as sidecar_config
+    from sidecar import tencent_sheet
+
+    monkeypatch.setattr(sidecar_config, "_cached", sidecar_config.Config())
+    monkeypatch.setattr(tencent_sheet, "_client", None)
+
+    with pytest.raises(tencent_sheet.TencentNotConfiguredError) as exc:
+        tencent_sheet.get_client()
+
+    assert isinstance(exc.value, TencentSheetError)
+    assert "client_id" in str(exc.value)

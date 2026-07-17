@@ -6,17 +6,25 @@ import * as path from "node:path";
 import { messagesCost } from "./compaction";
 import type { Message, ToolSchema } from "./agent";
 
-// 调试日志:每轮 LLM 原始响应落盘 tmp/agent_turns.jsonl,方便对照 cleanContent 前后差别
-// 和排查截断问题。每行一条 JSON: {ts, chatId, turn, finishReason, rawContent, cleanedContent, toolCalls, usage}
-const LOG_PATH = path.resolve(__dirname, "..", "..", "tmp", "agent_turns.jsonl");
+// 调试日志路径由 main 在启动时注入；默认值保留开发环境兼容。
+let logPath = path.resolve(__dirname, "..", "..", "tmp", "agent_turns.jsonl");
+let dumpDir = path.resolve(__dirname, "..", "..", "tmp", "agent_contexts");
 let logReady = false;
+let dumpDirReady = false;
+
+export function configureAgentDebugPaths(logDir: string): void {
+  logPath = path.join(logDir, "agent_turns.jsonl");
+  dumpDir = path.join(logDir, "agent_contexts");
+  logReady = false;
+  dumpDirReady = false;
+}
 export function logTurn(entry: Record<string, unknown>) {
   try {
     if (!logReady) {
-      fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
       logReady = true;
     }
-    fs.appendFileSync(LOG_PATH, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
+    fs.appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
   } catch (e) {
     console.warn("[agent] logTurn failed:", e);
   }
@@ -29,8 +37,6 @@ export function logTurn(entry: Record<string, unknown>) {
 //   response 后 append 进同一文件(原始返回 + tool_calls + finish/usage)
 // 文件名带 song(切歌 turn 归零,避免两首歌 t001 互相覆盖);phase A 用 "phaseA"。
 let dumpLlmContextOn = process.env.AUDIO_QC_DUMP_LLM === "1";
-const DUMP_DIR = path.resolve(__dirname, "..", "..", "tmp", "agent_contexts");
-let dumpDirReady = false;
 export function setDumpLlmContext(on: boolean): void {
   dumpLlmContextOn = !!on;
   console.log(`[agent] dump LLM context: ${dumpLlmContextOn ? "ON" : "OFF"}`);
@@ -46,7 +52,7 @@ function _logTs(): string {
 function _ensureDumpDir(): boolean {
   try {
     if (!dumpDirReady) {
-      fs.mkdirSync(DUMP_DIR, { recursive: true });
+      fs.mkdirSync(dumpDir, { recursive: true });
       dumpDirReady = true;
     }
     return true;
@@ -59,7 +65,7 @@ function _ensureDumpDir(): boolean {
 // 本轮日志文件路径:<chatId>_<song>_t<NNN>.txt。song 里的非法文件名字符替成 _。
 function _turnFile(chatId: string, song: string | null, turn: number): string {
   const songToken = (song || "phaseA").replace(/[\\/:*?"<>|]/g, "_");
-  return path.join(DUMP_DIR, `${chatId}_${songToken}_t${String(turn).padStart(3, "0")}.txt`);
+  return path.join(dumpDir, `${chatId}_${songToken}_t${String(turn).padStart(3, "0")}.txt`);
 }
 
 function _renderMessage(m: Message, i: number): string {

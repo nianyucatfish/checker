@@ -38,6 +38,11 @@ def tmp_review_log(monkeypatch, tmp_path):
 # ============================================================
 
 
+def test_review_log_path_uses_log_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHECKER_LOG_DIR", str(tmp_path))
+    assert review_log._log_path() == tmp_path / "review_log.jsonl"
+
+
 def test_review_log_append_and_iter(tmp_review_log):
     review_log.append(
         chat_id="c1", song="望春风", state="1.4",

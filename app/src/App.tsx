@@ -13,6 +13,8 @@ import {
   setWatchRoot,
 } from "./api";
 import type { CheckErrorOut } from "./api";
+import { appAlert } from "./utils";
+import type { PlaybackToggleDetail, PlaybackToggleResult } from "./lib/playback";
 
 import { Toolbar } from "./components/Toolbar";
 import { Explorer } from "./components/Explorer";
@@ -53,12 +55,49 @@ export default function App() {
     return off;
   }, []);
 
-  // agent.uiTools.togglePlayback → 转成 window CustomEvent,AudioViewer 自己监听
+  // agent.uiTools.togglePlayback → 转成 window CustomEvent,AudioViewer 自己监听。
+  // AudioViewer 是临时组件:没开 wav / 刚 ui_open_file 还没挂载完时事件没人接。
+  // 所以 (1) cancelable 事件,监听方 preventDefault + 往 detail.result 塞结果
+  // Promise 表示接住了;(2) 没接住每 200ms 重试,最多 5s(覆盖 open→toggle 同一批
+  // tool call 的挂载间隙);(3) 把结果回执给 main,agent 拿到真实成败而非假 ok。
   useEffect(() => {
-    const off = window.electronAPI.onPlaybackToggle((kind, on) => {
-      window.dispatchEvent(
-        new CustomEvent(`playback:toggle:${kind}`, { detail: { on } }),
-      );
+    const off = window.electronAPI.onPlaybackToggle((reqId, kind, on) => {
+      const ack = (result: PlaybackToggleResult) =>
+        window.electronAPI.playbackToggleResult(reqId, result);
+      const started = Date.now();
+      const attempt = () => {
+        const detail: PlaybackToggleDetail = { on };
+        const ev = new CustomEvent(`playback:toggle:${kind}`, {
+          cancelable: true,
+          detail,
+        });
+        const notHandled = window.dispatchEvent(ev); // preventDefault → false
+        if (!notHandled) {
+          if (detail.result) {
+            detail.result.then(ack).catch((e) =>
+              ack({
+                ok: false,
+                code: "RENDER_FAILED",
+                message: e instanceof Error ? e.message : String(e),
+              }),
+            );
+          } else {
+            ack({ ok: true, message: "已送达 AudioViewer" });
+          }
+          return;
+        }
+        if (Date.now() - started < 5000) {
+          setTimeout(attempt, 200);
+          return;
+        }
+        ack({
+          ok: false,
+          code: "NO_WAV_OPEN",
+          message:
+            "主窗口当前没有打开 wav(AudioViewer 未挂载);先 ui_open_file 打开总轨 wav 再开叠层",
+        });
+      };
+      attempt();
     });
     return off;
   }, []);
@@ -199,12 +238,12 @@ export default function App() {
         .filter((e) => !e.is_dir && e.ext.toLowerCase() === "wav")
         .map((e) => e.path);
       if (wavs.length === 0) {
-        alert(`目录 ${folderPath} 下没有 WAV 文件`);
+        await appAlert(`目录 ${folderPath} 下没有 WAV 文件`);
         return;
       }
       handleAddToMix(wavs);
     } catch (e) {
-      alert(`列举目录失败: ${e instanceof Error ? e.message : String(e)}`);
+      await appAlert(`列举目录失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -229,7 +268,7 @@ export default function App() {
     try {
       const r = await proposeRenames(songPath);
       if (r.ops.length === 0) {
-        alert(
+        await appAlert(
           r.conflicts.length > 0
             ? `没有可自动修复的命名;冲突 ${r.conflicts.length} 项`
             : "没有需要修复的命名",
@@ -247,7 +286,7 @@ export default function App() {
         `自动修复 "${name}": ${ar.executed.length}/${r.ops.length} 项`,
         ar.errors.length > 0 ? `\n错误:\n${ar.errors.slice(0, 5).join("\n")}` : "",
       ].join("");
-      alert(msg);
+      await appAlert(msg);
       if (root) {
         const out = await listWorkspace(root);
         setSongs(out.songs);
@@ -268,9 +307,9 @@ export default function App() {
     try {
       const r = await padSongToLongest(songPath);
       if (!r.ok) {
-        alert(`补静音失败 (${name}): ${r.error || "未知错误"}`);
+        await appAlert(`补静音失败 (${name}): ${r.error || "未知错误"}`);
       } else {
-        alert(`已补静音 ${r.padded} 个 WAV (${name})`);
+        await appAlert(`已补静音 ${r.padded} 个 WAV (${name})`);
       }
       if (root) {
         await runScan(songs, root);

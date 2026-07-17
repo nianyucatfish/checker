@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, EyeOff, Loader2, X } from "lucide-react";
+import { Eye, EyeOff, Loader2, PackageCheck, RefreshCw, X } from "lucide-react";
 import {
   getLlmConfig,
   getTencentDocsConfig,
@@ -9,7 +9,10 @@ import {
 } from "../api";
 import { clsx } from "../utils";
 
-type Tab = "llm" | "tencent";
+type Tab = "llm" | "tencent" | "update";
+
+type UpdateInfo = Awaited<ReturnType<typeof window.electronAPI.updateInfo>>;
+type InspectedUpdate = Awaited<ReturnType<typeof window.electronAPI.updateInspect>>;
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("llm");
@@ -40,6 +43,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tSaving, setTSaving] = useState(false);
   const [tMsg, setTMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [inspectedUpdate, setInspectedUpdate] = useState<InspectedUpdate | null>(null);
+  const [updateMsg, setUpdateMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   useEffect(() => {
     getLlmConfig()
       .then((c) => {
@@ -52,6 +60,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       })
       .catch((e) => setLlmMsg({ ok: false, text: `读取失败: ${e instanceof Error ? e.message : String(e)}` }))
       .finally(() => setLlmLoading(false));
+
+    window.electronAPI.updateInfo().then(setUpdateInfo).catch((e) => {
+      setUpdateMsg({ ok: false, text: `读取版本信息失败:${e instanceof Error ? e.message : String(e)}` });
+    });
 
     getTencentDocsConfig()
       .then((c) => {
@@ -101,6 +113,42 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const inspectUpdatePath = async (zipPath: string) => {
+    setUpdateBusy(true);
+    setUpdateMsg(null);
+    setInspectedUpdate(null);
+    try {
+      const inspected = await window.electronAPI.updateInspect(zipPath);
+      setInspectedUpdate(inspected);
+      setUpdateMsg({ ok: true, text: "产品名、平台、架构和文件哈希均匹配；该包未验证发布者身份。" });
+    } catch (e) {
+      setUpdateMsg({ ok: false, text: `更新包无效:${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const chooseUpdate = async () => {
+    const zipPath = await window.electronAPI.updateSelectZip();
+    if (zipPath) await inspectUpdatePath(zipPath);
+  };
+
+  const applyUpdate = async () => {
+    if (!inspectedUpdate) return;
+    const confirmed = await window.electronAPI.showConfirm(
+      `将更新到 Audio QC ${inspectedUpdate.manifest.version}。应用会退出并重启，用户数据不会被覆盖。\n\n警告：当前更新包没有发布者数字签名，SHA-256 只能发现文件损坏，不能证明来源。请仅安装你从可信发布渠道取得并核对 SHA256SUMS.txt 的包。继续吗？`,
+    );
+    if (!confirmed) return;
+    setUpdateBusy(true);
+    setUpdateMsg(null);
+    try {
+      await window.electronAPI.updateApply();
+    } catch (e) {
+      setUpdateBusy(false);
+      setUpdateMsg({ ok: false, text: `启动更新失败:${e instanceof Error ? e.message : String(e)}` });
+    }
+  };
+
   const saveTencent = async () => {
     setTSaving(true);
     setTMsg(null);
@@ -117,6 +165,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       setTokenSet(c.token_set);
       setAccessToken(c.access_token || accessToken);
       setTMsg({ ok: true, text: `已保存到 ${c.config_path}` });
+      // AgentSidebar 的"表格·本地"徽章监听这个事件重查 sheet_mode
+      window.dispatchEvent(new CustomEvent("sheet-config-changed"));
     } catch (e) {
       setTMsg({ ok: false, text: `保存失败: ${e instanceof Error ? e.message : String(e)}` });
     } finally {
@@ -160,6 +210,17 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             )}
           >
             腾讯文档 · 用户
+          </button>
+          <button
+            onClick={() => setTab("update")}
+            className={clsx(
+              "flex-1 text-sm py-2 text-center border-b-2 transition-colors",
+              tab === "update"
+                ? "border-accent text-fg font-medium"
+                : "border-transparent text-fg-muted hover:text-fg",
+            )}
+          >
+            离线更新
           </button>
         </div>
 
@@ -227,6 +288,86 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           )
         )}
 
+        {tab === "update" && (
+          <div className="p-4 flex flex-col gap-4 overflow-y-auto">
+            <div className="rounded border border-border bg-bg/60 p-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-fg">
+                <RefreshCw size={14} className="text-accent" /> 离线 Release 更新
+              </div>
+              <div className="mt-2 grid grid-cols-[88px_1fr] gap-y-1 text-xs">
+                <span className="text-fg-subtle">当前版本</span>
+                <span className="font-mono text-fg">{updateInfo?.currentVersion ?? "读取中…"}</span>
+                <span className="text-fg-subtle">运行平台</span>
+                <span className="font-mono text-fg">{updateInfo ? `${updateInfo.platform} / ${updateInfo.arch}` : "—"}</span>
+                <span className="text-fg-subtle">构建类型</span>
+                <span className="text-fg-muted">{updateInfo?.packaged ? "发布包" : "开发模式（仅可校验）"}</span>
+              </div>
+            </div>
+
+            <div className="text-xs leading-relaxed text-fg-muted">
+              选择同平台、同架构的 Audio QC Release ZIP。程序会验证产品名、版本、完整文件清单和 SHA-256，再允许重启更新；配置、聊天和质检进度不会被覆盖。当前机制不验证发布者身份，请只使用可信渠道取得并核对 SHA256SUMS.txt 的包。
+            </div>
+
+            <button
+              type="button"
+              onClick={chooseUpdate}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "copy";
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                const files = Array.from(event.dataTransfer.files);
+                if (files.length !== 1) {
+                  setUpdateMsg({ ok: false, text: "请只拖入一个 Release ZIP。" });
+                  return;
+                }
+                const zipPath = window.electronAPI.getPathForFile(files[0]);
+                if (!zipPath.toLowerCase().endsWith(".zip")) {
+                  setUpdateMsg({ ok: false, text: "离线更新只接受 .zip 文件。" });
+                  return;
+                }
+                void inspectUpdatePath(zipPath);
+              }}
+              disabled={updateBusy}
+              className="inline-flex items-center justify-center gap-2 rounded border border-dashed border-border px-3 py-5 text-sm text-fg-muted hover:border-accent hover:bg-bg-hover hover:text-fg disabled:opacity-50"
+            >
+              {updateBusy ? <Loader2 size={15} className="animate-spin" /> : <PackageCheck size={15} />}
+              拖入或选择 Release ZIP
+            </button>
+
+            {inspectedUpdate && (
+              <div className="rounded border border-green-600/30 bg-green-500/10 p-3 text-xs">
+                <div className="font-medium text-green-600">Audio QC {inspectedUpdate.manifest.version}</div>
+                <div className="mt-1 text-fg-muted">
+                  {inspectedUpdate.manifest.platform} / {inspectedUpdate.manifest.arch} · {inspectedUpdate.fileCount} 个版本文件
+                </div>
+                <div className="mt-1 break-all text-fg-subtle">{inspectedUpdate.zipPath}</div>
+              </div>
+            )}
+
+            {updateMsg && (
+              <div className={clsx("rounded px-2 py-1.5 text-xs break-all", updateMsg.ok ? "text-green-600 bg-green-500/10" : "text-red-500 bg-red-500/10")}>
+                {updateMsg.text}
+              </div>
+            )}
+
+            {inspectedUpdate && (
+              <button
+                type="button"
+                onClick={applyUpdate}
+                disabled={updateBusy || !updateInfo?.packaged}
+                className="self-start rounded bg-accent px-3 py-1.5 text-sm text-white hover:opacity-90 disabled:opacity-40"
+              >
+                重启并更新
+              </button>
+            )}
+            <div className="text-[11px] leading-relaxed text-fg-subtle">
+              当前离线包是 unsigned draft：哈希只校验完整性，不证明来源。正式对外发布前必须增加更新清单签名；macOS 公证 / Windows 代码签名不能替代应用内清单验签。
+            </div>
+          </div>
+        )}
+
         {tab === "tencent" && (
           tLoading ? (
             <div className="p-6 flex items-center gap-2 text-sm text-fg-muted">
@@ -234,6 +375,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </div>
           ) : (
             <div className="p-4 flex flex-col gap-3 overflow-y-auto">
+              <div className="text-xs text-fg-subtle leading-relaxed">
+                本区配置<b>可选</b>:没有腾讯开发者账号也能正常质检——分工表相关检查会降级为人工核对,本地检查照常进行。
+              </div>
               <div>
                 <div className={lbl}>Client ID</div>
                 <input className={inp} value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="从 docs.qq.com/open 复制" />

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Loader2, Settings } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { clsx } from "../utils";
 import { SettingsModal } from "./SettingsModal";
 import {
@@ -405,6 +405,16 @@ export function Toolbar({
       >
         帮助
       </button>
+      <button
+        onClick={() => setShowSettings(true)}
+        title="设置(API / 模型 / 腾讯文档)"
+        className={clsx(
+          "h-7 px-2.5 inline-flex items-center rounded-sm",
+          "text-fg-muted hover:text-fg hover:bg-bg-hover",
+        )}
+      >
+        设置
+      </button>
       {/* ⚠️ 临时开发者菜单 —— 工具齐了删除 */}
       <button
         ref={devBtnRef}
@@ -422,17 +432,6 @@ export function Toolbar({
 
       {/* 占位 */}
       <div className="flex-1" />
-
-      <button
-        onClick={() => setShowSettings(true)}
-        title="设置(API / 模型)"
-        className={clsx(
-          "h-7 px-2 inline-flex items-center gap-1 rounded-sm",
-          "text-fg-muted hover:text-fg hover:bg-bg-hover",
-        )}
-      >
-        <Settings size={14} />
-      </button>
 
       {/* 提示文字:F5 快捷键 */}
       <span className="text-xs text-fg-subtle hidden md:inline">
@@ -478,7 +477,7 @@ export function Toolbar({
               </button>
             </div>
             {devResult.kind === "text" ? (
-              <pre className="flex-1 overflow-auto p-3 text-xs font-mono text-fg whitespace-pre-wrap break-all">
+              <pre className="flex-1 overflow-auto p-3 text-xs font-mono text-fg whitespace-pre-wrap break-all selectable">
                 {devResult.body}
               </pre>
             ) : devResult.rows.length === 0 ? (
@@ -486,7 +485,7 @@ export function Toolbar({
                 没有数据
               </div>
             ) : (
-              <div className="flex-1 overflow-auto">
+              <div className="flex-1 overflow-auto selectable">
                 <table className="w-full text-xs border-collapse">
                   <thead className="sticky top-0 bg-bg-sidebar border-b border-border">
                     <tr>

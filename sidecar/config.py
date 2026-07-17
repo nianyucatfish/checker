@@ -13,36 +13,20 @@ sidecar 启动本身不依赖配置(凭证仅在调到对应外部 API 时才需
 from __future__ import annotations
 
 import json
-import os
-import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
-APP_DIR_NAME = "AudioQC"
+from sidecar import paths
 
 
 def _app_config_dir() -> Path:
-    """跨平台拿用户配置目录。"""
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return Path(base) / APP_DIR_NAME
+    """兼容旧调用；路径选择统一由 sidecar.paths 负责。"""
+    return paths.app_config_dir()
 
 
 def _candidate_paths() -> list[Path]:
-    paths: list[Path] = []
-    env = os.environ.get("CHECKER_CONFIG")
-    if env:
-        paths.append(Path(env))
-    repo_root = Path(__file__).resolve().parent.parent
-    paths.append(repo_root / "config.toml")
-    paths.append(_app_config_dir() / "config.toml")
-    return paths
+    return paths.config_candidates()
 
 
 @dataclass
@@ -149,10 +133,7 @@ def config_path_for_write() -> Path:
     cfg = get_config()
     if cfg.source_path:
         return cfg.source_path
-    env = os.environ.get("CHECKER_CONFIG")
-    if env:
-        return Path(env)
-    return _app_config_dir() / "config.toml"
+    return paths.default_config_write_path()
 
 
 def _toml_string(value: str) -> str:

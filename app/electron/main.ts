@@ -17,10 +17,28 @@ import {
   deleteSession,
 } from "./db";
 import { AgentRunner, type UiTools, setDumpLlmContext, isDumpLlmContextOn } from "./agent";
+import { configureAgentDebugPaths } from "./agentDebug";
 import { spawnCaptureWithTimeout } from "./spawnCapture";
+import {
+  createApplyPlan,
+  inspectAndStageOfflineUpdate,
+  spawnExternalApplyHelper,
+  type StagedUpdate,
+  type UpdateManifest,
+} from "./offlineUpdate";
 
-const SIDECAR_PORT = 8775; // TODO Phase 5: pick random free port
+const SIDECAR_PORT = 8775; // TODO:后续改为随机端口 + /health 身份校验
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
+
+type RuntimeLayout = {
+  python: string;
+  backendRoot: string;
+  promptsDir: string;
+  dataDir: string;
+  cacheDir: string;
+  logDir: string;
+  configPath: string;
+};
 
 // 这是个工具型应用,不需要 Electron 默认的 File / View / Window / Help 菜单。
 // macOS 上必须保留一个最小应用菜单(含 Edit role),否则 textarea / input 里的
@@ -65,6 +83,29 @@ let lastToolbarButtonRect: ButtonRect | null = null;
 let mixAnimating = false;
 // before-quit 时设 true,允许 mix 窗的 close 事件真正销毁(否则 preventDefault 拦下)
 let isAppQuitting = false;
+let stagedOfflineUpdate: StagedUpdate | null = null;
+
+function updatePlatform(): "windows" | "macos" {
+  return process.platform === "darwin" ? "macos" : "windows";
+}
+
+function updateArch(): "x64" | "arm64" {
+  if (process.arch !== "x64" && process.arch !== "arm64") {
+    throw new Error(`不支持的应用架构: ${process.arch}`);
+  }
+  return process.arch;
+}
+
+function currentInstallManifest(): UpdateManifest | undefined {
+  const manifestPath = process.platform === "darwin"
+    ? path.join(path.dirname(path.dirname(path.dirname(process.execPath))), "update-manifest.json")
+    : path.join(path.dirname(process.execPath), "update-manifest.json");
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath, "utf8")) as UpdateManifest;
+  } catch {
+    return undefined;
+  }
+}
 
 function resolveDevPython(projectRoot: string): string {
   const candidates = process.platform === "win32"
@@ -80,14 +121,86 @@ function resolveDevPython(projectRoot: string): string {
   return found ?? candidates[0];
 }
 
-function configureDevUserData() {
-  if (app.isPackaged) return;
-  const userData = path.join(PROJECT_ROOT, "tmp", "electron-user-data");
-  fs.mkdirSync(userData, { recursive: true });
-  app.setPath("userData", userData);
+function configureAppDataPaths(): string {
+  const dataDir = app.isPackaged
+    ? process.platform === "win32"
+      ? path.join(path.dirname(process.execPath), "data")
+      : path.join(app.getPath("appData"), "AudioQC")
+    : path.join(PROJECT_ROOT, "tmp", "electron-user-data");
+  const sessionDataDir = path.join(dataDir, "chromium");
+  const logsDir = path.join(dataDir, "logs", "electron");
+  const crashDumpsDir = path.join(dataDir, "crashDumps");
+  try {
+    for (const directory of [dataDir, sessionDataDir, logsDir, crashDumpsDir]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const portableHint = app.isPackaged && process.platform === "win32"
+      ? "\n\n便携版需要在程序同级创建 data 文件夹。请将整个 ZIP 解压到可写目录，例如桌面、下载目录或个人文件夹；不要直接从压缩包运行，也不要解压到 Program Files。"
+      : "";
+    dialog.showErrorBox("Audio QC 无法创建数据目录", `无法创建或访问：${dataDir}\n\n${detail}${portableHint}`);
+    throw error;
+  }
+  app.setPath("userData", dataDir);
+  app.setPath("sessionData", sessionDataDir);
+  app.setPath("logs", logsDir);
+  app.setPath("crashDumps", crashDumpsDir);
+  return dataDir;
 }
 
-configureDevUserData();
+const APP_DATA_DIR = configureAppDataPaths();
+
+function resolveRuntimeLayout(): RuntimeLayout {
+  const dataDir = APP_DATA_DIR;
+  const cacheDir = path.join(dataDir, "cache");
+  const logDir = path.join(dataDir, "logs");
+  fs.mkdirSync(cacheDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+
+  if (!app.isPackaged) {
+    return {
+      python: resolveDevPython(PROJECT_ROOT),
+      backendRoot: PROJECT_ROOT,
+      promptsDir: path.join(PROJECT_ROOT, "doc", "prompts"),
+      dataDir: path.join(PROJECT_ROOT, "cache"),
+      cacheDir: path.join(PROJECT_ROOT, "cache"),
+      logDir: path.join(PROJECT_ROOT, "tmp"),
+      configPath: path.join(PROJECT_ROOT, "config.toml"),
+    };
+  }
+
+  const python = process.platform === "win32"
+    ? path.join(process.resourcesPath, "python-runtime", "python.exe")
+    : path.join(process.resourcesPath, "python-runtime", "bin", "python3");
+  return {
+    python,
+    backendRoot: path.join(process.resourcesPath, "backend"),
+    promptsDir: path.join(process.resourcesPath, "prompts"),
+    dataDir,
+    cacheDir,
+    logDir,
+    configPath: path.join(dataDir, "config.toml"),
+  };
+}
+
+const RUNTIME = resolveRuntimeLayout();
+configureAgentDebugPaths(path.join(RUNTIME.logDir, "electron"));
+
+function sidecarEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUTF8: "1",
+    PYTHONNOUSERSITE: "1",
+    PYTHONPATH: RUNTIME.backendRoot,
+    CHECKER_CONFIG: RUNTIME.configPath,
+    CHECKER_DATA_DIR: RUNTIME.dataDir,
+    CHECKER_CACHE_DIR: RUNTIME.cacheDir,
+    CHECKER_LOG_DIR: path.join(RUNTIME.logDir, "sidecar"),
+    CHECKER_RESOURCE_ROOT: RUNTIME.dataDir,
+  };
+}
 
 async function waitForPort(port: number, timeoutMs = 10000): Promise<void> {
   const start = Date.now();
@@ -113,17 +226,24 @@ async function waitForPort(port: number, timeoutMs = 10000): Promise<void> {
 }
 
 function spawnSidecar() {
-  // 开发期：直接 venv/.venv 里的 python -m sidecar.serve
-  // 打包后：bundled python; TODO Phase 5
-  const projectRoot = PROJECT_ROOT;
-  const py = resolveDevPython(projectRoot);
-  sidecarProc = spawn(py, ["-X", "utf8", "-m", "sidecar.serve", "--port", String(SIDECAR_PORT)], {
-    cwd: projectRoot,
-    env: { ...process.env, PYTHONIOENCODING: "utf-8" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  if (!fs.existsSync(RUNTIME.python)) {
+    throw new Error(`bundled Python not found: ${RUNTIME.python}`);
+  }
+  if (!fs.existsSync(path.join(RUNTIME.backendRoot, "sidecar", "serve.py"))) {
+    throw new Error(`sidecar backend not found: ${RUNTIME.backendRoot}`);
+  }
+  sidecarProc = spawn(
+    RUNTIME.python,
+    ["-X", "utf8", "-m", "sidecar.serve", "--port", String(SIDECAR_PORT)],
+    {
+      cwd: RUNTIME.backendRoot,
+      env: sidecarEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   sidecarProc.stdout?.on("data", (b) => process.stdout.write(`[sidecar] ${b}`));
   sidecarProc.stderr?.on("data", (b) => process.stderr.write(`[sidecar] ${b}`));
+  sidecarProc.on("error", (error) => console.error("[sidecar] spawn failed:", error));
   sidecarProc.on("exit", (code) => console.log(`[sidecar] exited with ${code}`));
 }
 
@@ -174,18 +294,33 @@ async function pushWorkspaceToAllBackends(root: string | null): Promise<void> {
   await pushWorkspaceToMcp(root);
 }
 
-async function startMcpClient(): Promise<void> {
-  const projectRoot = PROJECT_ROOT;
-  const py = resolveDevPython(projectRoot);
+// playback_toggle_* 的回执通道:togglePlayback 不能 fire-and-forget —— 真正的
+// 执行端 AudioViewer 是临时组件,没开 wav / 刚 ui_open_file 还没挂载完时事件会被
+// 静默丢掉,agent 却拿到 ok:true。改成带 requestId 的往返,renderer 桥接层(App)
+// 处理完(或重试超时)回 playback:toggle-result,工具调用才 resolve 真实结果。
+type PlaybackToggleResult = { ok: boolean; code?: string; message?: string };
+let playbackToggleSeq = 0;
+const playbackToggleAcks = new Map<number, (r: PlaybackToggleResult) => void>();
+ipcMain.on(
+  "playback:toggle-result",
+  (_e, reqId: number, result: PlaybackToggleResult) => {
+    const cb = playbackToggleAcks.get(reqId);
+    if (cb) {
+      playbackToggleAcks.delete(reqId);
+      cb(result);
+    }
+  },
+);
 
+async function startMcpClient(): Promise<void> {
   // StdioClientTransport 自己 spawn 子进程并接管 stdin/stdout 做 JSON-RPC,
   // 我们不另起 spawn —— 否则 transport 拿不到正确的句柄。但子进程的 stderr
   // 仍能被父进程拿到(SDK 默认透传 stderr),用来打 sidecar 内部 log。
   const transport = new StdioClientTransport({
-    command: py,
+    command: RUNTIME.python,
     args: ["-X", "utf8", "-m", "sidecar.mcp_server"],
-    cwd: projectRoot,
-    env: { ...process.env, PYTHONIOENCODING: "utf-8" } as Record<string, string>,
+    cwd: RUNTIME.backendRoot,
+    env: sidecarEnv() as Record<string, string>,
     // stderr 走 inherit,sidecar logging.basicConfig 的输出能直接到主进程控制台
     stderr: "inherit",
   });
@@ -204,9 +339,7 @@ async function startMcpClient(): Promise<void> {
     console.log(`  - ${t.name}: ${(t.description ?? "").split("\n")[0]}`);
   }
 
-  // prompt 文本(phase_a / phase_b_header / agent_workflow)都在 doc/prompts/,注入目录由 agent 读取;
-  // sidecar baseUrl 也注入,避免常量在 agent.ts 重写一遍
-  const projectRoot2 = PROJECT_ROOT;
+  // prompt 目录和 sidecar baseUrl 由主进程统一注入,开发/打包共用同一逻辑。
   // UI 工具实现:闭包到 main 这边的 mainWindow / mixTracks / showMixWindowAnimated 等。
   // agent.ts 只看签名(UiTools 接口),不知道这些细节,保跨进程边界干净。
   const uiTools: UiTools = {
@@ -257,17 +390,34 @@ async function startMcpClient(): Promise<void> {
       broadcastMixTracks();
       return { ok: true, loaded: all };
     },
-    togglePlayback: async (kind, on) => {
+    togglePlayback: (kind, on) => {
       const w = mainWindow;
-      if (!w || w.isDestroyed()) return { ok: false, code: "NO_MAIN_WINDOW", message: "主窗口不可用" };
-      w.webContents.send("playback:toggle", kind, on);
-      return { ok: true };
+      if (!w || w.isDestroyed()) {
+        return Promise.resolve({ ok: false, code: "NO_MAIN_WINDOW", message: "主窗口不可用" });
+      }
+      // renderer 桥接层最多重试 5s 等 AudioViewer 挂载,这里超时留 8s 余量
+      return new Promise<PlaybackToggleResult>((resolve) => {
+        const reqId = ++playbackToggleSeq;
+        const timer = setTimeout(() => {
+          playbackToggleAcks.delete(reqId);
+          resolve({
+            ok: false,
+            code: "UI_TIMEOUT",
+            message: "渲染层 8s 未回执;大概率主窗口没打开 wav,先 ui_open_file 打开总轨 wav 再试",
+          });
+        }, 8000);
+        playbackToggleAcks.set(reqId, (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        });
+        w.webContents.send("playback:toggle", reqId, kind, on);
+      });
     },
   };
   agentRunner = new AgentRunner(
     mcpClient,
     () => mainWindow,
-    path.join(projectRoot2, "doc", "prompts"),
+    RUNTIME.promptsDir,
     `http://127.0.0.1:${SIDECAR_PORT}`,
     uiTools,
   );
@@ -408,6 +558,105 @@ ipcMain.handle("dialog:select-workspace", async () => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   return result.filePaths[0];
+});
+
+ipcMain.handle("update:info", () => ({
+  currentVersion: app.getVersion(),
+  platform: updatePlatform(),
+  arch: updateArch(),
+  packaged: app.isPackaged,
+  signatureStatus: "unsigned-draft" as const,
+}));
+
+ipcMain.handle("update:select-zip", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const options: Electron.OpenDialogOptions = {
+    title: "选择 Audio QC 离线更新 ZIP",
+    properties: ["openFile"],
+    filters: [{ name: "ZIP 更新包", extensions: ["zip"] }],
+  };
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? null : result.filePaths[0] ?? null;
+});
+
+ipcMain.handle("update:inspect", async (_event, zipPath: unknown) => {
+  if (typeof zipPath !== "string" || !zipPath) throw new Error("请选择单个 ZIP 更新包");
+  if (stagedOfflineUpdate) {
+    await fs.promises.rm(stagedOfflineUpdate.stagingDir, { recursive: true, force: true });
+    stagedOfflineUpdate = null;
+  }
+  stagedOfflineUpdate = await inspectAndStageOfflineUpdate(
+    zipPath,
+    path.join(APP_DATA_DIR, "updates"),
+    { platform: updatePlatform(), arch: updateArch(), currentVersion: app.getVersion() },
+  );
+  return {
+    zipPath,
+    manifest: stagedOfflineUpdate.manifest,
+    fileCount: stagedOfflineUpdate.manifest.files.length,
+    signatureStatus: "unsigned-draft" as const,
+  };
+});
+
+ipcMain.handle("update:apply", async () => {
+  if (!app.isPackaged) throw new Error("开发模式不能替换应用，请在发布包中测试更新");
+  const staged = stagedOfflineUpdate;
+  if (!staged) throw new Error("没有已通过校验的更新包");
+  const stateRoot = path.join(APP_DATA_DIR, "updates");
+  const appPath = process.platform === "darwin"
+    ? path.dirname(path.dirname(path.dirname(process.execPath)))
+    : undefined;
+  const plan = createApplyPlan({
+    platform: updatePlatform(),
+    staged,
+    installRoot: process.platform === "win32" ? path.dirname(process.execPath) : undefined,
+    appPath,
+    previousManifest: currentInstallManifest(),
+    previousPath: process.platform === "win32"
+      ? path.join(stateRoot, "previous")
+      : `${appPath}.previous`,
+    rollbackPath: process.platform === "win32"
+      ? path.join(stateRoot, "rollback")
+      : `${appPath}.rollback`,
+  });
+  await spawnExternalApplyHelper(plan, {
+    waitForPid: process.pid,
+    relaunch: process.platform === "darwin"
+      ? { command: "open", args: [appPath!] }
+      : { command: process.execPath, cwd: path.dirname(process.execPath) },
+  });
+  stagedOfflineUpdate = null;
+  setImmediate(() => app.quit());
+  return { ok: true };
+});
+
+// renderer 的原生 window.alert()/confirm() 在 Electron 有 focus 后遗症(Chromium
+// 老 bug):对话框关闭后页面 input 拿得到 DOM 焦点却收不到键盘输入,切出窗口再
+// 切回才恢复 —— 表现为"重命名框光标消失打不了字"。renderer 统一改走这两个
+// 主进程对话框(utils.ts 的 appAlert / appConfirm)。
+ipcMain.handle("dialog:alert", async (e, message: string) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const opts = {
+    type: "none" as const,
+    message: typeof message === "string" ? message : String(message ?? ""),
+    buttons: ["确定"],
+    noLink: true,
+  };
+  await (win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts));
+});
+
+ipcMain.handle("dialog:confirm", async (e, message: string) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const opts = {
+    type: "question" as const,
+    message: typeof message === "string" ? message : String(message ?? ""),
+    buttons: ["确定", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  };
+  const r = await (win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts));
+  return r.response === 0;
 });
 
 ipcMain.handle("sidecar:url", () => `http://127.0.0.1:${SIDECAR_PORT}`);
@@ -626,6 +875,13 @@ ipcMain.handle("clipboard:read-files", async () => {
     console.warn("[clipboard] read-files failed:", e);
   }
   return [];
+});
+
+// 内部复制/剪切时接管 OS 剪贴板:writeText 会整体替换剪贴板内容,顺带清掉残留
+// 的 CF_HDROP 文件列表。不清的话,外部复制过一次文件后 OS 剪贴板会一直"有文件",
+// Explorer.doPaste 的"OS 文件优先"分支就永远遮蔽内部 copy(粘的总是旧的外部文件)。
+ipcMain.handle("clipboard:write-text", (_e, text: string) => {
+  if (typeof text === "string") clipboard.writeText(text);
 });
 
 // ---------- 混音台独立窗口 ----------
@@ -880,17 +1136,14 @@ ipcMain.handle("mix:remove-track", (_e, p: unknown) => {
 ipcMain.handle("mix:get-tracks", () => Array.from(mixTracks));
 
 app.whenReady().then(async () => {
-  // 调试目录每次重启清空 —— tmp/agent_contexts 是 dump LLM 上下文的快照,
-  // 跨会话留着会混淆,启动时清干净,本次会话内自然按 chatId + turn 累积。
+  // 调试上下文是单次运行快照；业务数据、配置、状态树均保留。
   try {
-    const dumpDir = path.resolve(__dirname, "..", "..", "tmp", "agent_contexts");
-    fs.rmSync(dumpDir, { recursive: true, force: true });
+    fs.rmSync(path.join(RUNTIME.logDir, "electron", "agent_contexts"), { recursive: true, force: true });
   } catch (e) {
-    console.warn("[main] clean tmp/agent_contexts failed:", e);
+    console.warn("[main] clean agent_contexts failed:", e);
   }
 
-  // chat 持久化 DB(SQLite)。dataDir 走 Electron userData,跨平台标准位置。
-  // Win:%APPDATA%/audio-qc-app/  macOS:~/Library/Application Support/audio-qc-app/
+  // chat 持久化 DB(SQLite)。Windows 便携目录 data/；macOS Application Support/AudioQC。
   try {
     initDb(app.getPath("userData"));
     console.log(`[db] chat DB initialized at ${app.getPath("userData")}/chats.db`);
@@ -898,15 +1151,18 @@ app.whenReady().then(async () => {
     console.error("[db] init failed:", e);
   }
 
-  spawnSidecar();
   try {
+    spawnSidecar();
     await waitForPort(SIDECAR_PORT);
     console.log(`[main] sidecar ready on ${SIDECAR_PORT}`);
   } catch (e) {
-    console.error(`[main] ${e}`);
+    console.error("[main] sidecar startup failed:", e);
+    dialog.showErrorBox(
+      "Audio QC 启动失败",
+      `内置 Python sidecar 无法启动。\n\n${String(e)}\n\n日志目录:${RUNTIME.logDir}`,
+    );
   }
 
-  // MCP 子进程并行启动,失败不阻塞主流程(agent 还没接,FastAPI 路径仍工作)
   startMcpClient().catch((e) => {
     console.error("[mcp] startMcpClient failed:", e);
   });

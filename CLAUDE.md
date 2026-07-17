@@ -83,7 +83,7 @@ cd app && npm run build
 
 ## 当前分支状态
 
-- 主开发分支 `v2`,Phase 4(agent 接入)进行中:`app/electron/agent.ts` AgentRunner + MCP 工具 + db 持久化已搭好,workflow.md 18 态在迭代 SOP
+- 主开发分支 `v2`,Phase 4(agent 接入)进行中:`app/electron/agent.ts` AgentRunner + MCP 工具 + db 持久化已搭好,workflow.md 15 态在迭代 SOP
 - 默认在 feature 分支提交改动,推到远端后提 PR 到 `audit-copilot`;提 PR 前先同步远端并处理本地冲突。
 
 ## 配置

@@ -4,7 +4,8 @@ import { getAudioMetadata, getAudioPeaks, rawFileUrl, readCsv } from "../../api"
 import type { AudioMetadataOut, AudioPeaksOut } from "../../api";
 import { Metronome, type BeatMarker } from "../../lib/metronome";
 import { useDarkTheme, setupWaveformCanvas } from "../../lib/waveform";
-import { clsx } from "../../utils";
+import { clsx, appAlert } from "../../utils";
+import type { PlaybackToggleDetail, PlaybackToggleResult } from "../../lib/playback";
 
 interface Props {
   path: string;
@@ -657,24 +658,26 @@ export function AudioViewer({ path }: Props) {
     setOffsetSec(0);
   };
 
-  const toggleBeat = async () => {
-    if (renderToggleBusy) return;
+  // 返回 true = 达到了期望的开/关状态;false = 被 guard 拦下或渲染失败。
+  // UI 按钮不看返回值,agent 事件桥(下面的 useEffect)靠它回执真实结果。
+  const toggleBeat = async (): Promise<boolean> => {
+    if (renderToggleBusy) return false;
     if (beatRender) {
       // OFF
       setBeatRender(false);
       setBeats([]);
       metronomeRef.current?.stop();
       // 不 dispose,留给下次 ON 复用 buffer
-      return;
+      return true;
     }
-    if (!songPaths) return;
+    if (!songPaths) return false;
     setRenderToggleBusy(true);
     try {
       const csv = await readCsv(songPaths.beatCsv);
       const parsed = parseBeatRows(csv.rows);
       if (parsed.length === 0) {
-        alert("Beat CSV 解析后无有效拍数据");
-        return;
+        await appAlert("Beat CSV 解析后无有效拍数据");
+        return false;
       }
       setBeats(parsed);
       setBeatRender(true);
@@ -686,60 +689,91 @@ export function AudioViewer({ path }: Props) {
       if (a && !a.paused) {
         metronomeRef.current.start(a);
       }
+      return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      alert(`渲染节奏失败: ${msg}`);
+      await appAlert(`渲染节奏失败: ${msg}`);
+      return false;
     } finally {
       setRenderToggleBusy(false);
     }
   };
 
-  const toggleStructure = async () => {
-    if (renderToggleBusy) return;
+  const toggleStructure = async (): Promise<boolean> => {
+    if (renderToggleBusy) return false;
     if (structureRender) {
       setStructureRender(false);
       setStructure([]);
-      return;
+      return true;
     }
-    if (!songPaths) return;
+    if (!songPaths) return false;
     setRenderToggleBusy(true);
     try {
       const csv = await readCsv(songPaths.structureCsv);
       const parsed = parseStructureRows(csv.rows);
       if (parsed.length === 0) {
-        alert("Structure CSV 解析后无有效段落");
-        return;
+        await appAlert("Structure CSV 解析后无有效段落");
+        return false;
       }
       setStructure(parsed);
       setStructureRender(true);
+      return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      alert(`渲染结构失败: ${msg}`);
+      await appAlert(`渲染结构失败: ${msg}`);
+      return false;
     } finally {
       setRenderToggleBusy(false);
     }
   };
 
   // agent 的 playback_toggle_beat_render / _structure_render 最终走到这。
-  // App 把 main → renderer IPC 转成 window CustomEvent;AudioViewer idempotent 触发 toggle
-  // (只在状态需要改变时才调)。用 ref 保引用,免 listener 每次 rebind。
+  // App 把 main → renderer IPC 转成 cancelable CustomEvent(契约见 lib/playback.ts):
+  // 这里 preventDefault() 表示"AudioViewer 在场,接住了",并往 detail.result 塞
+  // 执行结果 Promise,App 桥接层 await 后回执 main,agent 拿到真实成败。
+  // idempotent:已处于期望状态就不动。用 ref 保引用,免 listener 每次 rebind。
   const toggleBeatRef = useRef(toggleBeat);
   const toggleStructureRef = useRef(toggleStructure);
   const beatRenderRef = useRef(beatRender);
   const structureRenderRef = useRef(structureRender);
+  const songPathsRef = useRef(songPaths);
+  const renderToggleBusyRef = useRef(renderToggleBusy);
   toggleBeatRef.current = toggleBeat;
   toggleStructureRef.current = toggleStructure;
   beatRenderRef.current = beatRender;
   structureRenderRef.current = structureRender;
+  songPathsRef.current = songPaths;
+  renderToggleBusyRef.current = renderToggleBusy;
   useEffect(() => {
-    const onBeat = (e: Event) => {
-      const want = !!(e as CustomEvent<{ on: boolean }>).detail?.on;
-      if (want !== beatRenderRef.current) void toggleBeatRef.current();
+    const handle = (e: Event, kind: "beat" | "structure") => {
+      const ce = e as CustomEvent<PlaybackToggleDetail>;
+      e.preventDefault();
+      const want = !!ce.detail?.on;
+      ce.detail.result = (async (): Promise<PlaybackToggleResult> => {
+        if (renderToggleBusyRef.current) {
+          return { ok: false, code: "BUSY", message: "上一次渲染切换还在进行中,稍后再调一次" };
+        }
+        const cur = kind === "beat" ? beatRenderRef.current : structureRenderRef.current;
+        if (want === cur) {
+          return { ok: true, message: want ? "已是开启状态" : "已是关闭状态" };
+        }
+        if (want && !songPathsRef.current) {
+          return {
+            ok: false,
+            code: "NO_SONG_STRUCTURE",
+            message: "当前 wav 不在 {歌手}_{歌曲}_{扒曲人}/<子目录>/ 结构里,定位不到同歌 csv",
+          };
+        }
+        const done = await (kind === "beat"
+          ? toggleBeatRef.current()
+          : toggleStructureRef.current());
+        return done
+          ? { ok: true }
+          : { ok: false, code: "RENDER_FAILED", message: "CSV 读取或解析失败(UI 已弹窗提示细节)" };
+      })();
     };
-    const onStruct = (e: Event) => {
-      const want = !!(e as CustomEvent<{ on: boolean }>).detail?.on;
-      if (want !== structureRenderRef.current) void toggleStructureRef.current();
-    };
+    const onBeat = (e: Event) => handle(e, "beat");
+    const onStruct = (e: Event) => handle(e, "structure");
     window.addEventListener("playback:toggle:beat", onBeat);
     window.addEventListener("playback:toggle:structure", onStruct);
     return () => {
