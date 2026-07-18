@@ -39,7 +39,8 @@ async function collectFiles(root, relative = "", platform) {
   const files = [];
   for (const entry of entries) {
     const childRelative = relative ? path.join(relative, entry.name) : entry.name;
-    if (!relative && entry.name.toLowerCase() === MANIFEST_NAME) continue;
+    const isAppRootManifest = platform === "macos" && relative === `${PRODUCT}.app` && entry.name.toLowerCase() === MANIFEST_NAME;
+    if ((!relative && entry.name.toLowerCase() === MANIFEST_NAME) || isAppRootManifest) continue;
     assertSafePath(childRelative);
     const childPath = path.join(root, childRelative);
     const details = await lstat(childPath);
@@ -97,8 +98,11 @@ export async function generateUpdateManifest({ appOutDir, version, platform, arc
     managedRoots,
     files,
   };
-  await writeFile(path.join(appOutDir, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "w" });
-  console.log(`[update-manifest] wrote ${files.length} hashes to ${path.join(appOutDir, MANIFEST_NAME)}`);
+  const manifestPath = platform === "macos"
+    ? path.join(appOutDir, `${PRODUCT}.app`, MANIFEST_NAME)
+    : path.join(appOutDir, MANIFEST_NAME);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "w" });
+  console.log(`[update-manifest] wrote ${files.length} hashes to ${manifestPath}`);
   return manifest;
 }
 

@@ -77,8 +77,26 @@ describe("inspectAndStageOfflineUpdate", () => {
     expect(await fs.readFile(path.join(staged.payloadDir, "resources", "app.asar"), "utf8")).toBe("new app payload");
   });
 
+  it("accepts a matching macOS app-root ZIP and retains the app directory in staging", async () => {
+    const payload = Buffer.from("mac app executable");
+    const manifest = manifestFor(payload, {
+      platform: "macos",
+      arch: "arm64",
+      archiveRoot: "Audio QC.app",
+      managedRoots: ["Audio QC.app"],
+      files: [{ path: "Audio QC.app/Contents/MacOS/Audio QC", type: "file", mode: 0o755, sha256: hash(payload) }],
+    });
+    const root = await temporaryRoot();
+    const zipPath = await writeZip(root, {
+      "Audio QC.app/update-manifest.json": JSON.stringify(manifest),
+      "Audio QC.app/Contents/MacOS/Audio QC": payload,
+    });
+    const staged = await inspectAndStageOfflineUpdate(zipPath, path.join(root, "mac-stage"), { platform: "macos", arch: "arm64", currentVersion: "1.0.0" });
+    expect(await fs.readFile(path.join(staged.payloadDir, "Audio QC.app", "Contents", "MacOS", "Audio QC"), "utf8")).toBe("mac app executable");
+  });
+
   it("rejects the wrong platform", async () => {
-    const update = await makeUpdate({ platform: "macos", managedRoots: ["Audio QC.app"], files: [{ path: "Audio QC.app/Contents/MacOS/Audio QC", type: "file", mode: 0o644, sha256: "0".repeat(64) }] });
+    const update = await makeUpdate({ platform: "macos", archiveRoot: "Audio QC.app", managedRoots: ["Audio QC.app"], files: [{ path: "Audio QC.app/Contents/MacOS/Audio QC", type: "file", mode: 0o644, sha256: "0".repeat(64) }] });
     await expect(inspectAndStageOfflineUpdate(update.zipPath, path.join(update.root, "staging"), target)).rejects.toThrow("Wrong update platform");
   });
 

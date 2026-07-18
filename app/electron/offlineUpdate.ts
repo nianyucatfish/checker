@@ -348,7 +348,15 @@ export async function inspectAndStageOfflineUpdate(
     if (entries.size !== manifest.files.length) throw new Error("ZIP file set does not exactly match manifest");
 
     for (const declared of manifest.files) {
-      const entry = entries.get(declared.path);
+      // macOS's archive root is the managed Audio QC.app itself; Windows's root is
+      // only a user-facing wrapper folder and is intentionally absent from files[].
+      if (manifest.platform === "macos" && !declared.path.startsWith(`${manifest.archiveRoot}/`)) {
+        throw new Error(`macOS manifest file is outside archive root: ${declared.path}`);
+      }
+      const entryPath = manifest.platform === "macos"
+        ? declared.path.slice(manifest.archiveRoot.length + 1)
+        : declared.path;
+      const entry = entries.get(entryPath);
       if (!entry) throw new Error(`ZIP file set does not exactly match manifest: ${declared.path}`);
       if (isSymlink(entry) !== (declared.type === "symlink")) throw new Error(`ZIP entry type mismatch: ${declared.path}`);
       const destination = path.join(payloadDir, ...declared.path.split("/"));
