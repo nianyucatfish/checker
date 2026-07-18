@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,9 +52,9 @@ try {
   await run("hdiutil", ["attach", path.join(releaseDir, dmg), "-nobrowse", "-readonly", "-mountpoint", mount]);
   const mountedApp = path.join(mount, "Audio QC.app");
   await appChecks(mountedApp);
-  // electron-builder writes the DMG drag target as a Finder alias on APFS images;
-  // unlike a POSIX symlink, Node reports that alias as a regular file.
-  const applications = await stat(path.join(mount, "Applications"));
+  // `stat()` follows the drag target to /Applications (a directory). `lstat()`
+  // observes the actual DMG entry: a POSIX symlink on HFS+ or Finder alias on APFS.
+  const applications = await lstat(path.join(mount, "Applications"));
   if (!applications.isSymbolicLink() && !applications.isFile()) {
     throw new Error("DMG Applications alias is missing");
   }
