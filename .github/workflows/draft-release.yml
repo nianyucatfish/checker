@@ -188,14 +188,23 @@ jobs:
         run: |
           set -euo pipefail
           npm exec vite build
-          # electron-builder.yml keeps DMG first (installer) and ZIP second (offline update).
-          args=(--config electron-builder.yml --config.extraMetadata.version="$RELEASE_VERSION" --mac dmg zip --${{ matrix.arch }} --publish never)
+          # Build the update ZIP before the installer DMG. On macos-15-intel, hdiutil can
+          # transiently leave the DMG device busy; retry only the installer build.
+          common=(--config electron-builder.yml --config.extraMetadata.version="$RELEASE_VERSION" --mac --${{ matrix.arch }} --publish never)
           if [[ "$SIGNED_BUILD" == "true" ]]; then
-            args+=(--config.mac.notarize=true)
+            common+=(--config.mac.notarize=true)
           else
-            args+=(--config.mac.notarize=false)
+            common+=(--config.mac.notarize=false)
           fi
-          npm exec electron-builder -- "${args[@]}"
+          npm exec electron-builder -- "${common[@]}" zip
+          for attempt in 1 2 3; do
+            rm -f "release/Audio QC-$RELEASE_VERSION-macos-${{ matrix.arch }}-"*.dmg{,.blockmap}
+            if npm exec electron-builder -- "${common[@]}" dmg; then
+              break
+            fi
+            [[ "$attempt" == 3 ]] && exit 1
+            echo "macOS DMG build attempt $attempt failed; retrying..."
+          done
       - name: Smoke-test native macOS artifacts
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
