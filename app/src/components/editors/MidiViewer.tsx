@@ -69,8 +69,10 @@ function MidiWebview({ path }: { path: string }) {
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [saveToast, setSaveToast] = useState<string | null>(null);
-  // 每次 mount 用一个唯一 src,绕过 webview partition 缓存
-  const srcRef = useRef<string>(`/midi_player.html?t=${Date.now()}`);
+  // 在打包版中 renderer 是 file://.../dist/index.html；不能用根路径,否则 Electron
+  // 会解析成 file:///C:/midi_player.html。以当前页面 URL 解析才能落到 dist/。
+  // 每次 mount 加时间戳,绕过 webview partition 缓存。
+  const srcRef = useRef<string>(new URL(`midi_player.html?t=${Date.now()}`, window.location.href).toString());
 
   useEffect(() => {
     let cancelled = false;
