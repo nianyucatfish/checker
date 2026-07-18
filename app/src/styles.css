@@ -1,0 +1,359 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light theme (VS Code Light+ inspired) */
+    --bg: #ffffff;
+    --bg-sidebar: #f3f3f3;
+    --bg-activitybar: #2c2c2c;
+    --bg-panel: #f3f3f3;
+    --bg-statusbar: #007acc;
+    --bg-hover: rgba(0, 0, 0, 0.04);
+    --bg-selected: rgba(0, 122, 204, 0.12);
+
+    --fg: #333333;
+    --fg-muted: #6c6c6c;
+    --fg-subtle: #a0a0a0;
+    --fg-statusbar: #ffffff;
+
+    --border: #e5e5e5;
+    --border-subtle: #ececec;
+
+    --accent: #007acc;
+    --accent-fg: #ffffff;
+
+    --danger: #d32f2f;
+    --warning: #c4a000;
+    --success: #388e3c;
+  }
+
+  .dark {
+    /* Dark theme (VS Code Dark+ inspired) */
+    --bg: #1e1e1e;
+    --bg-sidebar: #252526;
+    --bg-activitybar: #333333;
+    --bg-panel: #1e1e1e;
+    --bg-statusbar: #007acc;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --bg-selected: rgba(14, 99, 156, 0.6);
+
+    --fg: #cccccc;
+    --fg-muted: #969696;
+    --fg-subtle: #6a6a6a;
+    --fg-statusbar: #ffffff;
+
+    --border: #3c3c3c;
+    --border-subtle: #2d2d30;
+
+    --accent: #0e639c;
+    --accent-fg: #ffffff;
+
+    --danger: #f48771;
+    --warning: #cca700;
+    --success: #89d185;
+  }
+
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+  }
+
+  body {
+    font-size: 13px;
+    line-height: 18px;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    /* 默认禁用文本选中,像 VS Code 那样;只有可编辑/带 .selectable 的才允许 */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  input,
+  textarea,
+  select,
+  [contenteditable="true"],
+  [contenteditable=""],
+  .monaco-editor,
+  .monaco-editor *,
+  .selectable,
+  .selectable * {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  /* Custom scrollbar matching VS Code */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(127, 127, 127, 0.3);
+    border-radius: 0;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(127, 127, 127, 0.5);
+  }
+}
+
+@layer components {
+  .btn {
+    @apply text-sm px-2 py-1 border border-border rounded-sm
+           hover:bg-bg-hover transition-colors cursor-pointer;
+  }
+
+  .btn-primary {
+    @apply bg-accent text-accent-fg border-accent
+           hover:opacity-90;
+  }
+
+  .pane {
+    @apply h-full flex flex-col overflow-hidden bg-bg-sidebar;
+  }
+
+  .pane-header {
+    @apply text-xs uppercase tracking-wide font-semibold text-fg-muted
+           px-3 h-9 flex items-center border-b border-border-subtle
+           shrink-0;
+  }
+
+  .pane-body {
+    @apply flex-1 overflow-auto py-1;
+    /* 预留滚动条槽位,避免内容在 scrollbar 出现/消失时左右抖动 */
+    scrollbar-gutter: stable;
+  }
+
+  /* 任意需要稳定滚动布局的容器都可以加这个类 */
+  .scroll-stable {
+    scrollbar-gutter: stable;
+  }
+
+  .row {
+    @apply flex items-center gap-2 px-3 h-[22px]
+           text-sm cursor-pointer hover:bg-bg-hover
+           select-none;
+  }
+
+  .row.selected {
+    @apply bg-bg-selected;
+  }
+
+  .row.has-errors {
+    @apply text-danger;
+  }
+
+  /* 拖放高亮:被拖目标(dir 行,或文件行的 parent dir 行)。
+     用 inset 实蓝边 + 半透明蓝底,既不影响行高也跟 selected 区分得开。 */
+  .row.drop-target {
+    background: rgba(14, 99, 156, 0.25);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  /* Agent chat: Claude Code inspired, scoped to sidebar only. */
+  .agent-shell {
+    background: var(--bg-sidebar);
+  }
+
+  .agent-body {
+    @apply flex flex-col min-h-0 gap-2 p-0;
+    overflow: hidden;
+  }
+
+  .agent-scroll {
+    @apply flex-1 min-h-0 overflow-y-auto px-4 py-3;
+  }
+
+  .agent-welcome {
+    @apply rounded-xl border border-border bg-bg p-3 shadow-sm;
+  }
+
+  .agent-user-row {
+    @apply flex justify-end;
+  }
+
+  .agent-user-bubble {
+    @apply max-w-[88%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 shadow-sm;
+    background: color-mix(in srgb, var(--accent) 13%, #ffffff 87%);
+    color: var(--fg);
+  }
+
+  .dark .agent-user-bubble {
+    background: color-mix(in srgb, var(--accent) 26%, #1e1e1e 74%);
+  }
+
+  .agent-assistant-row {
+    @apply flex items-start gap-3;
+  }
+
+  .agent-assistant-text {
+    @apply selectable text-sm leading-6 text-fg;
+  }
+
+  /* markdown 渲染:克制风格,贴近 IDE/Claude Code 输出 */
+  .agent-md > * + * {
+    @apply mt-2;
+  }
+  .agent-md p {
+    @apply whitespace-pre-wrap;
+  }
+  .agent-md h1, .agent-md h2, .agent-md h3, .agent-md h4 {
+    @apply font-semibold text-fg mt-3 mb-1;
+  }
+  .agent-md h1 { @apply text-base; }
+  .agent-md h2 { @apply text-sm; }
+  .agent-md h3, .agent-md h4 { @apply text-sm; }
+  .agent-md ul, .agent-md ol {
+    @apply pl-5 my-1;
+  }
+  .agent-md ul { @apply list-disc; }
+  .agent-md ol { @apply list-decimal; }
+  .agent-md li {
+    @apply my-0.5;
+  }
+  .agent-md code {
+    @apply px-1 py-0.5 rounded text-[12px] font-mono bg-bg-sidebar text-fg;
+  }
+  .agent-md pre {
+    @apply p-2 rounded bg-bg-sidebar overflow-x-auto;
+  }
+  .agent-md pre code {
+    @apply p-0 bg-transparent text-[12px];
+  }
+  .agent-md a {
+    color: var(--accent);
+    @apply underline;
+  }
+  .agent-md strong { @apply font-semibold; }
+  .agent-md em { @apply italic; }
+  .agent-md blockquote {
+    @apply pl-3 border-l-2 border-border text-fg-muted;
+  }
+  .agent-md table {
+    @apply border-collapse my-1;
+  }
+  .agent-md th, .agent-md td {
+    @apply border border-border px-2 py-1 text-xs;
+  }
+  .agent-md th { @apply bg-bg-sidebar font-medium; }
+  .agent-md hr {
+    @apply my-2 border-border;
+  }
+
+  .agent-thinking {
+    @apply flex h-6 items-center gap-1;
+  }
+
+  .agent-thinking span {
+    @apply block size-1.5 rounded-full bg-fg-subtle;
+    animation: agent-pulse 1.05s infinite ease-in-out;
+  }
+
+  .agent-thinking span:nth-child(2) {
+    animation-delay: 0.14s;
+  }
+
+  .agent-thinking span:nth-child(3) {
+    animation-delay: 0.28s;
+  }
+
+  .agent-error {
+    @apply mx-3 rounded-lg border px-3 py-2 text-xs;
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+
+  .agent-composer {
+    @apply m-3 mt-0 shrink-0 rounded-xl border bg-bg shadow-sm;
+    border-color: var(--border);
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+
+  /* 只有当 textarea 处于聚焦时才高亮蓝边 */
+  .agent-composer:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+
+  .agent-input {
+    @apply block h-24 w-full resize-none bg-transparent px-3 py-3 text-sm leading-6 text-fg outline-none placeholder:text-fg-subtle;
+  }
+
+  .agent-composer-footer {
+    @apply flex items-center justify-between border-t border-border-subtle px-3 py-2;
+  }
+
+  .agent-send {
+    @apply grid size-7 place-items-center rounded-md text-fg-muted transition;
+  }
+
+  .agent-send:not(:disabled) {
+    @apply text-accent hover:bg-bg-hover;
+  }
+
+  .agent-send:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  .agent-send--stop:not(:disabled) {
+    color: var(--accent);
+  }
+  .agent-send--stop:not(:disabled):hover {
+    background: var(--bg-hover);
+  }
+
+  /* 会话切换 dropdown */
+  .agent-session-trigger {
+    @apply flex items-center gap-1.5 min-w-0 flex-1 text-left text-fg-muted hover:text-fg transition-colors;
+  }
+  .agent-session-new {
+    @apply ml-2 p-1 rounded text-fg-subtle hover:bg-bg-hover hover:text-fg transition-colors;
+  }
+  .agent-session-dropdown {
+    @apply absolute left-2 right-2 top-9 z-20 rounded-lg border bg-bg shadow-lg;
+    border-color: var(--border);
+    max-height: min(60vh, 400px);
+    display: flex;
+    flex-direction: column;
+  }
+  .agent-session-dropdown-head {
+    @apply flex items-center justify-between px-3 py-2 text-xs text-fg-subtle border-b normal-case;
+    border-color: var(--border-subtle);
+  }
+  .agent-session-list {
+    @apply overflow-y-auto py-1;
+  }
+  .agent-session-row {
+    @apply flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-bg-hover;
+  }
+  .agent-session-row--current {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .agent-session-actions {
+    @apply flex items-center gap-0.5 opacity-0 transition-opacity shrink-0;
+  }
+  .agent-session-row:hover .agent-session-actions {
+    @apply opacity-100;
+  }
+
+  @keyframes agent-pulse {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+    40% { transform: translateY(-3px); opacity: 1; }
+  }
+
+  /* 整个 pane 在拖外部文件 / 内部节点时的虚线轮廓,空白处也能 drop 到 root */
+  .pane-body.dragging {
+    outline: 2px dashed var(--accent);
+    outline-offset: -4px;
+  }
+}

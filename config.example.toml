@@ -1,0 +1,80 @@
+# Audio QC 配置文件 — 外部服务凭证 + 应用偏好
+#
+# 用法:
+#   1. 把本文件复制为 config.toml(同目录)
+#   2. 把你自己的凭证填到下面对应字段
+#   3. config.toml 不进 git(已在 .gitignore),凭证不会被提交
+#
+# sidecar 启动时按以下顺序查找配置:
+#   1. 环境变量 CHECKER_CONFIG 指定的路径
+#   2. 仓库根目录 config.toml(开发期)
+#   3. app_config_dir/config.toml(打包后,Win 是 %APPDATA%\AudioQC,Mac 是 ~/Library/Application Support/AudioQC)
+#
+# 字段全部留空也能跑(只有用到对应工具时才校验)。
+
+
+# ============================================================
+# 腾讯文档(分工表读写)
+# ============================================================
+[tencent_docs]
+# 从 https://docs.qq.com/open 开发者后台拿到的"个人开发者直接 token"
+# 三个字段对应 API 请求头 Client-Id / Access-Token / Open-Id
+client_id = ""
+access_token = ""
+open_id = ""
+
+# 分工表的 ID(从 URL https://docs.qq.com/sheet/{spreadsheet_id} 里抠)
+spreadsheet_id = ""
+# 子 sheet 的 ID(URL ?tab=xxx);单 sheet 表格可省略
+sheet_id = ""
+
+
+# ============================================================
+# 飞书(预留,目前未使用)
+# ============================================================
+[feishu]
+# 从 https://open.feishu.cn/app 自建应用 -> 凭证与基础信息 拿
+app_id = ""
+app_secret = ""
+
+
+# ============================================================
+# LLM / Agent / sidebar。protocol 决定走哪套协议:
+#   "openai"   (默认) OpenAI 兼容:OpenAI / DeepSeek / Moonshot / 智谱 / OpenRouter /
+#              Gemini 兼容端点 / Ollama 等。endpoint 填 base(自动补 /v1/chat/completions)
+#              或完整 chat URL;认证走 Bearer。
+#   "anthropic" Anthropic 原生 Messages API。endpoint = "https://api.anthropic.com",
+#              model = claude-*;认证走 x-api-key(协议适配在 sidecar/llm_providers.py)。
+# ============================================================
+[llm]
+protocol = "openai"
+endpoint = "http://127.0.0.1:8765"
+api_key = ""
+model = "claude-opus-4-7"
+
+
+[agent_sandbox]
+# 可选:agent 测试时使用本地 fixture 替代腾讯文档读取,避免碰真实分工表。
+# 为空则正常走腾讯文档。
+sheet_fixture_path = ""
+
+
+# ============================================================
+# 应用偏好
+# ============================================================
+[preferences]
+# Agent 写操作模式:
+#   "confirm" (默认) — 每次写文件弹 confirm 卡,用户勾选/批准后才执行
+#   "auto"          — 不弹卡,但 agent 必须先调 fix_execute_plan(..., simulate=True)
+#                    干跑,服务端校验"同 ops 已 simulate 过"才放行真执行;
+#                    每次执行额外返 by_code_delta(错误增减明细)给 agent 自反馈
+execution_mode = "confirm"
+
+
+# ============================================================
+# 当前用户身份(仅本机使用,不会进 agent prompt / API)
+# ============================================================
+[user]
+# 你在分工表"验收负责人"列里的姓名。sidecar 用它过滤"我的"待办,
+# LLM 看不到也不需要知道这个字段。
+reviewer_name = ""

@@ -1,0 +1,72 @@
+appId: com.audioqc.desktop
+productName: Audio QC
+directories:
+  output: release
+  buildResources: ../packaging/assets
+electronDist: node_modules/electron/dist
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+  - node_modules/**
+  # Vite already bundles Monaco from esm/. The package's dev/ and min/ copies are unused
+  # at runtime and otherwise add roughly 44 MiB to app.asar.
+  - "!node_modules/monaco-editor/dev/**"
+  - "!node_modules/monaco-editor/min/**"
+  - "!node_modules/monaco-editor/monaco.d.ts"
+  - "!node_modules/monaco-editor/CHANGELOG.md"
+  - "!node_modules/monaco-editor/README.md"
+asar: true
+npmRebuild: false
+electronLanguages:
+  - en-US
+  - zh-CN
+afterPack: ../scripts/after-pack-update-manifest.mjs
+# Signing mutates the macOS bundle after afterPack; refresh hashes before ZIP/DMG targets run.
+afterSign: ../scripts/after-pack-update-manifest.mjs
+asarUnpack:
+  - node_modules/better-sqlite3/**
+extraResources:
+  - from: ../packaging/staging/python-runtime
+    to: python-runtime
+  - from: ../packaging/staging/backend
+    to: backend
+  - from: ../packaging/staging/prompts
+    to: prompts
+win:
+  # Draft 便携包暂不改写 PE 图标/签名，避免构建机依赖 winCodeSign。
+  # 正式配置 Windows 证书和 icon.ico 后再开启。
+  signAndEditExecutable: false
+  target:
+    - target: zip
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-windows-${arch}-portable.${ext}
+mac:
+  icon: ../packaging/assets/icon.png
+  target:
+    # Keep DMG first: it is the primary installer; ZIP is the offline-update artifact.
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  artifactName: ${productName}-${version}-macos-${arch}${env.MAC_ARTIFACT_SUFFIX}.${ext}
+  category: public.app-category.music
+  hardenedRuntime: true
+  gatekeeperAssess: false
+dmg:
+  background: ../packaging/assets/dmg-background.png
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications

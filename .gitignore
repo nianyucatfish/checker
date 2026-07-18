@@ -25,26 +25,63 @@ dist/
 .DS_Store
 Thumbs.db
 
-# 6. 忽略本地的敏感配置 (如果有)
-# 比如包含密码的 config.ini，如果不想公开就加上
-# config.ini
+# 6. 忽略本地的敏感配置
+# config.toml 包含凭证(腾讯文档 access_token、Anthropic API key 等),不进 git
+# 模板见 config.example.toml(已提交)
 config.toml
+# 设置界面写的 LLM 覆盖(含 api_key),也不进 git
+llm_override.json
 
-# 7. node / electron 产物
+# Local-only reference codebase and Claude Code worktrees (not part of this project)
+GenericAgent/
+.claude/
+
+# Node / Electron / Vite
 node_modules/
 dist-electron/
+app/dist/
+app/dist-electron/
+app/release/
+packaging/staging/
 *.tsbuildinfo
+app/tsconfig.*.tsbuildinfo
 *.log
 
-# 8. 运行时 / 临时
+# 运行时 / 临时
 cache/
 tmp/
 
-# 9. 第三方独立项目目录
-GenericAgent/
+# 本地参考资料(不进 git)
+doc/v2_验收清单.md
+doc/音乐学院数据要求.md
+doc/llm_*.md
 
 *.mid
 piano_roll_test.py
 asset/ide_config.json
 那些你很冒险的梦_Beat.csv
 怪物_Structure.csv
+
+# Local-only reference codebase and Claude Code worktrees (not part of this project)
+GenericAgent/
+.claude/
+
+# Node / Electron / Vite
+node_modules/
+app/dist/
+app/dist-electron/
+app/release/
+packaging/staging/
+app/tsconfig.*.tsbuildinfo
+*.log
+
+# 7. 腾讯文档表数据 disk cache (开发期手动管理, 不进 git)
+cache/
+
+# 8. 本地参考资料(不进 git)
+doc/v2_验收清单.md
+doc/音乐学院数据要求.md
+doc/llm_*.md
+
+# 9. 本地临时测试沙盒
+tmp/

@@ -1,0 +1,19 @@
+# Sidecar runtime dependencies (Python 3.11+)
+# Audio core stack
+numpy>=1.26
+soundfile>=0.12
+mido>=1.3       # MIDI tick shifting (midi_shifter.py)
+
+# Sidecar HTTP / agent layer
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+
+# File operations (move to recycle bin / trash, cross-platform)
+send2trash>=1.8
+
+# MCP server (agent tool exposure; stdio transport, spawned by Electron main)
+mcp>=1.0
+
+# HTTP client used by the completion proxy and FastAPI TestClient
+httpx>=0.27
