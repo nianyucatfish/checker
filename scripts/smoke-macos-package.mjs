@@ -52,8 +52,12 @@ try {
   await run("hdiutil", ["attach", path.join(releaseDir, dmg), "-nobrowse", "-readonly", "-mountpoint", mount]);
   const mountedApp = path.join(mount, "Audio QC.app");
   await appChecks(mountedApp);
+  // electron-builder writes the DMG drag target as a Finder alias on APFS images;
+  // unlike a POSIX symlink, Node reports that alias as a regular file.
   const applications = await stat(path.join(mount, "Applications"));
-  if (!applications.isSymbolicLink()) throw new Error("DMG Applications entry is not an alias/symlink");
+  if (!applications.isSymbolicLink() && !applications.isFile()) {
+    throw new Error("DMG Applications alias is missing");
+  }
   await run("hdiutil", ["detach", mount]);
 
   await run("mkdir", ["-p", extracted]);
