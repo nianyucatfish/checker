@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, rename, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,43 @@ async function download(url, destination) {
     })).catch(reject);
     output.on("error", reject);
   });
+}
+
+async function pruneRuntime(runtimeRoot) {
+  const removableDirectories = [
+    "include",
+    "libs",
+    "tcl",
+    path.join("Lib", "ensurepip"),
+    path.join("Lib", "idlelib"),
+    path.join("Lib", "lib2to3"),
+    path.join("Lib", "tkinter"),
+    path.join("Lib", "turtledemo"),
+    path.join("Lib", "venv"),
+    path.join("Lib", "site-packages", "pip"),
+  ];
+  await Promise.all(removableDirectories.map((relative) => rm(path.join(runtimeRoot, relative), { recursive: true, force: true })));
+
+  async function walk(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "__pycache__" || entry.name === "test" || entry.name === "tests") {
+          await rm(full, { recursive: true, force: true });
+        } else {
+          await walk(full);
+        }
+      } else if (entry.name.endsWith(".pdb") || entry.name.endsWith(".pyc") || entry.name.endsWith(".chm")) {
+        await rm(full, { force: true });
+      }
+    }
+  }
+  await walk(runtimeRoot);
+  for (const entry of await readdir(path.join(runtimeRoot, "Lib", "site-packages"))) {
+    if (/^pip-.*\.dist-info$/i.test(entry)) {
+      await rm(path.join(runtimeRoot, "Lib", "site-packages", entry), { recursive: true, force: true });
+    }
+  }
 }
 
 async function copyBackend() {
@@ -103,6 +140,8 @@ async function main() {
       () => { throw new Error("production runtime unexpectedly contains pytest"); },
       () => undefined,
     );
+    await pruneRuntime(runtimeDestination);
+    await run(executable, ["-I", "-c", "import fastapi, httpx, mcp, mido, numpy, pydantic, send2trash, soundfile, uvicorn; print('pruned embedded Python smoke check passed')"]);
     console.log(`Runtime staging ready: ${stage}`);
   } finally {
     await rm(work, { recursive: true, force: true });

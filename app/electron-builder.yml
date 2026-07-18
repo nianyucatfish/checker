@@ -9,8 +9,18 @@ files:
   - dist-electron/**
   - package.json
   - node_modules/**
+  # Vite already bundles Monaco from esm/. The package's dev/ and min/ copies are unused
+  # at runtime and otherwise add roughly 44 MiB to app.asar.
+  - "!node_modules/monaco-editor/dev/**"
+  - "!node_modules/monaco-editor/min/**"
+  - "!node_modules/monaco-editor/monaco.d.ts"
+  - "!node_modules/monaco-editor/CHANGELOG.md"
+  - "!node_modules/monaco-editor/README.md"
 asar: true
 npmRebuild: false
+electronLanguages:
+  - en-US
+  - zh-CN
 afterPack: ../scripts/after-pack-update-manifest.mjs
 # Signing mutates the macOS bundle after afterPack; refresh hashes before ZIP/DMG targets run.
 afterSign: ../scripts/after-pack-update-manifest.mjs
