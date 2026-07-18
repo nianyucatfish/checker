@@ -75,9 +75,12 @@ async function pruneRuntime(runtimeRoot) {
     }
   }
   await walk(runtimeRoot);
-  for (const entry of await readdir(path.join(runtimeRoot, "Lib", "site-packages"))) {
+  const sitePackages = process.platform === "win32"
+    ? path.join(runtimeRoot, "Lib", "site-packages")
+    : path.join(runtimeRoot, "lib", "python3.12", "site-packages");
+  for (const entry of await readdir(sitePackages)) {
     if (/^pip-.*\.dist-info$/i.test(entry)) {
-      await rm(path.join(runtimeRoot, "Lib", "site-packages", entry), { recursive: true, force: true });
+      await rm(path.join(sitePackages, entry), { recursive: true, force: true });
     }
   }
 }

@@ -100,7 +100,9 @@ def get_prior_review(song_name: str, *, chat_id: str | None = None) -> list[dict
     注:返回 list 而不是 generator —— 调用方通常要排序 / 计数 / 序列化,
     一次性物化更简单;review_log 文件预期不会爆量(每首歌每态 ~1 行)。
     """
-    out = [e for e in iter_entries() if e.get("song") == song_name]
+    # Reverse ingestion order first: multiple events can share the same clock resolution
+    # on CI, and a later append must still rank ahead of an earlier one on timestamp ties.
+    out = [e for e in reversed(list(iter_entries())) if e.get("song") == song_name]
     if chat_id is not None:
         out = [e for e in out if e.get("chat_id") == chat_id]
     out.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
