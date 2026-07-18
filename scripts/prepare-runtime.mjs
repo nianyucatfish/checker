@@ -29,20 +29,34 @@ async function sha256(file) {
 }
 
 async function download(url, destination) {
-  const response = await fetch(url, {
-    redirect: "follow",
-    signal: AbortSignal.timeout(15 * 60_000),
-  });
-  if (!response.ok || !response.body) throw new Error(`download failed: HTTP ${response.status} ${url}`);
-  const output = createWriteStream(destination);
-  await new Promise((resolve, reject) => {
-    response.body.pipeTo(new WritableStream({
-      write(chunk) { return new Promise((ok, fail) => output.write(Buffer.from(chunk), (error) => error ? fail(error) : ok())); },
-      close() { output.end(resolve); },
-      abort(error) { output.destroy(); reject(error); },
-    })).catch(reject);
-    output.on("error", reject);
-  });
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        redirect: "follow",
+        signal: AbortSignal.timeout(15 * 60_000),
+      });
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      const output = createWriteStream(destination);
+      await new Promise((resolve, reject) => {
+        response.body.pipeTo(new WritableStream({
+          write(chunk) { return new Promise((ok, fail) => output.write(Buffer.from(chunk), (error) => error ? fail(error) : ok())); },
+          close() { output.end(resolve); },
+          abort(error) { output.destroy(); reject(error); },
+        })).catch(reject);
+        output.on("error", reject);
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      await rm(destination, { force: true });
+      if (attempt < 3) {
+        console.warn(`runtime download attempt ${attempt}/3 failed; retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
+      }
+    }
+  }
+  throw new Error(`download failed after 3 attempts: ${lastError instanceof Error ? lastError.message : String(lastError)} (${url})`);
 }
 
 async function pruneRuntime(runtimeRoot) {
