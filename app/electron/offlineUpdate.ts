@@ -8,7 +8,7 @@ import yauzl, { type Entry, type ZipFile } from "yauzl";
 
 export const UPDATE_MANIFEST_NAME = "update-manifest.json";
 export const UPDATE_PRODUCT = "Audio QC";
-export const UPDATE_SCHEMA = 1 as const;
+export const UPDATE_SCHEMA = 2 as const;
 export const UPDATE_STATUS = "unsigned-draft" as const;
 
 export type UpdatePlatform = "windows" | "macos";
@@ -42,14 +42,15 @@ export interface UpdateManifestFile {
   sha256: string;
 }
 
-/** `status` is metadata, not a signature. Version 1 intentionally accepts unsigned drafts only. */
+/** `status` is metadata, not a signature. Version 2 requires one named ZIP root. */
 export interface UpdateManifest {
-  schema: 1;
+  schema: 2;
   product: "Audio QC";
   version: string;
   platform: UpdatePlatform;
   arch: UpdateArch;
   status: "unsigned-draft";
+  archiveRoot: string;
   managedRoots: string[];
   files: UpdateManifestFile[];
 }
@@ -109,7 +110,7 @@ const FORBIDDEN_SEGMENTS = new Set([
 ]);
 const HASH_RE = /^[a-f0-9]{64}$/;
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const MANIFEST_KEYS = ["arch", "files", "managedRoots", "platform", "product", "schema", "status", "version"];
+const MANIFEST_KEYS = ["arch", "archiveRoot", "files", "managedRoots", "platform", "product", "schema", "status", "version"];
 
 /** Validate a portable ZIP path without normalizing attacker-controlled input. */
 export function validateArchivePath(input: string): string {
@@ -186,6 +187,9 @@ export function validateUpdateManifest(value: unknown, options: InspectUpdateOpt
   if (raw.arch !== (options.arch ?? process.arch)) throw new Error("Wrong update architecture");
   if (typeof raw.version !== "string") throw new Error("Invalid update version");
   parseVersion(raw.version);
+  if (typeof raw.archiveRoot !== "string") throw new Error("Invalid update archive root");
+  const archiveRoot = validateArchivePath(raw.archiveRoot);
+  if (archiveRoot.includes("/")) throw new Error("Update archive root must be top-level");
   if (options.currentVersion && compareVersions(raw.version, options.currentVersion) <= 0) {
     throw new Error("Update version must be newer than current version");
   }
@@ -227,7 +231,7 @@ export function validateUpdateManifest(value: unknown, options: InspectUpdateOpt
 
   return {
     schema: UPDATE_SCHEMA, product: UPDATE_PRODUCT, version: raw.version,
-    platform: raw.platform, arch: raw.arch, status: UPDATE_STATUS, managedRoots, files,
+    platform: raw.platform, arch: raw.arch, status: UPDATE_STATUS, archiveRoot, managedRoots, files,
   };
 }
 
@@ -297,6 +301,7 @@ export async function inspectAndStageOfflineUpdate(
     zip = await openZip(zipPath);
     const entries = new Map<string, Entry>();
     const foldedNames = new Set<string>();
+    let archiveRoot: string | undefined;
     let manifestEntry: Entry | undefined;
     let count = 0;
     let totalBytes = 0;
@@ -307,7 +312,15 @@ export async function inspectAndStageOfflineUpdate(
       if (count > limits.maxEntries) throw new Error("ZIP has too many entries");
       const directory = entry.fileName.endsWith("/");
       const rawName = directory ? entry.fileName.slice(0, -1) : entry.fileName;
-      const name = validateArchivePath(rawName);
+      const archiveName = validateArchivePath(rawName);
+      const [root, ...relativeParts] = archiveName.split("/");
+      if (archiveRoot && archiveRoot !== root) throw new Error("ZIP must contain exactly one top-level application directory");
+      archiveRoot = root;
+      if (relativeParts.length === 0) {
+        if (!directory) throw new Error("ZIP files must be inside the top-level application directory");
+        continue;
+      }
+      const name = validateArchivePath(relativeParts.join("/"));
       const folded = name.toLowerCase();
       if (foldedNames.has(folded)) throw new Error(`Duplicate or case-colliding ZIP entry: ${name}`);
       foldedNames.add(folded);
@@ -321,7 +334,7 @@ export async function inspectAndStageOfflineUpdate(
       if (folded === UPDATE_MANIFEST_NAME) manifestEntry = entry;
       else entries.set(name, entry);
     }
-    if (!manifestEntry) throw new Error("Update manifest is missing");
+    if (!archiveRoot || !manifestEntry) throw new Error("Update manifest is missing");
 
     let parsed: unknown;
     try {
@@ -331,6 +344,7 @@ export async function inspectAndStageOfflineUpdate(
       throw error;
     }
     const manifest = validateUpdateManifest(parsed, options);
+    if (manifest.archiveRoot !== archiveRoot) throw new Error("ZIP root does not match update manifest");
     if (entries.size !== manifest.files.length) throw new Error("ZIP file set does not exactly match manifest");
 
     for (const declared of manifest.files) {

@@ -22,6 +22,8 @@ electronLanguages:
   - en-US
   - zh-CN
 afterPack: ../scripts/after-pack-update-manifest.mjs
+# The Windows installer ZIP gets one user-friendly outer folder after electron-builder writes it.
+afterAllArtifactBuild: ../scripts/wrap-portable-zip.mjs
 # Signing mutates the macOS bundle after afterPack; refresh hashes before ZIP/DMG targets run.
 afterSign: ../scripts/after-pack-update-manifest.mjs
 asarUnpack:

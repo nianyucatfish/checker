@@ -149,12 +149,13 @@ export interface AgentEvent {
 }
 
 export interface OfflineUpdateManifest {
-  schema: 1;
+  schema: 2;
   product: "Audio QC";
   version: string;
   platform: "windows" | "macos";
   arch: "x64" | "arm64";
   status: "unsigned-draft";
+  archiveRoot: string;
   managedRoots: string[];
   files: Array<{ path: string; sha256: string }>;
 }

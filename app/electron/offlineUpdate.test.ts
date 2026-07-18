@@ -39,6 +39,7 @@ function manifestFor(payload: Buffer, overrides: Partial<UpdateManifest> = {}): 
     platform: "windows",
     arch: "x64",
     status: UPDATE_STATUS,
+    archiveRoot: "Audio QC 2.0.0",
     managedRoots: ["resources"],
     files: [{ path: "resources/app.asar", type: "file", mode: 0o644, sha256: hash(payload) }],
     ...overrides,
@@ -60,9 +61,10 @@ async function writeZip(root: string, entries: Record<string, string | Buffer>):
 async function makeUpdate(overrides: Partial<UpdateManifest> = {}, payload = Buffer.from("new app payload")) {
   const root = await temporaryRoot();
   const manifest = manifestFor(payload, overrides);
+  const prefix = `${manifest.archiveRoot}/`;
   const zipPath = await writeZip(root, {
-    "update-manifest.json": JSON.stringify(manifest),
-    "resources/app.asar": payload,
+    [`${prefix}update-manifest.json`]: JSON.stringify(manifest),
+    [`${prefix}resources/app.asar`]: payload,
   });
   return { root, zipPath, manifest };
 }
@@ -87,15 +89,31 @@ describe("inspectAndStageOfflineUpdate", () => {
 
   it("rejects a missing manifest", async () => {
     const root = await temporaryRoot();
-    const zipPath = await writeZip(root, { "resources/app.asar": "payload" });
+    const zipPath = await writeZip(root, { "Audio QC 2.0.0/resources/app.asar": "payload" });
     await expect(inspectAndStageOfflineUpdate(zipPath, path.join(root, "staging"), target)).rejects.toThrow("manifest is missing");
+  });
+
+  it("rejects a legacy flat ZIP and a mismatched outer directory", async () => {
+    const update = await makeUpdate();
+    const flatZip = await writeZip(update.root, {
+      "update-manifest.json": JSON.stringify(update.manifest),
+      "resources/app.asar": "new app payload",
+    });
+    await expect(inspectAndStageOfflineUpdate(flatZip, path.join(update.root, "flat-stage"), target)).rejects.toThrow("top-level application directory");
+
+    const wrongRootZip = await writeZip(update.root, {
+      "Other Folder/update-manifest.json": JSON.stringify(update.manifest),
+      "Other Folder/resources/app.asar": "new app payload",
+    });
+    await expect(inspectAndStageOfflineUpdate(wrongRootZip, path.join(update.root, "wrong-root-stage"), target)).rejects.toThrow("root does not match");
   });
 
   it("allows a production-sized manifest below the bounded limit", async () => {
     const update = await makeUpdate();
+    const prefix = `${update.manifest.archiveRoot}/`;
     const zipPath = await writeZip(update.root, {
-      "update-manifest.json": JSON.stringify(update.manifest).padEnd(1_200_000, " "),
-      "resources/app.asar": "new app payload",
+      [`${prefix}update-manifest.json`]: JSON.stringify(update.manifest).padEnd(1_200_000, " "),
+      [`${prefix}resources/app.asar`]: "new app payload",
     });
     await expect(inspectAndStageOfflineUpdate(zipPath, path.join(update.root, "large-manifest"), {
       ...target,
@@ -120,10 +138,11 @@ describe("inspectAndStageOfflineUpdate", () => {
 
   it("rejects an undeclared extra file and forbidden persistent paths", async () => {
     const update = await makeUpdate();
+    const prefix = `${update.manifest.archiveRoot}/`;
     const zipPath = await writeZip(update.root, {
-      "update-manifest.json": JSON.stringify(update.manifest),
-      "resources/app.asar": "new app payload",
-      "extra.txt": "surprise",
+      [`${prefix}update-manifest.json`]: JSON.stringify(update.manifest),
+      [`${prefix}resources/app.asar`]: "new app payload",
+      [`${prefix}extra.txt`]: "surprise",
     });
     await expect(inspectAndStageOfflineUpdate(zipPath, path.join(update.root, "extra-stage"), target)).rejects.toThrow("file set");
     for (const forbidden of ["data/config.toml", "cache/item", "config.toml", "resources/logs/output.txt"]) {

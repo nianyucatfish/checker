@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readlink, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readlink, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const MANIFEST_NAME = "update-manifest.json";
@@ -85,13 +85,15 @@ export async function generateUpdateManifest({ appOutDir, version, platform, arc
     throw new Error(`macOS appOutDir must contain exactly ${PRODUCT}.app before writing the manifest`);
   }
 
+  const archiveRoot = platform === "windows" ? `${PRODUCT} ${version}` : `${PRODUCT}.app`;
   const manifest = {
-    schema: 1,
+    schema: 2,
     product: PRODUCT,
     version,
     platform,
     arch,
     status: "unsigned-draft",
+    archiveRoot,
     managedRoots,
     files,
   };
