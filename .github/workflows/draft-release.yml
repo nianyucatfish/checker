@@ -190,16 +190,14 @@ jobs:
           npm exec vite build
           # Build the update ZIP before the installer DMG. On macos-15-intel, hdiutil can
           # transiently leave the DMG device busy; retry only the installer build.
-          common=(--config electron-builder.yml --config.extraMetadata.version="$RELEASE_VERSION" --mac --${{ matrix.arch }} --publish never)
+          signing=(--config.mac.notarize=false)
           if [[ "$SIGNED_BUILD" == "true" ]]; then
-            common+=(--config.mac.notarize=true)
-          else
-            common+=(--config.mac.notarize=false)
+            signing=(--config.mac.notarize=true)
           fi
-          npm exec electron-builder -- "${common[@]}" zip
+          npm exec electron-builder -- --config electron-builder.yml --config.extraMetadata.version="$RELEASE_VERSION" --mac zip --${{ matrix.arch }} --publish never "${signing[@]}"
           for attempt in 1 2 3; do
             rm -f "release/Audio QC-$RELEASE_VERSION-macos-${{ matrix.arch }}-"*.dmg{,.blockmap}
-            if npm exec electron-builder -- "${common[@]}" dmg; then
+            if npm exec electron-builder -- --config electron-builder.yml --config.extraMetadata.version="$RELEASE_VERSION" --mac dmg --${{ matrix.arch }} --publish never "${signing[@]}"; then
               break
             fi
             [[ "$attempt" == 3 ]] && exit 1
