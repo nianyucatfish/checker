@@ -83,4 +83,4 @@ GA 浏览器插件位于 [plugin/browser-bridge](plugin/browser-bridge/README.md
 
 ### macOS 首次打开说明
 
-DMG 内附 [首次打开说明.txt](packaging/macos/首次打开说明.txt)，从安装应用、打开终端开始介绍 macOS 拦截时的处理步骤及常见错误。该说明是普通 UTF-8 文本，不含可执行脚本。仅对来自可信渠道的安装包使用说明中的操作；正常启动时无需处理。
+DMG 内附 [首次打开说明.txt](packaging/macos/首次打开说明.txt)，用三个步骤说明打开终端、执行命令和启动应用。该说明是普通 UTF-8 文本，不含可执行脚本。仅对来自可信渠道的安装包使用说明中的操作；正常启动时无需处理。

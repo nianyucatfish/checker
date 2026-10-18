@@ -63,7 +63,7 @@ try {
   }
   const guidePath = path.join(mount, "首次打开说明.txt");
   const guide = await readFile(guidePath, "utf8");
-  if (!guide.includes('xattr -dr com.apple.quarantine "/Applications/Audio QC.app"') || !guide.includes("Spotlight")) {
+  if (!guide.includes('xattr -dr com.apple.quarantine "/Applications/Audio QC.app"') || !guide.includes("终端")) {
     throw new Error("DMG first-launch guide is missing installation instructions");
   }
   await detachDmg(mount, run);
