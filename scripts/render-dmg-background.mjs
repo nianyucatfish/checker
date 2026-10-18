@@ -22,7 +22,11 @@ function run(command, args) {
   });
 }
 
-await run("qlmanage", ["-t", "-s", "540", "-o", assets, source]);
-await run("swift", [path.join(repo, "scripts", "crop-dmg-background.swift"), path.join(assets, "dmg-background.svg.png"), destination]);
+// dmg-builder combines the standard and @2x PNG into a multi-resolution TIFF.
+for (const scale of [1, 2]) {
+  const output = scale === 1 ? destination : path.join(assets, "dmg-background@2x.png");
+  await run("qlmanage", ["-t", "-s", String(540 * scale), "-o", assets, source]);
+  await run("swift", [path.join(repo, "scripts", "crop-dmg-background.swift"), path.join(assets, "dmg-background.svg.png"), output, String(scale)]);
+}
 await rm(path.join(assets, "dmg-background.svg.png"), { force: true });
-console.log(`Rendered DMG background in ${assets}; app icons use the checked-in PNG/ICNS/ICO assets.`);
+console.log(`Rendered standard and Retina DMG backgrounds in ${assets}`);
