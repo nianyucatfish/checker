@@ -1,5 +1,5 @@
 import { detachDmg } from "./detach-dmg.mjs";
-import { lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { readFile, lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,10 +61,11 @@ try {
   if (!applications.isSymbolicLink() && !applications.isFile()) {
     throw new Error("DMG Applications alias is missing");
   }
-  const helper = path.join(mount, "首次启动辅助.command");
-  const helperInfo = await lstat(helper);
-  if (!helperInfo.isFile() || !(helperInfo.mode & 0o111)) throw new Error("DMG startup helper missing or not executable");
-  await run("/bin/bash", ["-n", helper]);
+  const guidePath = path.join(mount, "首次打开说明.txt");
+  const guide = await readFile(guidePath, "utf8");
+  if (!guide.includes('xattr -dr com.apple.quarantine "/Applications/Audio QC.app"') || !guide.includes("Spotlight")) {
+    throw new Error("DMG first-launch guide is missing installation instructions");
+  }
   await detachDmg(mount, run);
   mounted = false;
 

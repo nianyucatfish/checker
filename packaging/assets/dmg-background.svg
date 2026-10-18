@@ -5,8 +5,8 @@
     <path d="M225 150h90m-12-12 12 12-12 12" stroke="#a3a5aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
     <path d="M45 224h450" stroke="#e6e6e8"/>
     <text x="225" y="270" font-size="12" fill="#62656c">首次启动被 macOS 拦截？</text>
-    <text x="225" y="293" font-size="11" fill="#74777e">安装后，可双击左侧辅助脚本。</text>
-    <text x="225" y="312" font-size="10" fill="#74777e">仅移除 Audio QC 的下载隔离标记。</text>
-    <text x="270" y="359" text-anchor="middle" font-size="10" fill="#74777e">脚本若也被拦截，请参阅下载页的手动操作说明。</text>
+    <text x="225" y="293" font-size="11" fill="#74777e">双击左侧说明，按步骤操作。</text>
+    <text x="225" y="312" font-size="10" fill="#74777e">包含打开终端和解除限制的方法。</text>
+    <text x="270" y="359" text-anchor="middle" font-size="10" fill="#74777e">仅对来自可信渠道的 Audio QC 安装包进行操作。</text>
   </g>
 </svg>

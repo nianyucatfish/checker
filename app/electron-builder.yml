@@ -76,4 +76,4 @@ dmg:
     - x: 115
       y: 280
       type: file
-      path: ../packaging/macos/首次启动辅助.command
+      path: ../packaging/macos/首次打开说明.txt
