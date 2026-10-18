@@ -1,0 +1,9 @@
+name: checker
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r sidecar/requirements-dev.txt

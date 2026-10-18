@@ -56,6 +56,15 @@ logger = logging.getLogger("sidecar.mcp")
 
 mcp = FastMCP("checker-sidecar")
 
+from sidecar.advanced_tools import code_run, web_scan, web_execute_js, file_read, file_write, file_patch
+
+mcp.tool()(code_run)
+mcp.tool()(web_scan)
+mcp.tool()(web_execute_js)
+mcp.tool()(file_read)
+mcp.tool()(file_write)
+mcp.tool()(file_patch)
+
 
 # ============================================================
 #  system.* (内部 — Electron main 启动 / 切工作区时调)
@@ -74,10 +83,10 @@ def system_set_workspace(root: str) -> dict[str, Any]:
 
 @mcp.tool()
 def state_tree_read(song: str) -> dict[str, Any]:
-    """Read state markdown at cache/state_tree/<song>.md. **Auto-creates initial md (15 态全 `[ ]`) if missing** —— 进歌第一件事就调它,既看进度又确保文件就位。Scope=song,同一首歌的所有 chat 共享一份 md。
+    """Read state_tree/<song>/progress.md; auto-init 15 态 or migrate legacy <song>.md. 每次开始检查某首歌先读进度;不同歌独立,同歌跨会话共享,不依赖 start_qc。
     Returns {path, text, created} (created=true 表示这次首建)."""
     try:
-        existed = state_tree.md_path(song).exists()
+        existed = state_tree.md_path(song).exists() or state_tree.legacy_md_path(song).is_file()
         state_tree.init_state_tree(song)  # 幂等;已存在不动
         text = state_tree.read_state_tree(song)
     except state_tree.StateTreeError as e:
@@ -198,7 +207,7 @@ def _find_song_root(file_or_dir: str, workspace_root: str) -> str:
 
 @mcp.tool()
 def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[str, Any]:
-    """Fetch song meta (28 fields) for 1.1 完整性 check. PII 字段(人名/链接)已 sidecar 打码,写消息直接用打码版即可。
+    """Fetch song meta (28 fields) for 1.1 完整性 check. 人名已 sidecar 打码,网盘链接完整返回供下载和核对。
     Scope: only songs in current reviewer's range (身份隐藏 boundary).
     Key fields for 1.1: missing_required_fields, invalid_format_fields, derived.backing_count.
     歌名撞车(同 reviewer 下同 song_name 多行) → {ok: false, code: "AMBIGUOUS_SONG", candidates: [{row_index, song_name, owner, original_singer}]}, 用 candidates 里的 row_index 再调一次。

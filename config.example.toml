@@ -17,6 +17,9 @@
 # 腾讯文档(分工表读写)
 # ============================================================
 [tencent_docs]
+# 用户版填写服务器地址与管理员下发的表格密钥，无需腾讯开发者凭证。
+sheet_server_url = "https://118.25.191.236/api/checker/v1"
+sheet_key = ""
 # 从 https://docs.qq.com/open 开发者后台拿到的"个人开发者直接 token"
 # 三个字段对应 API 请求头 Client-Id / Access-Token / Open-Id
 client_id = ""

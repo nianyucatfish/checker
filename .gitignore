@@ -48,8 +48,11 @@ app/tsconfig.*.tsbuildinfo
 *.log
 
 # 运行时 / 临时
+local_extensions/
+local_data/
 cache/
 tmp/
+temp/
 
 # 本地参考资料(不进 git)
 doc/v2_验收清单.md

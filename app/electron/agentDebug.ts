@@ -31,11 +31,11 @@ export function logTurn(entry: Record<string, unknown>) {
 }
 
 // 调试会话日志:风格学 GA llmcore.py:_write_llm_log(=== Prompt === / === Response === 块),
-// 但**每轮一个文件**——因为我们切歌=硬压清空、turn 归零,塞一个文件会乱。开关默认从环境变量
+// 每轮一个文件,便于单独检查当轮上下文。开关默认从环境变量
 // AUDIO_QC_DUMP_LLM=1 取初值,运行期经开发者菜单 setDumpLlmContext 热切换。开启后每轮 LLM 调用:
 //   prompt 前写 → tmp/agent_contexts/<chatId>_<song>_t<NNN>.txt(完整 messages + 工具清单)
 //   response 后 append 进同一文件(原始返回 + tool_calls + finish/usage)
-// 文件名带 song(切歌 turn 归零,避免两首歌 t001 互相覆盖);phase A 用 "phaseA"。
+// 文件名带最近定位的 song 方便检索;未定位歌曲时使用 "chat"。
 let dumpLlmContextOn = process.env.AUDIO_QC_DUMP_LLM === "1";
 export function setDumpLlmContext(on: boolean): void {
   dumpLlmContextOn = !!on;
@@ -64,7 +64,7 @@ function _ensureDumpDir(): boolean {
 
 // 本轮日志文件路径:<chatId>_<song>_t<NNN>.txt。song 里的非法文件名字符替成 _。
 function _turnFile(chatId: string, song: string | null, turn: number): string {
-  const songToken = (song || "phaseA").replace(/[\\/:*?"<>|]/g, "_");
+  const songToken = (song || "chat").replace(/[\\/:*?"<>|]/g, "_");
   return path.join(dumpDir, `${chatId}_${songToken}_t${String(turn).padStart(3, "0")}.txt`);
 }
 

@@ -140,7 +140,7 @@ export interface AgentEvent {
     | "assistant_text"
     | "tool_use"
     | "tool_result"
-    | "phase_change"
+    | "song_focus"
     | "turn_done"
     | "awaiting_human"
     | "compacted"
@@ -179,7 +179,6 @@ export interface OfflineUpdateInspection {
 export interface SessionInfo {
   id: string;
   title: string;
-  phase: string | null;
   song: string | null;
   updated_at: number;
 }
@@ -241,10 +240,11 @@ declare global {
       onMixTracksChanged: (cb: (paths: string[]) => void) => () => void;
       onMixVisibilityChanged: (cb: (visible: boolean) => void) => () => void;
       agentSend: (chatId: string, text: string) => Promise<void>;
+      agentSetAdvancedTools: (chatId: string, enabled: boolean) => Promise<boolean>;
       agentStartQc: (chatId: string, song: string) => Promise<void>;
       agentCancel: (chatId: string) => Promise<void>;
       agentHydrate: (chatId: string) => Promise<{
-        phase: "A" | "B";
+        advancedTools: boolean;
         song: string | null;
         turns: HydratedTurn[];
       }>;
@@ -267,6 +267,10 @@ declare global {
         result: { ok: boolean; code?: string; message?: string },
       ) => void;
       agentGetDumpLlm: () => Promise<boolean>;
+      agentPullPrompts: () => Promise<{ version: string; message: string }>;
+      agentGetPersonalEnabled: () => Promise<boolean>;
+      agentGetTaskPrompt: () => Promise<string>;
+      agentSetTaskPrompt: (text: string) => Promise<string>;
       agentSetDumpLlm: (on: boolean) => Promise<void>;
     };
   }
@@ -335,6 +339,9 @@ export async function saveLlmConfig(body: {
 }
 
 export interface TencentDocsConfig {
+  sheet_server_url: string;
+  sheet_key_set: boolean;
+  sheet_key: string;
   client_id: string;
   access_token: string;
   open_id: string;
@@ -352,6 +359,8 @@ export async function getTencentDocsConfig(): Promise<TencentDocsConfig> {
 }
 
 export async function saveTencentDocsConfig(body: {
+  sheet_server_url?: string;
+  sheet_key?: string;
   client_id?: string;
   access_token?: string;
   open_id?: string;
@@ -535,6 +544,8 @@ export interface DevSheetStatus {
 }
 
 export interface DevRefreshResult {
+  server_updated_at?: string | null;
+  server_sync_ok?: boolean | null;
   rows: number;
   elapsed_ms: number;
   fetched_at: string | null;
@@ -566,4 +577,13 @@ export async function devListMyPending(): Promise<DevPendingResult> {
 
 export async function devListMyAccepted(): Promise<DevPendingResult> {
   return getJson("/dev/list_my_accepted");
+}
+
+export interface SheetView {
+  headers: string[];
+  reviewer_set: boolean;
+  items: { row_index: number; cells: string[]; mine: boolean; accepted: boolean }[];
+}
+export async function getSheetView(force = false): Promise<SheetView> {
+  return getJson(`/sheet/view?force=${force}`);
 }

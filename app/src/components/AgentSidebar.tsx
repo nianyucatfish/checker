@@ -13,6 +13,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AgentEvent, HydratedTurn, SessionInfo, getSheetMode } from "../api";
 import { appConfirm } from "../utils";
+import { toolActionLabel } from "../lib/toolLabels";
 
 // 通过 IPC 接 Electron main 的 AgentRunner;事件 → Turn 流水。
 // chatId 持久化在 localStorage,mount 时调 agentHydrate 把 db 里的历史 turns 拉回来。
@@ -53,44 +54,6 @@ function compact(value: unknown, max = 200): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
-// 工具参数压成一行 "k=v, k=v"。空对象 → 空字符串(让 "name()" 而不是 "name({})")
-function fmtArgs(args: unknown, max = 100): string {
-  if (args == null) return "";
-  if (typeof args !== "object") return compact(args, max);
-  const entries = Object.entries(args as Record<string, unknown>);
-  if (entries.length === 0) return "";
-  const parts = entries.map(([k, v]) => {
-    const vs = typeof v === "string" ? `"${v}"` : compact(v, 40);
-    return `${k}=${vs}`;
-  });
-  return compact(parts.join(", "), max);
-}
-
-// 工具结果摘要:常见结构(list/dict)给出形状信息,长 string 截断。
-function fmtResult(result: unknown, max = 160): string {
-  if (result == null) return "";
-  if (typeof result === "string") return compact(result, max);
-  if (typeof result !== "object") return String(result);
-  const r = result as Record<string, unknown>;
-  // 典型字段: ok / songs / errors / path / text / by_code
-  const ok = "ok" in r ? (r.ok ? "ok" : "fail") : null;
-  const hints: string[] = [];
-  if (ok) hints.push(ok);
-  for (const k of ["code", "message", "path", "song_name"]) {
-    if (typeof r[k] === "string" && r[k]) hints.push(`${k}=${compact(r[k], 50)}`);
-  }
-  for (const k of ["songs", "errors", "entries", "items"]) {
-    if (Array.isArray(r[k])) hints.push(`${k}: ${(r[k] as unknown[]).length} 项`);
-  }
-  if ("by_code" in r && typeof r.by_code === "object" && r.by_code) {
-    const codes = Object.entries(r.by_code as Record<string, number>)
-      .map(([k, v]) => `${k}=${v}`).join(", ");
-    if (codes) hints.push(`by_code{${codes}}`);
-  }
-  if (hints.length > 0) return compact(hints.join(" · "), max);
-  return compact(r, max);
-}
-
 function HumanCheckCard({
   turn,
   onResolve,
@@ -102,6 +65,8 @@ function HumanCheckCard({
   const [answers, setAnswers] = useState<HumanCheckAnswer[]>(() =>
     turn.decisions.map(() => ({ choice: "", note: "" })),
   );
+  // 取消只回传已提交的答案;当前页草稿与返回上一题后的未提交修改不计入。
+  const [submittedAnswers, setSubmittedAnswers] = useState<HumanCheckAnswer[]>([]);
   const [page, setPage] = useState(0);
   // useRef 必须在任何 early return 之前调,否则 resolved 后 hook 数变了 React 会崩。
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -161,7 +126,10 @@ function HumanCheckCard({
   const advanceOrSubmit = (next: HumanCheckAnswer) => {
     const nextAll = answers.map((a, i) => (i === page ? next : a));
     setAnswers(nextAll);
-    if (isLast) onResolve({ answers: nextAll });
+    const nextSubmitted = submittedAnswers.slice();
+    nextSubmitted[page] = { ...next };
+    setSubmittedAnswers(nextSubmitted);
+    if (isLast) onResolve({ answers: nextSubmitted });
     else setPage(page + 1);
   };
 
@@ -241,7 +209,7 @@ function HumanCheckCard({
           ← 上一题
         </button>
         <button
-          onClick={() => onResolve({ answers, cancelled: true })}
+          onClick={() => onResolve({ answers: submittedAnswers, cancelled: true })}
           className="text-xs px-2 py-1 rounded text-fg-subtle hover:bg-bg-hover"
         >
           ⛔ 全部取消
@@ -288,8 +256,13 @@ export function AgentSidebar() {
 
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
+  const [advancedTools, setAdvancedTools] = useState(false);
+  const [advancedReady, setAdvancedReady] = useState(false);
+  const [advancedUpdating, setAdvancedUpdating] = useState(false);
   const [sending, setSending] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
+  const compositionEndedAtRef = useRef(0);
   // cancel 已发出但 turn_done 还没回来的窗口:按钮 disable + 灰掉,避免双击
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -352,6 +325,8 @@ export function AgentSidebar() {
   // 切换 chatId(含首次 mount)→ 清 UI 瞬态状态 + 从 db hydrate 该会话
   useEffect(() => {
     setTurns([]);
+    setAdvancedReady(false);
+    setAdvancedUpdating(false);
     setSong(null);
     setError(null);
     setSending(false);
@@ -362,6 +337,8 @@ export function AgentSidebar() {
       try {
         const h = await window.electronAPI.agentHydrate(chatId);
         if (cancelled) return;
+        setAdvancedTools(h.advancedTools);
+        setAdvancedReady(true);
         if (h.song) setSong(h.song);
         // HydratedTurn shape 与本组件 Turn 部分对齐;tool / user / assistant / phase 直接复用
         const restored: Turn[] = (h.turns as HydratedTurn[]).map((t) => {
@@ -413,10 +390,10 @@ export function AgentSidebar() {
           });
           break;
         }
-        case "phase_change": {
+        case "song_focus": {
           const d = ev.data as { song: string };
           setSong(d.song);
-          setTurns((t) => [...t, { kind: "phase", label: `进入质检流程 · ${d.song}` }]);
+          setTurns((t) => [...t, { kind: "phase", label: `定位歌曲 · ${d.song}` }]);
           break;
         }
         case "turn_done":
@@ -424,11 +401,8 @@ export function AgentSidebar() {
           setCancelling(false);
           break;
         case "compacted": {
-          const d = ev.data as { reason: string; dropped?: number; from?: string; to?: string };
-          const label =
-            d.reason === "song_switch"
-              ? `切歌硬压缩 · ${d.from ?? "?"} → ${d.to ?? "?"}`
-              : `软压缩 · 丢弃 ${d.dropped ?? 0} 条历史消息`;
+          const d = ev.data as { popped?: number };
+          const label = `上下文压缩 · 丢弃 ${d.popped ?? 0} 条历史消息`;
           setTurns((t) => [...t, { kind: "phase", label }]);
           break;
         }
@@ -506,6 +480,7 @@ export function AgentSidebar() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (composingRef.current) return;
     const text = input.trim();
     if (!text || sending) return;
     // 首发自动标题:本会话还没 user 消息 + 标题是默认值 → 用前 24 字命名
@@ -539,7 +514,7 @@ export function AgentSidebar() {
   }
 
   // 中断当前对话:设 cancelling flag,按钮立刻灰掉防双击;实际状态恢复等 turn_done。
-  // 后端 AgentRunner.cancel 把 cancelled=true,下一次 runLoop 循环检查 + 唤醒挂起的 human_check。
+  // 后端取消当前请求/工具等待并唤醒 human_check,清理历史后发 turn_done。
   function onCancel() {
     if (!sending || cancelling) return;
     setCancelling(true);
@@ -850,36 +825,38 @@ export function AgentSidebar() {
               // tool — 默认折叠成一行,点 chevron 展开看完整 args/result
               const expanded = expandedTools.has(i);
               return (
-                <div key={i} className="text-xs text-fg-muted font-mono leading-5">
-                  <button
-                    onClick={() => toggleTool(i)}
-                    className="flex items-center gap-1 w-full text-left hover:text-fg"
-                  >
-                    <ChevronRight
-                      size={12}
-                      className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
-                    />
-                    <span className="truncate">
-                      🔧 {m.name}({fmtArgs(m.args, 80)})
-                      {m.result !== undefined && (
-                        <span className="text-fg-subtle"> · {fmtResult(m.result, 80)}</span>
-                      )}
-                    </span>
-                  </button>
-                  {expanded && (
-                    <div className="pl-4 mt-1 space-y-1 selectable">
-                      <pre className="whitespace-pre-wrap break-all bg-bg-sidebar/60 rounded p-2 text-[11px]">
-                        {JSON.stringify(m.args, null, 2)}
-                      </pre>
-                      {m.result !== undefined && (
-                        <pre className="whitespace-pre-wrap break-all bg-bg-sidebar/60 rounded p-2 text-[11px] text-fg-subtle">
-                          {typeof m.result === "string"
-                            ? m.result
-                            : JSON.stringify(m.result, null, 2)}
+                <div key={i} className="agent-assistant-row">
+                  <div className="size-7 shrink-0" aria-hidden="true" />
+                  <div className="min-w-0 flex-1 text-xs text-fg-muted leading-5">
+                    <button
+                      onClick={() => toggleTool(i)}
+                      aria-expanded={expanded}
+                      className="flex items-center gap-1 w-full text-left hover:text-fg"
+                    >
+                      <ChevronRight
+                        size={12}
+                        className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+                      />
+                      <span className="min-w-0 truncate">
+                        🔧 {toolActionLabel(m.name, m.args)}
+                      </span>
+                    </button>
+                    {expanded && (
+                      <div className="pl-4 mt-1 space-y-1 selectable">
+                        <div className="font-mono text-fg-subtle">{m.name}</div>
+                        <pre className="whitespace-pre-wrap break-all bg-bg-sidebar/60 rounded p-2 text-[11px]">
+                          {JSON.stringify(m.args, null, 2)}
                         </pre>
-                      )}
-                    </div>
-                  )}
+                        {m.result !== undefined && (
+                          <pre className="whitespace-pre-wrap break-all bg-bg-sidebar/60 rounded p-2 text-[11px] text-fg-subtle">
+                            {typeof m.result === "string"
+                              ? m.result
+                              : JSON.stringify(m.result, null, 2)}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -904,19 +881,53 @@ export function AgentSidebar() {
             ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+              compositionEndedAtRef.current = Date.now();
+            }}
             placeholder="输入消息..."
             className="agent-input"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
+                if (composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+                // Some IMEs report compositionend just before the Enter keydown
+                // that confirms a candidate. Swallow that Enter, too.
+                if (Date.now() - compositionEndedAtRef.current < 150) {
+                  e.preventDefault();
+                  return;
+                }
                 e.preventDefault();
                 void onSubmit(e);
               }
             }}
           />
           <div className="agent-composer-footer">
-            <div className="text-xs text-fg-subtle">
-              {song ? "Phase B" : "Phase A"}
-            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={advancedTools}
+              disabled={!advancedReady || advancedUpdating}
+              className={`inline-flex items-center gap-2 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed ${advancedTools ? "text-fg" : "text-fg-muted hover:text-fg"}`}
+              title="应用全局保存，切换对话和重启后保留；下一次模型请求生效。关闭后不再启动高级调用，正在执行的任务可用停止按钮中断。"
+              onClick={async () => {
+                const targetChat = chatId;
+                setAdvancedUpdating(true);
+                try {
+                  const enabled = await window.electronAPI.agentSetAdvancedTools(targetChat, !advancedTools);
+                  if (chatIdRef.current === targetChat) setAdvancedTools(enabled);
+                } catch (e) {
+                  if (chatIdRef.current === targetChat) setError(String(e));
+                } finally {
+                  if (chatIdRef.current === targetChat) setAdvancedUpdating(false);
+                }
+              }}
+            >
+              <span>解锁全部能力</span>
+              <span className={`relative inline-block w-7 h-4 rounded-full transition-colors shrink-0 ${advancedTools ? "bg-accent" : "bg-fg-subtle"}`}>
+                <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white shadow-sm border border-black/10 transition-transform ${advancedTools ? "translate-x-3" : "translate-x-0"}`} />
+              </span>
+            </button>
             {sending ? (
               <button
                 type="button"

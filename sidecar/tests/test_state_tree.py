@@ -28,6 +28,33 @@ def test_init_creates_with_15_states(tmp_cache):
     assert text.count("- [x] ") == 0
     assert "- [ ] 1.1 分工表完整性" in text
     assert "- [ ] 3 收尾:上传网盘 + 填链接 + 标记验收" in text
+    assert p == tmp_cache / "state_tree" / "歌手_望春风_扒谱者" / "progress.md"
+
+
+def test_migrates_old_file_without_resetting_progress(tmp_cache):
+    song = "歌_A_人"
+    legacy = tmp_cache / "state_tree" / f"{song}.md"
+    legacy.parent.mkdir(parents=True)
+    text = state_tree._initial_content(song).replace(
+        "- [ ] 1.3 各目录文件齐全度", "- [x] 1.3 各目录文件齐全度 — 已核对"
+    )
+    legacy.write_text(text, encoding="utf-8")
+    progress = state_tree.init_state_tree(song)
+    assert progress.read_text(encoding="utf-8") == text
+    assert legacy.read_text(encoding="utf-8") == text
+    state_tree.update_state_tree(song, "1.4", done=True)
+    state_tree.init_state_tree(song)
+    assert "- [x] 1.4" in state_tree.read_state_tree(song)
+    assert "- [ ] 1.4" in legacy.read_text(encoding="utf-8")
+
+
+def test_multiple_songs_have_independent_progress(tmp_cache):
+    state_tree.init_state_tree("歌_A_人")
+    state_tree.init_state_tree("歌_B_人")
+    state_tree.update_state_tree("歌_A_人", "1.3", done=True)
+    state_tree.update_state_tree("歌_B_人", "1.3", done=False, note="缺 BG")
+    assert "- [x] 1.3" in state_tree.read_state_tree("歌_A_人")
+    assert "- [ ] 1.3 各目录文件齐全度 — 缺 BG" in state_tree.read_state_tree("歌_B_人")
 
 
 def test_init_idempotent(tmp_cache):

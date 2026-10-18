@@ -24,11 +24,11 @@ import markdown
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 按运行时注入顺序排列:phase_a 是闲聊阶段,phase_b_header 是工作流头,后接完整手册
+# 按运行时注入顺序排列:统一会话指令 + 完整手册 + 高级工具规则
 PROMPT_FILES = [
-    ("doc/prompts/phase_a.md", "Phase A — 未进入质检流程"),
-    ("doc/prompts/phase_b_header.md", "Phase B header — 工作流头部"),
+    ("doc/prompts/agent_system.md", "Agent 会话指令"),
     ("doc/prompts/agent_workflow.md", "Agent 工作手册(完整 SOP)"),
+    ("doc/prompts/advanced_tools.md", "高级工具规则"),
 ]
 
 CHECKBOX_UNCHECKED = re.compile(r"^(\s*[-*]\s+)\[ \]", re.MULTILINE)

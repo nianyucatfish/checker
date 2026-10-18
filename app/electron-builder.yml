@@ -29,6 +29,8 @@ afterSign: ../scripts/after-pack-update-manifest.mjs
 asarUnpack:
   - node_modules/better-sqlite3/**
 extraResources:
+  - from: ../packaging/assets/icon.png
+    to: icon.png
   - from: ../packaging/staging/python-runtime
     to: python-runtime
   - from: ../packaging/staging/backend
@@ -36,16 +38,15 @@ extraResources:
   - from: ../packaging/staging/prompts
     to: prompts
 win:
-  # Draft 便携包暂不改写 PE 图标/签名，避免构建机依赖 winCodeSign。
-  # 正式配置 Windows 证书和 icon.ico 后再开启。
-  signAndEditExecutable: false
+  icon: ../packaging/assets/icon.ico
+  signAndEditExecutable: true
   target:
     - target: zip
       arch:
         - x64
   artifactName: ${productName}-${version}-windows-${arch}-portable.${ext}
 mac:
-  icon: ../packaging/assets/icon.png
+  icon: ../packaging/assets/icon.icns
   target:
     # Keep DMG first: it is the primary installer; ZIP is the offline-update artifact.
     - target: dmg

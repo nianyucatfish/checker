@@ -31,18 +31,19 @@ function newId(prefix: string): string {
 //  init / schema
 // ============================================================
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS session (
   id                      TEXT PRIMARY KEY,
   title                   TEXT NOT NULL,
   model                   TEXT,
-  phase                   TEXT,      -- "A" | "B"
-  song                    TEXT,      -- Phase B 锁定的 song folder
-  -- 软压/硬压发生时写入,LLM 上下文的"活跃起点":turn_index < live_from 的
+  phase                   TEXT,      -- 旧版兼容列,新会话不再分阶段
+  song                    TEXT,      -- 最近定位的歌曲,仅供展示
+  advanced_tools          INTEGER NOT NULL DEFAULT 0,
+  -- 上下文超出容量裁剪时写入,LLM 上下文的"活跃起点":turn_index < live_from 的
   -- message 只贡献 summary 到 trail,不进 messages[];0 = 全量,从未压过。
-  -- 保证 reload 后 LLM messages 跟关闭前一致(否则切歌硬压后会"复活"前一首)。
+  -- 保证 reload 后 LLM messages 跟关闭前一致;歌曲定位不修改此值。
   live_from_turn_index    INTEGER NOT NULL DEFAULT 0,
   created_at              INTEGER NOT NULL,
   updated_at              INTEGER NOT NULL
@@ -112,6 +113,10 @@ export function initDb(dataDir: string): Database.Database {
       );
       db.pragma(`user_version = 3`);
     }
+    if (ver < 4) {
+      db.exec("ALTER TABLE session ADD COLUMN advanced_tools INTEGER NOT NULL DEFAULT 0");
+      db.pragma("user_version = 4");
+    }
     db.exec(SCHEMA_SQL); // CREATE IF NOT EXISTS 走过场,顺手补漏 index
   }
   return db;
@@ -139,6 +144,7 @@ export interface SessionRow {
   model: string | null;
   phase: string | null;
   song: string | null;
+  advanced_tools: number;
   live_from_turn_index: number;
   created_at: number;
   updated_at: number;
@@ -179,14 +185,18 @@ export function renameSession(id: string, title: string): void {
     .run(title, nowMs(), id);
 }
 
-/** 把 chat 的 phase / song 同步进 db,reload 后能据此重建 baseSystem。 */
-export function updateSessionPhase(id: string, phase: string | null, song: string | null): void {
-  getDb()
-    .prepare("UPDATE session SET phase = ?, song = ?, updated_at = ? WHERE id = ?")
-    .run(phase, song, nowMs(), id);
+export function updateSessionAdvancedTools(id: string, enabled: boolean): void {
+  getDb().prepare("UPDATE session SET advanced_tools = ? WHERE id = ?").run(enabled ? 1 : 0, id);
 }
 
-/** 软压/硬压时调:把 LLM messages 的"活跃起点 turn_index"持久化,reload 时
+/** 最近定位的歌曲只供 UI 展示;清除旧阶段值,不改变会话上下文起点。 */
+export function updateSessionSong(id: string, song: string | null): void {
+  getDb()
+    .prepare("UPDATE session SET phase = NULL, song = ?, updated_at = ? WHERE id = ?")
+    .run(song, nowMs(), id);
+}
+
+/** 按上下文容量裁剪时调:把 LLM messages 的"活跃起点 turn_index"持久化,reload 时
  *  rebuildState 据此过滤 — turn_index < live_from 的 message 只贡献 summary 到 trail,
  *  不进 messages[],保证恢复态跟关闭前一致。 */
 export function updateSessionLiveFrom(id: string, liveFromTurnIndex: number): void {
@@ -313,15 +323,6 @@ export function listMessages(session_id: string): MessageRow[] {
   return getDb()
     .prepare("SELECT * FROM message WHERE session_id = ? ORDER BY turn_index ASC")
     .all(session_id) as MessageRow[];
-}
-
-/** 取 session 当前最大 turn_index;空 session 返回 -1。
- *  用于 enterPhaseB 硬压时算 live_from 边界(= max + 1)。 */
-export function getMaxTurnIndex(session_id: string): number {
-  const row = getDb()
-    .prepare("SELECT MAX(turn_index) AS m FROM message WHERE session_id = ?")
-    .get(session_id) as { m: number | null };
-  return row?.m ?? -1;
 }
 
 // ============================================================

@@ -11,8 +11,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const assets = path.join(repo, "packaging", "assets");
 const source = path.join(assets, "dmg-background.svg");
 const destination = path.join(assets, "dmg-background.png");
-const iconSource = path.join(assets, "app-icon.svg");
-const iconDestination = path.join(assets, "icon.png");
+
 await mkdir(assets, { recursive: true });
 
 function run(command, args) {
@@ -25,6 +24,4 @@ function run(command, args) {
 
 await run("qlmanage", ["-t", "-s", "540", "-o", assets, source]);
 await run("sips", ["-z", "380", "540", path.join(assets, "dmg-background.svg.png"), "--out", destination]);
-await run("qlmanage", ["-t", "-s", "1024", "-o", assets, iconSource]);
-await run("sips", ["-z", "1024", "1024", path.join(assets, "app-icon.svg.png"), "--out", iconDestination]);
-console.log(`Rendered reproducible DMG background and app icon in ${assets}`);
+console.log(`Rendered DMG background in ${assets}; app icons use the checked-in PNG/ICNS/ICO assets.`);

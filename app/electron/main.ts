@@ -18,6 +18,8 @@ import {
 } from "./db";
 import { AgentRunner, type UiTools, setDumpLlmContext, isDumpLlmContextOn } from "./agent";
 import { configureAgentDebugPaths } from "./agentDebug";
+import { readTaskPrompt, writeTaskPrompt } from "./taskPrompt";
+import { readAdvancedToolsPreference, writeAdvancedToolsPreference } from "./agentPreferences";
 import { spawnCaptureWithTimeout } from "./spawnCapture";
 import {
   createApplyPlan,
@@ -108,6 +110,21 @@ function currentInstallManifest(): UpdateManifest | undefined {
 }
 
 function resolveDevPython(projectRoot: string): string {
+  const explicit = process.env.CHECKER_PYTHON;
+  if (explicit) {
+    if (!path.isAbsolute(explicit) || !fs.existsSync(explicit)) {
+      throw new Error(`CHECKER_PYTHON 必须指向存在的 Python 绝对路径: ${explicit}`);
+    }
+    return explicit;
+  }
+  // conda run / activate 注入的环境优先于仓库 venv；不使用默认 base。
+  if (process.env.CONDA_PREFIX && process.env.CONDA_DEFAULT_ENV !== "base") {
+    const python = process.platform === "win32"
+      ? path.join(process.env.CONDA_PREFIX, "python.exe")
+      : path.join(process.env.CONDA_PREFIX, "bin", "python");
+    if (!fs.existsSync(python)) throw new Error(`Conda Python 不存在: ${python}`);
+    return python;
+  }
   const candidates = process.platform === "win32"
     ? [
         path.join(projectRoot, "venv", "Scripts", "python.exe"),
@@ -150,6 +167,12 @@ function configureAppDataPaths(): string {
 }
 
 const APP_DATA_DIR = configureAppDataPaths();
+const TASK_PROMPT_PATH = path.join(APP_DATA_DIR, "current-task.txt");
+const AGENT_PREFERENCES_PATH = path.join(APP_DATA_DIR, "agent-preferences.json");
+// Public packages never auto-load personal extensions. Explicit external opt-in remains possible.
+const LOCAL_EXTENSIONS_ROOT = process.env.CHECKER_LOCAL_EXTENSIONS
+  || (!app.isPackaged ? path.join(PROJECT_ROOT, "local_extensions") : "");
+const PERSONAL_ENABLED = !!LOCAL_EXTENSIONS_ROOT && fs.existsSync(path.join(LOCAL_EXTENSIONS_ROOT, "knowledge", "INDEX.md"));
 
 function resolveRuntimeLayout(): RuntimeLayout {
   const dataDir = APP_DATA_DIR;
@@ -197,6 +220,7 @@ function sidecarEnv(): NodeJS.ProcessEnv {
     CHECKER_CONFIG: RUNTIME.configPath,
     CHECKER_DATA_DIR: RUNTIME.dataDir,
     CHECKER_CACHE_DIR: RUNTIME.cacheDir,
+    CHECKER_TEMP_DIR: process.env.CHECKER_TEMP_DIR || path.join(app.isPackaged ? RUNTIME.cacheDir : PROJECT_ROOT, "temp"),
     CHECKER_LOG_DIR: path.join(RUNTIME.logDir, "sidecar"),
     CHECKER_RESOURCE_ROOT: RUNTIME.dataDir,
   };
@@ -420,8 +444,28 @@ async function startMcpClient(): Promise<void> {
     RUNTIME.promptsDir,
     `http://127.0.0.1:${SIDECAR_PORT}`,
     uiTools,
+    path.join(RUNTIME.backendRoot, "sidecar", "knowledge"),
+    {
+      advancedTools: readAdvancedToolsPreference(AGENT_PREFERENCES_PATH),
+      persistAdvancedTools: (enabled) => writeAdvancedToolsPreference(AGENT_PREFERENCES_PATH, enabled),
+      localKnowledgeDir: PERSONAL_ENABLED ? path.join(LOCAL_EXTENSIONS_ROOT, "knowledge") : undefined,
+    },
   );
   console.log("[agent] runner ready");
+  agentRunner.setTaskPrompt(PERSONAL_ENABLED ? readTaskPrompt(TASK_PROMPT_PATH) : "");
+  console.log("[agent] current task prompt loaded");
+  try {
+    const response = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/prompts/cached`, { signal: AbortSignal.timeout(5000) });
+    const data = await response.json() as { bundle?: { files: Record<string, string> } };
+    if (response.ok && data.bundle) agentRunner.applyPublishedPrompts(data.bundle.files);
+  } catch { console.warn("[agent] using bundled prompts"); }
+  void pullPublishedPrompts().catch(() => console.warn("[agent] prompt refresh unavailable; keeping current version"));
+  if (!promptRefreshTimer) {
+    promptRefreshTimer = setInterval(() => {
+      void pullPublishedPrompts().catch(() => console.warn("[agent] prompt refresh unavailable; keeping current version"));
+    }, 3600000);
+    promptRefreshTimer.unref();
+  }
 
   // 若 renderer 在 AgentRunner / MCP 起来之前就推过 workspace,这里补一次让
   // runner.workspaceRoot 和 mcp 子进程都拿到。否则首调 start_qc 会拿到
@@ -432,15 +476,40 @@ async function startMcpClient(): Promise<void> {
   }
 }
 
+let promptRefreshTimer: ReturnType<typeof setInterval> | undefined;
+async function pullPublishedPrompts(): Promise<{ version: string; message: string }> {
+  if (!agentRunner) throw new Error("Agent 尚未就绪");
+  const response = await fetch(`http://127.0.0.1:${SIDECAR_PORT}/prompts/pull`, { method: "POST", signal: AbortSignal.timeout(25000) });
+  if (!response.ok) throw new Error("提示词拉取失败，保留当前版本；请检查表格密钥与网络");
+  const bundle = await response.json() as { version: string; files: Record<string, string> };
+  agentRunner.applyPublishedPrompts(bundle.files);
+  return { version: bundle.version, message: "已应用发布版本，下一次模型请求生效" };
+}
+ipcMain.handle("agent:pull-prompts", () => pullPublishedPrompts());
+
 // agent IPC 入口。chatId 由 renderer 生成并管理。
 ipcMain.handle("agent:send", async (_e, chatId: string, text: string) => {
   if (!agentRunner) throw new Error("agent runner not ready");
   await agentRunner.send(chatId, text);
 });
 
+ipcMain.handle("agent:set-advanced-tools", (_e, chatId: unknown, enabled: unknown) => {
+  if (!agentRunner) throw new Error("agent runner not ready");
+  if (typeof chatId !== "string" || !chatId || typeof enabled !== "boolean") throw new Error("Invalid arguments");
+  return agentRunner.setAdvancedTools(chatId, enabled);
+});
+
 // 开发者菜单:每次 LLM 调用前把 messages + tools dump 到 tmp/agent_contexts/。
 // 用 IPC 而非环境变量,renderer 端可热切。
 ipcMain.handle("agent:get-dump-llm", () => isDumpLlmContextOn());
+ipcMain.handle("agent:get-personal-enabled", () => PERSONAL_ENABLED);
+ipcMain.handle("agent:get-task-prompt", () => PERSONAL_ENABLED ? readTaskPrompt(TASK_PROMPT_PATH) : "");
+ipcMain.handle("agent:set-task-prompt", (_e, text: unknown) => {
+  if (!PERSONAL_ENABLED) throw new Error("当前版本未启用个人任务扩展");
+  const saved = writeTaskPrompt(TASK_PROMPT_PATH, text);
+  agentRunner?.setTaskPrompt(saved);
+  return saved;
+});
 ipcMain.handle("agent:set-dump-llm", (_e, on: unknown) => {
   setDumpLlmContext(!!on);
 });
@@ -470,7 +539,6 @@ ipcMain.handle("agent:list-sessions", () => {
   return listSessions().map((s) => ({
     id: s.id,
     title: s.title,
-    phase: s.phase,
     song: s.song,
     updated_at: s.updated_at,
   }));
@@ -480,7 +548,6 @@ ipcMain.handle("agent:new-session", (_e, title?: string) => {
   return {
     id: row.id,
     title: row.title,
-    phase: row.phase,
     song: row.song,
     updated_at: row.updated_at,
   };
@@ -511,9 +578,14 @@ async function stopMcpClient(): Promise<void> {
 }
 
 function createWindow() {
+  const appIcon = app.isPackaged
+    ? path.join(process.resourcesPath, "icon.png")
+    : path.join(app.getAppPath(), "..", "packaging", "assets", "icon.png");
+  if (process.platform === "darwin") app.dock?.setIcon(appIcon);
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
+    icon: appIcon,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

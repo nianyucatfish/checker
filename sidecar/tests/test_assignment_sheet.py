@@ -330,7 +330,7 @@ def test_get_song_meta_derived_link_flags(fake_sheet):
 
 
 def test_get_song_meta_pii_is_masked(fake_sheet):
-    """*** PII 边界回归:角色字段 + 链接字段值打码,original_singer 不打码 ***"""
+    """*** PII 边界回归:角色字段打码,网盘链接与 original_singer 不打码 ***"""
     fake_sheet([_complete_row(
         owner="张三",
         original_singer="周杰伦",            # 公开艺人,不打码
@@ -340,7 +340,8 @@ def test_get_song_meta_pii_is_masked(fake_sheet):
         vocal_a="歌甲特殊",
         vocal_b="歌乙特殊",
         backing="王伴一/赵伴二",
-        pan_review_link="https://pan.baidu.com/s/SECRET_LINK_AABBCCDDEE",
+        pan_review_link="https://pan.baidu.com/s/SECRET_LINK_AABBCCDDEE?pwd=abc1",
+        pan_mix_review_link="https://pan.baidu.com/s/MIX_SHARE?pwd=def2",
     )])
     meta = asheet.get_song_meta("望春风")
     flat = repr(asdict(meta))
@@ -360,10 +361,9 @@ def test_get_song_meta_pii_is_masked(fake_sheet):
     # 例外:original_singer 是公开艺人,真值原样出现
     assert "周杰伦" in flat
 
-    # 链接:真 share key 不出现,prefix + *** 出现
-    assert "SECRET_LINK_AABBCCDDEE" not in flat
-    assert "https://pan.baidu.com/s/SECRET" in flat   # prefix 30 chars 保留
-    assert "***" in flat
+    # 下载所需的完整链接及提取码原样返回，两类链接均不打码。
+    assert meta.pan_review_link == "https://pan.baidu.com/s/SECRET_LINK_AABBCCDDEE?pwd=abc1"
+    assert meta.pan_mix_link == "https://pan.baidu.com/s/MIX_SHARE?pwd=def2"
 
 
 def test_mask_name_basic():
@@ -372,17 +372,6 @@ def test_mask_name_basic():
     assert asheet._mask_name("阿迪力江·阿不都拉") == "阿xx"   # 转写名
     assert asheet._mask_name("") == ""
     assert asheet._mask_name("   ") == ""                   # 全空白
-
-
-def test_mask_url_basic():
-    short = "https://x.com/a"
-    assert asheet._mask_url(short) == short + "***"
-    long = "https://pan.baidu.com/s/1aBcDeFgHiJkLmNoPq?pwd=xyz"
-    masked = asheet._mask_url(long)
-    assert masked.startswith("https://pan.baidu.com/s/")
-    assert masked.endswith("***")
-    assert "pwd=xyz" not in masked
-    assert asheet._mask_url("") == ""
 
 
 def test_mask_backing_preserves_separator():

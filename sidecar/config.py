@@ -13,6 +13,8 @@ sidecar 启动本身不依赖配置(凭证仅在调到对应外部 API 时才需
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +33,8 @@ def _candidate_paths() -> list[Path]:
 
 @dataclass
 class TencentDocsConfig:
+    sheet_server_url: str = ""
+    sheet_key: str = ""
     client_id: str = ""
     access_token: str = ""
     access_token_expires_at: str = ""
@@ -98,6 +102,8 @@ def _from_raw(raw: dict, source: Path) -> Config:
     u = raw.get("user", {})
     return Config(
         tencent_docs=TencentDocsConfig(
+            sheet_server_url=str(t.get("sheet_server_url", "")),
+            sheet_key=str(t.get("sheet_key", "")),
             client_id=str(t.get("client_id", "")),
             access_token_expires_at=str(t.get("access_token_expires_at", "")),
             access_token=str(t.get("access_token", "")),
@@ -181,6 +187,8 @@ def _format_tencent_docs_section(td_cfg: TencentDocsConfig) -> str:
     return "\n".join(
         [
             "[tencent_docs]",
+            f"sheet_server_url = {_toml_string(td_cfg.sheet_server_url)}",
+            f"sheet_key = {_toml_string(td_cfg.sheet_key)}",
             f"client_id = {_toml_string(td_cfg.client_id)}",
             f"access_token = {_toml_string(td_cfg.access_token)}",
             f"access_token_expires_at = {_toml_string(td_cfg.access_token_expires_at)}",
@@ -208,9 +216,16 @@ def _atomic_write(path: Path, new_text: str) -> Path:
     """校验 TOML → 写临时文件 → os.replace 原子替换。"""
     tomllib.loads(new_text)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(new_text, encoding="utf-8")
-    tmp.replace(path)
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as temp:
+            temp_name = temp.name
+            temp.write(new_text)
+            temp.flush()
+            os.fsync(temp.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name and os.path.exists(temp_name): os.unlink(temp_name)
     return path
 
 

@@ -40,6 +40,10 @@ def cache_dir() -> Path:
     return _override("CHECKER_CACHE_DIR") or repo_root() / "cache"
 
 
+def temp_dir() -> Path:
+    return _override("CHECKER_TEMP_DIR") or ((_override("CHECKER_CACHE_DIR") or repo_root()) / "temp")
+
+
 def log_dir(*, legacy_subdir: str = "cache") -> Path:
     """Log directory, with a caller-selected legacy development location."""
     return _override("CHECKER_LOG_DIR") or repo_root() / legacy_subdir

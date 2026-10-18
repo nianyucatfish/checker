@@ -4,9 +4,9 @@
 身份隐藏 + PII 边界
 ==================
 1) reviewer_name 从 config 读,不通过工具参数从 LLM 传入(身份隐藏)
-2) (2026-05-09 加强) 人名 / 链接字段值由后端打码后再返:
+2) 人名字段值由后端打码后再返:
    - 人名 → "首字 + xx" (例:张三 → 张xx,欧阳娜娜 → 欧xx)
-   - 链接 → 前 30 字符 + *** (例:https://pan.baidu.com/s/1aBcDe***)
+   - 网盘链接完整返回,供下载和核对使用。
    - 例外:`original_singer`(公开艺人名)不打码;非 PII 字段(性别 / 评分 / 风格 / 设备等)不打码
    LLM 看到打码值,**不应试图还原**。需要让用户找谁就直接说"杨xx"(用户从分工表 UI 自己看是谁)。
    sidecar 内部仍持有 raw 真值,供 filename 校验等不经 LLM 的检查使用。
@@ -112,24 +112,6 @@ def _normalize_zero(value: str) -> str:
     专给 pan_mix_link 列用 —— 其他列里 "0" 可能是真数字(如评分),不要全表 normalize。
     """
     return "" if value.strip() == "0" else value
-
-
-def _mask_url(url: str) -> str:
-    """链接打码:**仅对格式合法的 URL 打码**,非 URL(空 / "0" / 乱填值)原样返回。
-
-    - 空 → 原样空串
-    - 不是 http(s):// 开头 → 原样返(让 reviewer 一眼看到"录混填了个 0"这种垃圾值,
-      而不是被打码成 "0***" 误以为是合法链接被打了)
-    - 合法 URL → 保留前 30 字符 + '***'(scheme+host+path 前缀,LLM 能识别厂商但拿不到 share key/pwd)
-    """
-    u = url.strip()
-    if not u:
-        return ""
-    if not (u.lower().startswith("http://") or u.lower().startswith("https://")):
-        return u
-    if len(u) <= 30:
-        return u + "***"
-    return u[:30] + "***"
 
 
 _BACKING_SEP_RE = re.compile(r"([/、,,\s]+)")
@@ -315,14 +297,14 @@ class SongMeta:
     """1.1 验收用 + 下游交叉引用用。
 
     *** PII 边界 (2026-05-09) ***
-    人名 / 链接字段值由 sidecar 后端打码:
+    人名字段值由 sidecar 后端打码:
     - 人名 → "首字 + xx" (例:杨xx)
-    - 链接 → 前 30 字符 + ***
+    - 网盘链接完整返回,供下载和核对使用。
     例外:original_singer(公开艺人)不打码;非 PII 字段(性别 / 评分 / 风格 /
     年代 / 难度 / 设备 等)不打码,直接返。
 
     LLM 看到打码值,**不应试图还原**。给用户写消息直接用打码版,
-    用户从分工表 UI 自己看真名 / 真链接。
+    用户从分工表 UI 自己看真名。
     """
     row_index: int
     song_name: str
@@ -357,7 +339,7 @@ class SongMeta:
     mixer: str
     monitoring: str
 
-    # === 链接(打码)===
+    # === 链接(完整返回)===
     pan_review_link: str
     pan_mix_link: str
 
@@ -593,8 +575,8 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
         recording_software=raw["recording_software"],
         mixer=raw["mixer"],
         monitoring=raw["monitoring"],
-        pan_review_link=_mask_url(raw["pan_review_link"]),
-        pan_mix_link=_mask_url(raw["pan_mix_link"]),
+        pan_review_link=raw["pan_review_link"],
+        pan_mix_link=raw["pan_mix_link"],
         missing_required_fields=missing,
         invalid_format_fields=invalid,
         derived=derived,

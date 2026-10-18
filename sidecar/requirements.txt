@@ -13,7 +13,13 @@ pydantic>=2.7
 send2trash>=1.8
 
 # MCP server (agent tool exposure; stdio transport, spawned by Electron main)
-mcp>=1.0
+mcp>=1.0,<2
 
 # HTTP client used by the completion proxy and FastAPI TestClient
 httpx>=0.27
+
+# GenericAgent browser bridge and HTML simplifier (vendored, MIT)
+requests>=2.31
+bottle>=0.12
+simple-websocket-server>=0.4
+beautifulsoup4>=4.12

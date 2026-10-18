@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const root = path.resolve(process.argv[2] || path.join(repo, "packaging", "staging"));
-const forbiddenParts = new Set(["cache", "tests", "__pycache__", ".pytest_cache"]);
-const forbiddenFiles = new Set(["config.toml", "llm_override.json", "requirements-dev.txt"]);
+const forbiddenParts = new Set(["cache", "tests", "__pycache__", ".pytest_cache", "local_extensions", "baidu-netdisk"]);
+const forbiddenFiles = new Set(["config.toml", "llm_override.json", "requirements-dev.txt", "current-task.txt", "agent-preferences.json", "baidu_download.md", "baidu_download_archive.md"]);
 const violations = [];
 
 async function walk(directory) {
@@ -40,6 +40,8 @@ await Promise.all([
   requirePath("backend/sidecar/serve.py"),
   requirePath("backend/sidecar/requirements.txt"),
   requirePath("prompts/agent_workflow.md"),
+  requirePath("prompts/agent_system.md"),
+  requirePath("backend/sidecar/knowledge/INDEX.md"),
 ]);
 const requirements = await readFile(path.join(root, "backend", "sidecar", "requirements.txt"), "utf8").catch(() => "");
 if (/^\s*pytest\b/im.test(requirements)) violations.push("backend/sidecar/requirements.txt contains pytest");

@@ -181,6 +181,9 @@ def _tencent_config_view() -> dict:
     td = c.tencent_docs
     u = c.user
     return {
+        "sheet_server_url": td.sheet_server_url,
+        "sheet_key_set": bool(td.sheet_key),
+        "sheet_key": td.sheet_key,
         "client_id": td.client_id,
         "access_token": td.access_token,
         "open_id": td.open_id,
@@ -205,7 +208,19 @@ def set_tencent_config(body: dict):
     c = reload_config()
     td = c.tencent_docs
     u = c.user
+    server_url = body.get("sheet_server_url", td.sheet_server_url)
+    sheet_key = body.get("sheet_key", td.sheet_key)
+    if not isinstance(server_url, str) or not isinstance(sheet_key, str):
+        raise HTTPException(status_code=400, detail="服务器地址和密钥必须是文本")
+    if server_url.strip():
+        from sidecar.remote_sheet import validate_server_url
+        try: validate_server_url(server_url.strip())
+        except ValueError as e: raise HTTPException(status_code=400, detail=str(e)) from None
+    if len(sheet_key) > 512 or any(c in sheet_key for c in "\r\n"):
+        raise HTTPException(status_code=400, detail="表格密钥格式不正确")
     next_td = TencentDocsConfig(
+        sheet_server_url=server_url.strip(),
+        sheet_key=sheet_key.strip(),
         client_id=body["client_id"].strip() if isinstance(body.get("client_id"), str) else td.client_id,
         access_token=body["access_token"].strip() if isinstance(body.get("access_token"), str) else td.access_token,
         open_id=body["open_id"].strip() if isinstance(body.get("open_id"), str) else td.open_id,
@@ -219,6 +234,8 @@ def set_tencent_config(body: dict):
     try:
         path = write_tencent_user_config(next_td, next_u)
         reload_config()
+        from sidecar.tencent_sheet import reset_client
+        reset_client()
     except (OSError, ValueError) as e:
         raise HTTPException(status_code=500, detail=f"写配置失败: {e}") from e
     return {"ok": True, "config_path": str(path), **_tencent_config_view()}
@@ -960,6 +977,8 @@ def dev_sheet_status():
         "mem_cached": cache is not None,
         "mem_rows": len(cache) if cache is not None else 0,
         "fetched_at": client.fetched_at.isoformat() if client.fetched_at else None,
+        "server_updated_at": getattr(client, "updated_at", None),
+        "server_sync_ok": getattr(client, "sync_ok", None),
         "disk_cached": disk_exists,
         "disk_path": str(disk_path),
         "disk_size_kb": disk_size_kb,
@@ -984,6 +1003,8 @@ def dev_refresh_sheet():
         "rows": len(rows),
         "elapsed_ms": elapsed_ms,
         "fetched_at": client.fetched_at.isoformat() if client.fetched_at else None,
+        "server_updated_at": getattr(client, "updated_at", None),
+        "server_sync_ok": getattr(client, "sync_ok", None),
     }
 
 
@@ -1010,3 +1031,37 @@ def dev_list_my_accepted():
     except Exception as e:
         raise _dev_error(e)
     return {"count": len(items), "headers": headers, "items": items}
+
+
+@app.get("/prompts/cached")
+def cached_prompts():
+    from sidecar.prompt_sync import cached
+    return {"bundle": cached()}
+
+
+@app.post("/prompts/pull")
+def pull_prompts():
+    from sidecar.prompt_sync import pull
+    try: return pull()
+    except Exception:
+        raise HTTPException(status_code=502, detail="提示词拉取失败，请检查密钥、服务器及网络；保留上次可用版本") from None
+
+
+@app.get("/sheet/view")
+def sheet_view(force: bool = False):
+    """Desktop table viewer; not exposed as an agent tool."""
+    from sidecar import assignment_sheet as sheet
+    from sidecar.tencent_sheet import get_client
+    try:
+        if force:
+            get_client().invalidate()
+        rows = sheet._load_rows()
+        sheet._validate_headers(rows[0])
+        reviewer = reload_config().user.reviewer_name.strip()
+        return {"headers": sheet._normalized_headers(rows[0]), "reviewer_set": bool(reviewer),
+                "items": [{"row_index": i, "cells": list(row),
+                           "mine": bool(reviewer) and sheet._cell(row, sheet.COL_REVIEWER) == reviewer,
+                           "accepted": sheet._cell(row, sheet.COL_ACCEPTED) == sheet.ACCEPTED_VALUE}
+                          for i, row in enumerate(rows[1:], 2) if sheet._cell(row, sheet.COL_SONG_NAME)]}
+    except Exception as e:
+        raise _dev_error(e)

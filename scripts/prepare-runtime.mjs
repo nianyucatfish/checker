@@ -105,7 +105,7 @@ async function copyBackend() {
     recursive: true,
     filter(source) {
       const relative = path.relative(path.join(repo, "sidecar"), source).replaceAll("\\", "/");
-      return !relative.split("/").some((part) => part === "tests" || part === "__pycache__")
+      return !relative.split("/").some((part) => part === "tests" || part === "__pycache__" || part === "local_extensions")
         && !relative.endsWith("requirements-dev.txt")
         && !relative.endsWith(".pyc");
     },

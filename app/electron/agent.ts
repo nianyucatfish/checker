@@ -2,16 +2,15 @@
 //
 // 结构:
 // - 多 chat 会话(ChatState),按 chatId 索引,持久化到 db.ts(SQLite)
-// - 两阶段 system prompt:Phase A 短(start_qc/sheet_list_my_pending)→ start_qc 后切 Phase B
-//   = phase_b_header.md + agent_workflow.md;三段 prompt 文本都在 doc/prompts/,构造时注入目录读入
-// - 上下文压缩两层:软压(messages > 30 在 user 边界裁中段,留 summaryTrail)+ 硬压(切歌清空,
-//   只塞上一首 trail 摘要进新会话);LLM 每轮强制 <summary>...</summary>,extractSummary 抽出来续命
+// - 所有会话使用稳定的 agent_system.md + agent_workflow.md,工具目标由参数明确指定
+// - 切歌只更新展示定位,保留消息和摘要;上下文仅按容量做 GA 式压缩
 // - 工具调用走 MCP(sidecar 起的 stdio 子进程)+ 本地工具(start_qc / human_check)
 // - LLM 走 sidecar /agent/completion 代理(api_key 不出 sidecar 域)
-// - reload 后从 db hydrate,LLM messages + summaryTrail + Phase/song 全部重建
+// - reload 后从 db hydrate,LLM messages + summaryTrail + 展示歌曲全部重建
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { ADVANCED_TOOLS, toolAllowed } from "./toolPolicy";
 import type { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import type { BrowserWindow } from "electron";
 import {
@@ -20,9 +19,9 @@ import {
   hydrateSession,
   appendMessage,
   appendPart,
-  updateSessionPhase,
+  updateSessionSong,
+  updateSessionAdvancedTools,
   updateSessionLiveFrom,
-  getMaxTurnIndex,
   type HydratedSession,
   type PartContentText,
   type PartContentToolCall,
@@ -42,11 +41,22 @@ import {
   buildAnchorMessage,
 } from "./compaction";
 import { mcpResultText } from "./mcpResult";
+import { injectTaskPrompt } from "./taskPrompt";
 import { logTurn, logLlmPrompt, logLlmResponse, setDumpLlmContext, isDumpLlmContextOn } from "./agentDebug";
 
 // 调试落盘(logTurn / GA 风格会话日志 / dump 开关)在 ./agentDebug。这里 re-export 开关,
 // 让 main.ts 仍从 "./agent" 拿(对外门面不变)。
 export { setDumpLlmContext, isDumpLlmContextOn };
+
+// 不可取消的本地操作也不能阻塞中断;迟到结果由此 Promise 消费,不再进入会话。
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Agent run cancelled", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    if (signal.aborted) onAbort();
+  });
+}
 
 type Role = "system" | "user" | "assistant" | "tool";
 
@@ -75,13 +85,12 @@ export interface ToolSchema {
 
 interface ChatState {
   chatId: string;
-  phase: "A" | "B";
-  song: string | null;
-  baseSystem: string;       // 不含历史摘要的静态 system prompt(Phase A 短文 / Phase B header+workflow)
+  song: string | null;      // 最近定位的歌曲,仅供 UI / 日志展示,不限制工具目标
+  baseSystem: string;       // 稳定的通用指令 + 完整质检手册
   messages: Message[];
   // 跟 messages 一一对齐的"db turn_index"指针:
   //   - 写 db 的消息(user/assistant/tool)→ row.turn_index
-  //   - 不写 db 的(system / 软压 trailMsg / 硬压上一首摘要 / nudge user / 占位 tool)→ null
+  //   - 不写 db 的(system / 软压 trailMsg / nudge user / 占位 tool)→ null
   // 软压时拿 keepFrom 处的 turn_index 写到 session.live_from_turn_index,
   // reload 时 rebuildState 据此过滤,保证恢复态 = 关闭前。
   messageDbTurnIndexes: (number | null)[];
@@ -89,6 +98,7 @@ interface ChatState {
   turn: number;
   cancelled: boolean;
   running: boolean;
+  advancedTools: boolean;
   // GA 协议:上一轮 LLM 漏写了 <summary>,本轮 anchor 里要给 [DANGER] 警告一次性提示
   missedSummary: boolean;
 }
@@ -99,7 +109,7 @@ interface AgentEvent {
     | "assistant_text"
     | "tool_use"
     | "tool_result"
-    | "phase_change"
+    | "song_focus"
     | "turn_done"
     | "awaiting_human"
     | "compacted"
@@ -133,7 +143,7 @@ export type UiTurn =
 // 全在 ./compaction。本文件只保留 "何时压" 的节流(compressCd)+ "压完后持久化 / 通知" 的
 // 副作用编排(见 maybeCompact)。压缩参数常量也从 compaction 导入。
 
-// prompt 文本不再内联:三段都在 doc/prompts/ 下,构造时按注入的目录读入(见构造函数)。
+// prompt 文本在 doc/prompts/ 下,构造时按注入的目录读入。
 // 读失败给占位字符串(沿用原 workflow 软兜底),不让整个 runner 起不来。
 function readPromptFile(dir: string, name: string): string {
   try {
@@ -145,10 +155,15 @@ function readPromptFile(dir: string, name: string): string {
 }
 
 export class AgentRunner {
+  private advancedPrompt = "";
+  private knowledgeSuffix = "";
+  private advancedToolsEnabled = false;
+  private advancedCalls = new Map<string, AbortController>();
+  private runControllers = new Map<string, AbortController>();
   private chats = new Map<string, ChatState>();
-  private phaseAPrompt = "";   // doc/prompts/phase_a.md
-  private phaseBHeader = "";   // doc/prompts/phase_b_header.md(含 {song} 占位)
-  private workflowText = "";   // doc/prompts/agent_workflow.md
+  private systemPrompt = "";  // 所有会话共享完整手册,不随歌曲改变
+  private taskPrompt = "";
+  setTaskPrompt(text: string): void { this.taskPrompt = text.trim(); }
   private workspaceRoot: string | null = null;
   // 每个 chat 同时只有一个 human_check 在挂起;resolver 被设上后,
   // executeTool human_check 的 await 会卡住,直到 resolveHumanCheck 调用它。
@@ -163,10 +178,28 @@ export class AgentRunner {
     private promptsDir: string,
     private sidecarBase: string,
     private uiTools: UiTools,
+    knowledgeDir = path.resolve(promptsDir, "../../sidecar/knowledge"),
+    private preferences: { advancedTools?: boolean; persistAdvancedTools?: (enabled: boolean) => void; localKnowledgeDir?: string } = {},
   ) {
-    this.phaseAPrompt = readPromptFile(promptsDir, "phase_a.md");
-    this.phaseBHeader = readPromptFile(promptsDir, "phase_b_header.md");
-    this.workflowText = readPromptFile(promptsDir, "agent_workflow.md");
+    this.advancedToolsEnabled = preferences.advancedTools ?? false;
+    const localIndexPath = preferences.localKnowledgeDir && path.join(preferences.localKnowledgeDir, "INDEX.md");
+    const localIndex = localIndexPath && fs.existsSync(localIndexPath)
+      ? fs.readFileSync(localIndexPath, "utf8").replaceAll("{{knowledge_root}}", path.resolve(preferences.localKnowledgeDir!)) : "";
+    const knowledgeIndex = readPromptFile(knowledgeDir, "INDEX.md")
+      .replaceAll("{{knowledge_root}}", path.resolve(knowledgeDir));
+    this.knowledgeSuffix = "\n\n" + knowledgeIndex + (localIndex ? "\n\n" + localIndex : "");
+    this.systemPrompt = readPromptFile(promptsDir, "agent_system.md") + "\n\n" +
+      readPromptFile(promptsDir, "agent_workflow.md") + this.knowledgeSuffix;
+    this.advancedPrompt = readPromptFile(promptsDir, "advanced_tools.md");
+  }
+
+  applyPublishedPrompts(files: Record<string, string>): void {
+    for (const name of ["agent_system.md", "agent_workflow.md", "advanced_tools.md"]) {
+      if (typeof files[name] !== "string" || !files[name].trim() || Buffer.byteLength(files[name], "utf8") > 300000) throw new Error("Invalid prompt bundle");
+    }
+    this.systemPrompt = files["agent_system.md"] + "\n\n" + files["agent_workflow.md"] + this.knowledgeSuffix;
+    this.advancedPrompt = files["advanced_tools.md"];
+    for (const chat of this.chats.values()) chat.baseSystem = this.systemPrompt;
   }
 
   /** Renderer 切换工作区时调,后续 startQc 用它做候选检索。 */
@@ -208,36 +241,32 @@ export class AgentRunner {
     createSessionWithId(chatId, "新会话", undefined);
     s = {
       chatId,
-      phase: "A",
       song: null,
-      baseSystem: this.phaseAPrompt,
-      messages: [{ role: "system", content: this.phaseAPrompt }],
+      baseSystem: this.systemPrompt,
+      messages: [{ role: "system", content: this.systemPrompt }],
       messageDbTurnIndexes: [null],
       summaryTrail: [],
       turn: 0,
       cancelled: false,
       running: false,
+      advancedTools: this.advancedToolsEnabled,
       missedSummary: false,
     };
     this.chats.set(chatId, s);
     // 持久化 system seed
     const msgRow = appendMessage({ session_id: chatId, role: "system" });
-    appendPart({ message_id: msgRow.id, type: "text", content: { text: this.phaseAPrompt } as PartContentText });
+    appendPart({ message_id: msgRow.id, type: "text", content: { text: this.systemPrompt } as PartContentText });
     return s;
   }
 
-  /** 从 db hydrate 出来的 session,重建内存 ChatState(LLM messages + summaryTrail + phase)。
+  /** 从 db hydrate 出来的 session,重建内存 ChatState(LLM messages + summaryTrail)。
    *  关键:按 session.live_from_turn_index 过滤 — turn_index < live_from 的 message
    *  只贡献 summary 到 trail,不进 messages[]。这样 reload 后 LLM 看到的上下文跟
-   *  关闭前(已被软压/硬压)完全一致,不会"复活"被压缩掉的轮次。 */
+   *  关闭前一致,保留旧版本已压缩的起点以兼容历史会话。 */
   private rebuildState(chatId: string, h: HydratedSession): ChatState {
-    const phase: "A" | "B" = h.session.phase === "B" ? "B" : "A";
     const song = h.session.song;
     const liveFrom = h.session.live_from_turn_index ?? 0;
-    let baseSystem = this.phaseAPrompt;
-    if (phase === "B" && song) {
-      baseSystem = this.phaseBHeader.replace("{song}", song) + this.workflowText;
-    }
+    const baseSystem = this.systemPrompt;
 
     // 第一遍:把所有 assistant.summary parts 拼成 trail(不论 turn_index,全保留)。
     // trail 跟历史 t1/t2/... 标号一一对齐,沿用原 rebuildState 计数方式。
@@ -312,7 +341,6 @@ export class AgentRunner {
     }
     return {
       chatId,
-      phase,
       song,
       baseSystem,
       messages: llmMessages,
@@ -321,6 +349,7 @@ export class AgentRunner {
       turn: assistantCount,
       cancelled: false,
       running: false,
+      advancedTools: this.advancedToolsEnabled,
       missedSummary: false,
     };
   }
@@ -329,14 +358,14 @@ export class AgentRunner {
    *  - chatId 在 db 不存在 → 返回 []
    *  - 存在 → 解析 messages + parts,拼成与 AgentSidebar Turn 对齐的轻量 shape
    *  作为副作用,getOrCreate 会把 ChatState 拉进内存供后续 send 使用。 */
-  hydrate(chatId: string): { phase: "A" | "B"; song: string | null; turns: UiTurn[] } {
+  hydrate(chatId: string): { song: string | null; turns: UiTurn[]; advancedTools: boolean } {
     this.getOrCreate(chatId); // 确保 ChatState 已在内存
     const h = hydrateSession(chatId);
-    if (!h) return { phase: "A", song: null, turns: [] };
+    if (!h) return { song: null, turns: [], advancedTools: this.advancedToolsEnabled };
     const turns: UiTurn[] = [];
     const toolTurnByCallId = new Map<string, number>(); // tool_use_id → turns 下标
-    if (h.session.phase === "B" && h.session.song) {
-      turns.push({ kind: "phase", label: `进入质检流程 · ${h.session.song}` });
+    if (h.session.song) {
+      turns.push({ kind: "phase", label: `最近定位 · ${h.session.song}` });
     }
     for (const m of h.messages) {
       if (m.role === "system") continue;
@@ -381,10 +410,20 @@ export class AgentRunner {
         }
       }
     }
-    return { phase: h.session.phase === "B" ? "B" : "A", song: h.session.song, turns };
+    return { song: h.session.song, turns, advancedTools: this.advancedToolsEnabled };
   }
 
-  // Cache 友好原则:system = baseSystem 始终不变。
+  setAdvancedTools(chatId: string, enabled: boolean): boolean {
+    const state = this.getOrCreate(chatId);
+    this.preferences.persistAdvancedTools?.(enabled);
+    this.advancedToolsEnabled = enabled;
+    updateSessionAdvancedTools(chatId, enabled); // retain compatibility with older databases
+    for (const chat of this.chats.values()) chat.advancedTools = enabled;
+    state.advancedTools = enabled;
+    return enabled;
+  }
+
+  // baseSystem 保持稳定；高级规则仅在用户启用时注入。
   // trail 只在 maybeCompact 软压缩时,作为独立 user 消息注入夹在 system 和尾巴之间。
   // 这样在两次压缩之间,prefix (system + 早期固定 user) 字节稳定,DeepSeek 这种自动
   // prefix-cache 的后端能持续命中 workflow.md 那几 KB。
@@ -396,62 +435,11 @@ export class AgentRunner {
     }
   }
 
-  // ============ Phase 切换 ============
-
-  private enterPhaseB(state: ChatState, song: string) {
-    const wasPhaseB = state.phase === "B";
-    const prevSong = state.song;
-    state.phase = "B";
+  /** 定位歌曲仅更新展示信息;消息、摘要、轮数和静态 prompt 均保持不变。 */
+  private focusSong(state: ChatState, song: string) {
     state.song = song;
-    const newBase =
-      this.phaseBHeader.replace("{song}", song) +
-      this.workflowText;
-
-    if (wasPhaseB) {
-      // 切歌 = 硬压缩: 上一首的 messages 全部丢弃,只把 summary 轨迹折成一条 user
-      // 摘要塞进新会话,模型保留对前情的一句话感知;summaryTrail 清零(新歌从 t1 重计)。
-      const prevTrail = state.summaryTrail.slice();
-      state.summaryTrail = [];
-      state.messages = [{ role: "system", content: newBase }];
-      state.messageDbTurnIndexes = [null];
-      state.baseSystem = newBase;
-      state.turn = 0;
-      if (prevTrail.length > 0 && prevSong) {
-        state.messages.push({
-          role: "user",
-          content:
-            `[上一首 "${prevSong}" 的摘要轨迹,仅供参考,本轮处理 "${song}"]\n` +
-            prevTrail.join("\n"),
-        });
-        state.messageDbTurnIndexes.push(null);
-      }
-      // 持久化 live_from:取已有 db messages 的 max turn_index + 1。
-      // 这样后续 send 写入的新 user(turn_index 必然更大)都进 LLM 上下文,
-      // 而切歌前的所有 db messages(< live_from)都被剔除。
-      const liveFrom = getMaxTurnIndex(state.chatId) + 1;
-      updateSessionLiveFrom(state.chatId, liveFrom);
-      this.emit({
-        chatId: state.chatId,
-        type: "compacted",
-        data: { reason: "song_switch", from: prevSong, to: song, droppedTrail: prevTrail.length },
-      });
-    } else {
-      // 首次 A → B: 保留早期对话,仅替换 system。平行同步 turnIndex 数组。
-      const oldMsgs = state.messages;
-      const oldIdxs = state.messageDbTurnIndexes;
-      state.messages = [{ role: "system", content: newBase }];
-      state.messageDbTurnIndexes = [null];
-      for (let k = 0; k < oldMsgs.length; k++) {
-        if (oldMsgs[k].role === "system") continue;
-        state.messages.push(oldMsgs[k]);
-        state.messageDbTurnIndexes.push(oldIdxs[k] ?? null);
-      }
-      state.baseSystem = newBase;
-    }
-    // 持久化 phase / song;baseSystem 不再写 system message,rebuild 时按 workflow.md
-    // 最新版重建,保证 doc 更新后老 chat 也用新 prompt。
-    updateSessionPhase(state.chatId, "B", song);
-    this.emit({ chatId: state.chatId, type: "phase_change", data: { phase: "B", song } });
+    updateSessionSong(state.chatId, song);
+    this.emit({ chatId: state.chatId, type: "song_focus", data: { song } });
   }
 
   // 调 LLM 前的压缩入口:节流软压 + 撑爆兜底 trim。压缩纯逻辑在 ./compaction,
@@ -501,13 +489,13 @@ export class AgentRunner {
     }));
   }
 
-  private localToolSchemas(phase: "A" | "B"): ToolSchema[] {
+  private localToolSchemas(): ToolSchema[] {
     const startQc: ToolSchema = {
       type: "function",
       function: {
         name: "start_qc",
         description:
-          "Enter QC workflow for a specific song. Switches the system prompt to the full workflow manual and locks subsequent tool calls to that song.",
+          "Resolve a song to its exact workspace folder and update the displayed song. Returns {ok, song_folder, song_path, workspace_hint}. Use for ambiguous names; tools can directly target any song by explicit arguments. Conversation history and QC progress are preserved.",
         parameters: {
           type: "object",
           properties: { song: { type: "string" } },
@@ -619,21 +607,13 @@ export class AgentRunner {
         },
       },
     };
-    if (phase === "A") return [startQc];
     return [startQc, humanCheck, uiOpenFile, mixLoadSong, playbackToggleBeat, playbackToggleStructure];
   }
 
   private async buildTools(state: ChatState): Promise<ToolSchema[]> {
-    if (state.phase === "A") {
-      const mcp = await this.listMcpTools();
-      const allowed = new Set(["sheet_list_my_pending"]);
-      return [
-        ...this.localToolSchemas("A"),
-        ...mcp.filter((t) => allowed.has(t.function.name)),
-      ];
-    }
     const mcp = await this.listMcpTools();
-    return [...this.localToolSchemas("B"), ...mcp];
+    return [...this.localToolSchemas(), ...mcp]
+      .filter((t) => toolAllowed(t.function.name, state.advancedTools));
   }
 
   // ============ 工具执行 ============
@@ -643,10 +623,15 @@ export class AgentRunner {
     name: string,
     args: Record<string, unknown>,
   ): Promise<unknown> {
+    if (!toolAllowed(name, state.advancedTools)) {
+      return { ok: false, code: "TOOL_DISABLED", message: "高级工具当前已关闭。" };
+    }
     if (name === "start_qc") {
+      const signal = this.runControllers.get(state.chatId)?.signal;
       const input = String(args.song ?? "").trim();
       if (!input) return { ok: false, code: "INVALID_ARG", message: "song is empty" };
       const resolved = await this.resolveSongFolder(input);
+      if (state.cancelled || signal?.aborted) return { ok: false, code: "CANCELLED" };
       if (resolved.error) {
         return {
           ok: false,
@@ -657,14 +642,15 @@ export class AgentRunner {
         };
       }
       const songFolder = resolved.folder!;
-      this.enterPhaseB(state, songFolder);
+      this.focusSong(state, songFolder);
       const hint = await this.buildWorkspaceHint(songFolder);
       // hint 嵌进 tool result(不能 push 独立 user 消息,会破坏 assistant.tool_calls
       // → tool result 的紧邻约束,触发 OpenAI 400)
       return {
         ok: true,
-        message: `已进入质检流程,song=${songFolder}`,
+        message: `已定位歌曲 ${songFolder},会话可继续处理其他歌曲。`,
         song_folder: songFolder,
+        song_path: this.resolveWorkspacePath(songFolder),
         workspace_hint: hint || null,
       };
     }
@@ -716,7 +702,20 @@ export class AgentRunner {
     }
     // MCP tool
     try {
-      const r = await this.mcp.callTool({ name, arguments: args });
+      const controller = ADVANCED_TOOLS.has(name) ? new AbortController() : null;
+      if (controller) this.advancedCalls.set(state.chatId, controller);
+      let r;
+      try {
+        const signal = this.runControllers.get(state.chatId)?.signal ?? controller?.signal;
+        r = await this.mcp.callTool({ name, arguments: args }, undefined, {
+          ...(signal ? { signal } : {}),
+          ...(controller ? { timeout: 620_000 } : {}),
+        });
+      } finally {
+        if (controller && this.advancedCalls.get(state.chatId) === controller) {
+          this.advancedCalls.delete(state.chatId);
+        }
+      }
       if (r.isError) {
         return { ok: false, code: "TOOL_ERROR", content: r.content };
       }
@@ -737,6 +736,7 @@ export class AgentRunner {
   private async callLlm(
     messages: Message[],
     tools: ToolSchema[],
+    signal?: AbortSignal,
   ): Promise<{
     message: Message;
     usage: Record<string, number>;
@@ -747,6 +747,7 @@ export class AgentRunner {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages, tools, tool_choice: "auto" }),
+      signal,
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -781,16 +782,19 @@ export class AgentRunner {
     }
     state.cancelled = false;
     state.running = true;
+    const controller = new AbortController();
+    this.runControllers.set(chatId, controller);
     // 先写 db 拿 turn_index,再 push 内存,保持 messages 跟 messageDbTurnIndexes 平行
     const msgRow = appendMessage({ session_id: chatId, role: "user" });
     appendPart({ message_id: msgRow.id, type: "text", content: { text: userText } as PartContentText });
     state.messages.push({ role: "user", content: userText });
     state.messageDbTurnIndexes.push(msgRow.turn_index);
     try {
-      await this.runLoop(state);
+      await this.runLoop(state, 40, controller.signal);
     } catch (e) {
-      this.emit({ chatId, type: "error", data: { message: String(e) } });
+      if (!state.cancelled) this.emit({ chatId, type: "error", data: { message: String(e) } });
     } finally {
+      this.runControllers.delete(chatId);
       state.running = false;
       this.emit({ chatId, type: "turn_done", data: { turn: state.turn } });
     }
@@ -798,9 +802,13 @@ export class AgentRunner {
 
   async startQc(chatId: string, song: string): Promise<void> {
     const state = this.getOrCreate(chatId);
+    if (state.running) {
+      this.emit({ chatId, type: "error", data: { message: "另一轮还在跑,请先 cancel 或等完成" } });
+      return;
+    }
     const resolved = await this.resolveSongFolder(song);
     if (resolved.error || !resolved.folder) {
-      // 解析失败:不进 Phase B,把候选清单当 assistant_text 反馈给用户
+      // 解析失败:向用户返回候选,不修改展示歌曲。
       this.emit({
         chatId,
         type: "error",
@@ -813,15 +821,15 @@ export class AgentRunner {
       return;
     }
     const songFolder = resolved.folder;
-    this.enterPhaseB(state, songFolder);
+    this.focusSong(state, songFolder);
     const hint = await this.buildWorkspaceHint(songFolder);
-    const opener = `开始质检 "${songFolder}"。请从 state_tree_read 和 1.1 开始,按工作手册推进。`;
+    const opener = `开始质检 "${songFolder}"。请先 state_tree_read 对齐已有进度,按工作手册继续检查;保留本会话其他歌曲的上下文。`;
     if (!state.running) {
       await this.send(chatId, hint ? `${opener}\n\n${hint}` : opener);
     }
   }
 
-  /** Phase B 启动时,基于当前 workspaceRoot 算一份候选清单注入到 user 消息。 */
+  /** 定位歌曲时,基于当前 workspaceRoot 算一份候选清单。 */
   private async buildWorkspaceHint(song: string): Promise<string> {
     if (!this.workspaceRoot) return "";
     try {
@@ -894,6 +902,8 @@ export class AgentRunner {
   cancel(chatId: string): void {
     const state = this.chats.get(chatId);
     if (state) state.cancelled = true;
+    this.runControllers.get(chatId)?.abort();
+    this.advancedCalls.get(chatId)?.abort();
     // 取消时也要唤醒挂起的 human_check,否则 await 永远挂住
     const pending = this.pendingHumanCheck.get(chatId);
     if (pending) {
@@ -1003,13 +1013,19 @@ export class AgentRunner {
     }
   }
 
-  private async runLoop(state: ChatState, maxTurns = 40): Promise<void> {
+  private async runLoop(state: ChatState, maxTurns = 40, signal = new AbortController().signal): Promise<void> {
     for (let i = 0; i < maxTurns; i++) {
       if (state.cancelled) return;
       this.maybeCompact(state); // 调 LLM 前压一次,降低本次请求 tokens
       this.sanitizeOrphanToolCalls(state); // 防 OpenAI 400: insufficient tool messages
       state.turn += 1;
-      const tools = await this.buildTools(state);
+      const tools = await abortable(this.buildTools(state), signal);
+      if (state.cancelled) return;
+      state.messages[0] = {
+        role: "system",
+        content: injectTaskPrompt(state.baseSystem, this.taskPrompt) + (state.advancedTools ? "\n\n" + this.advancedPrompt : "") +
+          "\n当前工作区: " + (this.workspaceRoot ?? "未设置"),
+      };
       // GA <history> 短期工作记忆:临时往 messages 末尾追加一条 user,调完撤掉,
       // 不污染 state.messages、不写 db。
       const anchor = buildAnchorMessage(state.summaryTrail, state.missedSummary);
@@ -1021,7 +1037,7 @@ export class AgentRunner {
       logLlmPrompt(state.chatId, state.turn, state.song, state.messages, tools);
       let llmOut;
       try {
-        llmOut = await this.callLlm(state.messages, tools);
+        llmOut = await abortable(this.callLlm(state.messages, tools, signal), signal);
       } finally {
         if (anchor) {
           const idx = state.messages.lastIndexOf(anchor);
@@ -1031,6 +1047,7 @@ export class AgentRunner {
           }
         }
       }
+      if (state.cancelled) return;
       const { message: assistant, usage, finishReason, cachedTokens } = llmOut;
       const rawContent = (assistant.content ?? "") as string;
       const content = cleanContent(rawContent);
@@ -1198,7 +1215,13 @@ export class AgentRunner {
           args = { _parse_error: String(e), _raw: call.function.arguments };
         }
         this.emit({ chatId: state.chatId, type: "tool_use", data: { name, args } });
-        const result = await this.executeTool(state, name, args);
+        let result: unknown;
+        try {
+          result = await abortable(this.executeTool(state, name, args), signal);
+        } catch (e) {
+          if (!state.cancelled) throw e;
+          result = { ok: false, code: "CANCELLED", message: "停止等待;已开始的操作可能已经生效,再次执行前核对实际状态。" };
+        }
         this.emit({
           chatId: state.chatId,
           type: "tool_result",

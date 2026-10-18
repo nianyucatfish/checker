@@ -6,6 +6,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
+    "dev:conda": "conda run --no-capture-output -n checker npm run dev",
     "postinstall": "electron-builder install-app-deps",
     "build": "npm run build:app && npm run package",
     "build:app": "tsc -b && vite build",

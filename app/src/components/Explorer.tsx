@@ -1239,7 +1239,7 @@ export function Explorer({
         onDrop={onPaneDrop}
       >
         {!root && (
-          <div className="px-3 py-3 flex flex-col gap-2 text-fg-muted">
+          <div className="px-3 py-3 flex flex-col gap-2 text-center text-fg-muted">
             <p className="text-[13px] leading-snug">你尚未打开工作区文件夹。</p>
             <button
               onClick={onPickWorkspace}

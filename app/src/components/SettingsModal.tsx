@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, Loader2, PackageCheck, RefreshCw, X } from "lucide-react";
 import {
+  devRefreshSheet,
   getLlmConfig,
   getTencentDocsConfig,
   saveLlmConfig,
@@ -30,17 +31,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [llmMsg, setLlmMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [tLoading, setTLoading] = useState(true);
-  const [clientId, setClientId] = useState("");
-  const [accessToken, setAccessToken] = useState("");
-  const [openId, setOpenId] = useState("");
-  const [spreadsheetId, setSpreadsheetId] = useState("");
-  const [sheetId, setSheetId] = useState("");
-  const [tokenExpiresAt, setTokenExpiresAt] = useState("");
+  const [sheetServerUrl, setSheetServerUrl] = useState("https://118.25.191.236/api/checker/v1");
+  const [sheetKey, setSheetKey] = useState("");
+  const [sheetKeySet, setSheetKeySet] = useState(false);
+  const [showSheetKey, setShowSheetKey] = useState(false);
   const [reviewerName, setReviewerName] = useState("");
-  const [showToken, setShowToken] = useState(false);
-  const [tokenMasked, setTokenMasked] = useState("");
-  const [tokenSet, setTokenSet] = useState(false);
   const [tSaving, setTSaving] = useState(false);
+  const [tTesting, setTTesting] = useState(false);
   const [tMsg, setTMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -67,15 +64,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
 
     getTencentDocsConfig()
       .then((c) => {
-        setClientId(c.client_id);
-        setAccessToken(c.access_token || "");
-        setOpenId(c.open_id);
-        setSpreadsheetId(c.spreadsheet_id);
-        setSheetId(c.sheet_id);
-        setTokenExpiresAt(c.access_token_expires_at);
+        setSheetServerUrl(c.sheet_server_url || "https://118.25.191.236/api/checker/v1");
+        setSheetKeySet(c.sheet_key_set);
+        setSheetKey(c.sheet_key);
         setReviewerName(c.reviewer_name);
-        setTokenMasked(c.token_masked);
-        setTokenSet(c.token_set);
       })
       .catch((e) => setTMsg({ ok: false, text: `读取失败: ${e instanceof Error ? e.message : String(e)}` }))
       .finally(() => setTLoading(false));
@@ -154,16 +146,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setTMsg(null);
     try {
       const c = await saveTencentDocsConfig({
-        client_id: clientId,
-        access_token: accessToken,
-        open_id: openId,
-        spreadsheet_id: spreadsheetId,
-        sheet_id: sheetId,
+        sheet_server_url: sheetServerUrl,
+        ...(sheetKey.trim() ? { sheet_key: sheetKey.trim() } : {}),
         reviewer_name: reviewerName,
       });
-      setTokenMasked(c.token_masked);
-      setTokenSet(c.token_set);
-      setAccessToken(c.access_token || accessToken);
+      setSheetKeySet(c.sheet_key_set);
+      setSheetKey(c.sheet_key);
       setTMsg({ ok: true, text: `已保存到 ${c.config_path}` });
       // AgentSidebar 的"表格·本地"徽章监听这个事件重查 sheet_mode
       window.dispatchEvent(new CustomEvent("sheet-config-changed"));
@@ -209,7 +197,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 : "border-transparent text-fg-muted hover:text-fg",
             )}
           >
-            腾讯文档 · 用户
+            分工表 · 用户
           </button>
           <button
             onClick={() => setTab("update")}
@@ -376,47 +364,25 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           ) : (
             <div className="p-4 flex flex-col gap-3 overflow-y-auto">
               <div className="text-xs text-fg-subtle leading-relaxed">
-                本区配置<b>可选</b>:没有腾讯开发者账号也能正常质检——分工表相关检查会降级为人工核对,本地检查照常进行。
+                填写管理员提供的表格密钥，通过 HTTPS 读取分工表。未配置时仍可进行本地质检，表格相关检查交由人工核对。
               </div>
               <div>
-                <div className={lbl}>Client ID</div>
-                <input className={inp} value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="从 docs.qq.com/open 复制" />
+                <div className={lbl}>分工表服务器</div>
+                <input className={inp} value={sheetServerUrl} onChange={(e) => setSheetServerUrl(e.target.value)} placeholder="https://服务器/api/checker/v1" />
               </div>
               <div>
-                <div className={lbl}>
-                  Access Token{tokenSet && !showToken && <span className="text-fg-subtle"> (当前 {tokenMasked})</span>}
-                  {tokenExpiresAt && <span className="text-fg-subtle"> · 过期: {tokenExpiresAt}</span>}
-                </div>
+                <div className={lbl}>表格密钥{sheetKeySet && <span className="text-fg-subtle">（已保存）</span>}</div>
                 <div className="relative">
-                  <input
-                    className={keyInput}
-                    type={showToken ? "text" : "password"}
-                    value={accessToken}
-                    onChange={(e) => setAccessToken(e.target.value)}
-                    placeholder="粘贴 access_token"
-                    autoComplete="off"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowToken((v) => !v)}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-fg-muted hover:bg-bg-hover hover:text-fg"
-                    title={showToken ? "隐藏 Access Token" : "显示 Access Token"}
-                  >
-                    {showToken ? <EyeOff size={14} /> : <Eye size={14} />}
-                  </button>
+                  <input className={keyInput} type={showSheetKey ? "text" : "password"} value={sheetKey} onChange={(e) => setSheetKey(e.target.value)} placeholder="输入管理员提供的共享密钥" autoComplete="off" />
+                  <button type="button" onClick={() => setShowSheetKey(v => !v)} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-fg-muted" title={showSheetKey ? "隐藏密钥" : "显示密钥"}>{showSheetKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
                 </div>
-              </div>
-              <div>
-                <div className={lbl}>Open ID</div>
-                <input className={inp} value={openId} onChange={(e) => setOpenId(e.target.value)} placeholder="从 docs.qq.com/open 复制" />
-              </div>
-              <div>
-                <div className={lbl}>分工表 ID (spreadsheet_id)</div>
-                <input className={inp} value={spreadsheetId} onChange={(e) => setSpreadsheetId(e.target.value)} placeholder="从分工表 URL 里抠" />
-              </div>
-              <div>
-                <div className={lbl}>子表 ID (sheet_id)</div>
-                <input className={inp} value={sheetId} onChange={(e) => setSheetId(e.target.value)} placeholder="单 sheet 表格可留空" />
+                {sheetKeySet && <button className="text-xs text-fg-muted mt-1" onClick={async () => {
+                  try {
+                    await saveTencentDocsConfig({ sheet_key: "" }); setSheetKeySet(false); setSheetKey("");
+                    window.dispatchEvent(new CustomEvent("sheet-config-changed"));
+                    setTMsg({ ok: true, text: "表格密钥已清除" });
+                  } catch { setTMsg({ ok: false, text: "清除密钥失败" }); }
+                }}>清除已保存密钥</button>}
               </div>
               <div className="border-t border-border pt-3 mt-1">
                 <div className={lbl}>验收负责人姓名</div>
@@ -434,6 +400,16 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <button onClick={saveTencent} disabled={tSaving} className="text-sm px-3 py-1.5 rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1">
                   {tSaving && <Loader2 size={12} className="animate-spin" />} 保存
                 </button>
+                <button disabled={tSaving || tTesting} className="text-sm px-3 py-1.5 rounded border border-border disabled:opacity-50" onClick={async () => {
+                  setTTesting(true);
+                  try {
+                    const result = await devRefreshSheet();
+                    setTMsg({ ok: result.server_sync_ok !== false, text: result.server_sync_ok === false
+                      ? "已连接，但服务器最近同步失败，当前返回上次成功的数据。请联系管理员。"
+                      : `连接成功，读取 ${Math.max(0, result.rows - 1)} 行数据${result.server_updated_at ? `；服务器更新时间：${new Date(result.server_updated_at).toLocaleString()}` : ""}` });
+                  } catch (e) { setTMsg({ ok: false, text: `连接失败：${e instanceof Error ? e.message : String(e)}` }); }
+                  finally { setTTesting(false); }
+                }}>{tTesting ? "测试中…" : "测试已保存配置"}</button>
               </div>
             </div>
           )

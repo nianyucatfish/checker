@@ -425,6 +425,8 @@ _client_lock = threading.Lock()
 def missing_config_fields() -> list[str]:
     """腾讯凭证缺失字段清单;空列表 = 凭证齐。get_client / api.py sheet_mode 共用同一套判据。"""
     cfg = get_config().tencent_docs
+    if cfg.sheet_server_url or cfg.sheet_key:
+        return [k for k, v in {"sheet_server_url": cfg.sheet_server_url, "sheet_key": cfg.sheet_key}.items() if not v]
     return [
         k for k, v in {
             "client_id": cfg.client_id,
@@ -448,6 +450,10 @@ def get_client() -> TencentSheetClient:
                     "tencent_docs config incomplete; missing fields: "
                     + ", ".join(missing)
                 )
+            if cfg.sheet_server_url:
+                from sidecar.remote_sheet import RemoteSheetClient
+                _client = RemoteSheetClient(cfg.sheet_server_url, cfg.sheet_key)
+                return _client
             _client = TencentSheetClient(
                 spreadsheet_id=cfg.spreadsheet_id,
                 sheet_id=cfg.sheet_id,

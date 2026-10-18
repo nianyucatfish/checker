@@ -67,12 +67,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // ---------- agent ----------
   agentSend: (chatId: string, text: string) =>
     ipcRenderer.invoke("agent:send", chatId, text),
+  agentSetAdvancedTools: (chatId: string, enabled: boolean) =>
+    ipcRenderer.invoke("agent:set-advanced-tools", chatId, enabled) as Promise<boolean>,
   agentStartQc: (chatId: string, song: string) =>
     ipcRenderer.invoke("agent:start-qc", chatId, song),
   agentCancel: (chatId: string) => ipcRenderer.invoke("agent:cancel", chatId),
   agentHydrate: (chatId: string) =>
     ipcRenderer.invoke("agent:hydrate", chatId) as Promise<{
-      phase: "A" | "B";
+      advancedTools: boolean;
       song: string | null;
       turns: unknown[];
     }>,
@@ -84,13 +86,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("agent:set-workspace", root),
   agentListSessions: () =>
     ipcRenderer.invoke("agent:list-sessions") as Promise<
-      Array<{ id: string; title: string; phase: string | null; song: string | null; updated_at: number }>
+      Array<{ id: string; title: string; song: string | null; updated_at: number }>
     >,
   agentNewSession: (title?: string) =>
     ipcRenderer.invoke("agent:new-session", title) as Promise<{
       id: string;
       title: string;
-      phase: string | null;
       song: string | null;
       updated_at: number;
     }>,
@@ -131,5 +132,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   ) => ipcRenderer.send("playback:toggle-result", reqId, result),
   // ---------- agent dev toggles ----------
   agentGetDumpLlm: () => ipcRenderer.invoke("agent:get-dump-llm") as Promise<boolean>,
+  agentPullPrompts: () => ipcRenderer.invoke("agent:pull-prompts") as Promise<{ version: string; message: string }>,
+  agentGetPersonalEnabled: () => ipcRenderer.invoke("agent:get-personal-enabled") as Promise<boolean>,
+  agentGetTaskPrompt: () => ipcRenderer.invoke("agent:get-task-prompt") as Promise<string>,
+  agentSetTaskPrompt: (text: string) => ipcRenderer.invoke("agent:set-task-prompt", text) as Promise<string>,
   agentSetDumpLlm: (on: boolean) => ipcRenderer.invoke("agent:set-dump-llm", on) as Promise<void>,
 });

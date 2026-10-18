@@ -1,6 +1,6 @@
 """sidecar.state_tree — per-song markdown state tree.
 
-Workflow.md 的"单一真相":每首歌一个 markdown,落在 `<repo_root>/cache/state_tree/<song_slug>.md`。
+Workflow.md 的"单一真相":每首歌一个 `state_tree/<song_slug>/progress.md`。
 **Scope = song**(2026-05-16 用户拍板,见 memory `project_state_tree_song_scoped`):
 同一首歌即便换了 chat / 重启 app,进度仍在;chat 是临时的,song 的 todo 是持久的。
 
@@ -133,6 +133,11 @@ def md_path(song: str) -> Path:
 
     Scope = song(不再 keyed by chat_id):同一首歌的所有 chat 共享一份 md。
     """
+    return _cache_root() / "state_tree" / _sanitize(song) / "progress.md"
+
+
+def legacy_md_path(song: str) -> Path:
+    """旧版文件保留为迁移备份;新 progress.md 存在时始终以新文件为准。"""
     return _cache_root() / "state_tree" / f"{_sanitize(song)}.md"
 
 
@@ -194,7 +199,9 @@ def init_state_tree(song: str) -> Path:
     p = md_path(song)
     if not p.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(_initial_content(song), encoding="utf-8")
+        legacy = legacy_md_path(song)
+        text = legacy.read_text(encoding="utf-8") if legacy.is_file() else _initial_content(song)
+        p.write_text(_migrate_legacy_content(text), encoding="utf-8")
     else:
         text = p.read_text(encoding="utf-8")
         migrated = _migrate_legacy_content(text)

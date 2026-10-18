@@ -1,13 +1,8 @@
+import { SheetModal } from "./SheetModal";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { clsx } from "../utils";
 import { SettingsModal } from "./SettingsModal";
-import {
-  devSheetStatus,
-  devRefreshSheet,
-  devListMyPending,
-  devListMyAccepted,
-} from "../api";
 
 interface Props {
   hasWorkspace: boolean;
@@ -148,20 +143,50 @@ export function Toolbar({
   onScan,
   onToggleMixConsole,
 }: Props) {
-  const [openMenu, setOpenMenu] = useState<"file" | "help" | "dev" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"file" | "help" | "sheet" | "dev" | null>(null);
+  const [showSheet, setShowSheet] = useState(false);
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const fileBtnRef = useRef<HTMLButtonElement | null>(null);
   const helpBtnRef = useRef<HTMLButtonElement | null>(null);
   const devBtnRef = useRef<HTMLButtonElement | null>(null);
 
-  // ⚠️ 临时:开发者菜单结果弹窗 —— 工具齐了删除整段
-  // text 模式: JSON dump,简单状态/错误用;
-  // table 模式: list_my_pending 这种条目类结果用,看起来像缩小版分工表。
+  // 分工表与开发者操作共用结果弹窗。
   type DevResult =
     | { kind: "text"; title: string; body: string; error: boolean }
     | { kind: "table"; title: string; columns: string[]; rows: string[][] };
   const [devResult, setDevResult] = useState<DevResult | null>(null);
   const [devBusy, setDevBusy] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
+  useEffect(() => { setCopyStatus(""); }, [devResult]);
+  const copyResult = async (text: string) => {
+    try {
+      await window.electronAPI.clipboardWriteText(text);
+      setCopyStatus("已复制");
+    } catch { setCopyStatus("复制失败，请重试"); }
+  };
+  const [personalEnabled, setPersonalEnabled] = useState(false);
+  useEffect(() => { window.electronAPI.agentGetPersonalEnabled().then(setPersonalEnabled).catch(() => {}); }, []);
+  const [taskDraft, setTaskDraft] = useState<string | null>(null);
+  const [taskError, setTaskError] = useState("");
+  const [taskSaving, setTaskSaving] = useState(false);
+  const editTaskPrompt = async () => {
+    try {
+      const text = await window.electronAPI.agentGetTaskPrompt();
+      setTaskError("");
+      setTaskDraft(text);
+    } catch (e) {
+      setDevResult({ kind: "text", title: "读取当前任务失败", body: String(e), error: true });
+    }
+  };
+  const saveTaskPrompt = async () => {
+    if (taskDraft === null || taskSaving) return;
+    setTaskSaving(true);
+    try {
+      await window.electronAPI.agentSetTaskPrompt(taskDraft);
+      setTaskDraft(null);
+    } catch (e) { setTaskError(String(e)); }
+    finally { setTaskSaving(false); }
+  };
 
   // 录制 LLM 上下文开关。mount 时从 main 拿当前值,优先用 localStorage 覆盖一次
   // (重启 Electron 后 main 端会回到环境变量默认,renderer 端持久化做"上次怎么开就怎么开")。
@@ -212,26 +237,6 @@ export function Toolbar({
       setDevResult({
         kind: "text",
         title,
-        body: e instanceof Error ? e.message : String(e),
-        error: true,
-      });
-    } finally {
-      setDevBusy(false);
-    }
-  };
-
-  const runDevAsync = async (
-    errorTitle: string,
-    build: () => Promise<DevResult>,
-  ) => {
-    if (devBusy) return;
-    setDevBusy(true);
-    try {
-      setDevResult(await build());
-    } catch (e) {
-      setDevResult({
-        kind: "text",
-        title: errorTitle,
         body: e instanceof Error ? e.message : String(e),
         error: true,
       });
@@ -313,46 +318,9 @@ export function Toolbar({
 
   // ⚠️ 临时开发者菜单 —— 工具齐了删掉
   const devMenuItems: (MenuItem | "sep")[] = [
-    {
-      label: "查看缓存状态",
-      onClick: () => runDev("缓存状态", devSheetStatus),
-      disabled: devBusy,
-    },
-    {
-      label: "我的待验收歌曲 (整行)",
-      onClick: () =>
-        runDevAsync("我的待验收歌曲", async () => {
-          const out = await devListMyPending();
-          return {
-            kind: "table",
-            title: `我的待验收歌曲 (共 ${out.count} 条)`,
-            columns: ["行号", ...out.headers],
-            rows: out.items.map((it) => [String(it.row_index), ...it.cells]),
-          };
-        }),
-      disabled: devBusy,
-    },
-    {
-      label: "我的已验收歌曲 (整行)",
-      onClick: () =>
-        runDevAsync("我的已验收歌曲", async () => {
-          const out = await devListMyAccepted();
-          return {
-            kind: "table",
-            title: `我的已验收歌曲 (共 ${out.count} 条)`,
-            columns: ["行号", ...out.headers],
-            rows: out.items.map((it) => [String(it.row_index), ...it.cells]),
-          };
-        }),
-      disabled: devBusy,
-    },
+    { label: "拉取质检提示词", onClick: () => runDev("质检提示词版本", () => window.electronAPI.agentPullPrompts()) },
     "sep",
-    {
-      label: "强制刷新整表 (~30s)",
-      onClick: () => runDev("强制刷新整表", devRefreshSheet),
-      disabled: devBusy,
-    },
-    "sep",
+    ...(personalEnabled ? [{ label: "编辑当前任务提示词…", onClick: () => { void editTaskPrompt(); } }, "sep" as const] : []),
     {
       // 调试 GA 压缩 / trail 用:开启后每轮 LLM 调用前 dump 完整 messages + tools 到
       // tmp/agent_contexts/<chatId>_t<NNN>.txt。对比 t4 vs t5 可看出软压效果。
@@ -394,6 +362,7 @@ export function Toolbar({
         disabled={!hasWorkspace}
         active={mixConsoleOpen}
       />
+      <ToolbarBtn label="分工表" active={showSheet} onClick={() => setShowSheet(true)} />
       <button
         ref={helpBtnRef}
         onClick={showHelpMenu}
@@ -448,6 +417,21 @@ export function Toolbar({
         <DropdownMenu anchorRect={anchor} items={devMenuItems} onClose={closeMenu} />
       )}
       {/* ⚠️ 临时:开发者结果弹窗 (text=JSON / table=表格) */}
+      {taskDraft !== null && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-8" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title">
+          <div className="bg-bg-sidebar border border-border rounded-md flex flex-col max-w-3xl w-full p-4 gap-3">
+            <h2 id="task-prompt-title" className="text-sm font-medium text-fg">当前任务提示词</h2>
+            <p className="text-xs text-fg-muted">保存后应用于所有会话的下一次模型请求，放在系统提示词开头介绍之后，以“当前任务：”标识。留空并保存即可移除，重启后保留。</p>
+            <textarea aria-label="当前任务提示词" autoFocus value={taskDraft} onChange={(e) => setTaskDraft(e.target.value)} disabled={taskSaving} maxLength={100000}
+              className="h-[45vh] min-h-48 bg-bg border border-border rounded p-3 text-sm text-fg resize-y selectable" />
+            {taskError && <p role="alert" className="text-xs text-red-500">{taskError}</p>}
+            <div className="flex justify-end gap-3 text-sm">
+              <button disabled={taskSaving} onClick={() => setTaskDraft(null)} className="text-fg-muted">取消</button>
+              <button disabled={taskSaving} onClick={() => { void saveTaskPrompt(); }} className="rounded bg-accent px-3 py-1 text-white">{taskSaving ? "保存中…" : "保存"}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {devResult && (
         <div
           className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-8"
@@ -469,12 +453,20 @@ export function Toolbar({
                 {devResult.kind === "text" && devResult.error ? "✗ " : "✓ "}
                 {devResult.title}
               </div>
+              <div className="flex items-center gap-3">
+                <span role="status" className="text-xs text-fg-muted">{copyStatus}</span>
+                <button
+                  onClick={() => void copyResult(devResult.kind === "text" ? devResult.body :
+                    [devResult.columns, ...devResult.rows].map(row => row.map(cell => /[\t\r\n"]/.test(cell) ? `"${cell.replace(/"/g, '\"\"')}"` : cell).join("\t")).join("\n"))}
+                  className="text-xs text-fg-muted hover:text-fg px-2 py-0.5 rounded hover:bg-bg-hover"
+                >{devResult.kind === "table" ? "复制表格" : "复制内容"}</button>
               <button
                 onClick={() => setDevResult(null)}
                 className="text-xs text-fg-muted hover:text-fg px-2 py-0.5 rounded hover:bg-bg-hover"
               >
                 关闭 (Esc)
               </button>
+              </div>
             </div>
             {devResult.kind === "text" ? (
               <pre className="flex-1 overflow-auto p-3 text-xs font-mono text-fg whitespace-pre-wrap break-all selectable">
@@ -513,7 +505,11 @@ export function Toolbar({
                               ci === 0 && "font-mono text-fg-muted tabular-nums",
                             )}
                           >
-                            {cell}
+                            <button
+                              title="点击复制单元格"
+                              onClick={() => void copyResult(cell)}
+                              className="text-left whitespace-pre-wrap hover:underline"
+                            >{cell || "—"}</button>
                           </td>
                         ))}
                       </tr>
@@ -526,6 +522,7 @@ export function Toolbar({
         </div>
       )}
 
+      {showSheet && <SheetModal onClose={() => setShowSheet(false)} />}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );
