@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -23,5 +23,6 @@ function run(command, args) {
 }
 
 await run("qlmanage", ["-t", "-s", "540", "-o", assets, source]);
-await run("sips", ["-z", "380", "540", path.join(assets, "dmg-background.svg.png"), "--out", destination]);
+await run("swift", [path.join(repo, "scripts", "crop-dmg-background.swift"), path.join(assets, "dmg-background.svg.png"), destination]);
+await rm(path.join(assets, "dmg-background.svg.png"), { force: true });
 console.log(`Rendered DMG background in ${assets}; app icons use the checked-in PNG/ICNS/ICO assets.`);
