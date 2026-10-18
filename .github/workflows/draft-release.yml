@@ -268,6 +268,17 @@ jobs:
             for file in "${files[@]}"; do echo "- \`$(basename "$file")\`"; done
             echo "- \`SHA256SUMS.txt\`"
             echo
+            echo "## macOS first launch"
+            echo
+            echo "Drag Audio QC into Applications. If macOS blocks this trusted build, the DMG includes \`首次启动辅助.command\`; it asks for confirmation and removes only Audio QC's download quarantine attribute. It does not sign or notarize the app."
+            echo
+            echo "If the helper is also blocked, after installing the app you can run this command in Terminal, only if you trust this build:"
+            echo
+            echo '```bash'
+            echo 'xattr -dr com.apple.quarantine "/Applications/Audio QC.app"'
+            echo 'open "/Applications/Audio QC.app"'
+            echo '```'
+            echo
             echo "## Offline update integrity"
             echo
             echo "The update ZIP manifests are unsigned drafts. Their per-file SHA-256 hashes detect corruption but are integrity-only and do not provide an authentic signature or prove publisher identity."

@@ -61,6 +61,10 @@ try {
   if (!applications.isSymbolicLink() && !applications.isFile()) {
     throw new Error("DMG Applications alias is missing");
   }
+  const helper = path.join(mount, "首次启动辅助.command");
+  const helperInfo = await lstat(helper);
+  if (!helperInfo.isFile() || !(helperInfo.mode & 0o111)) throw new Error("DMG startup helper missing or not executable");
+  await run("/bin/bash", ["-n", helper]);
   await detachDmg(mount, run);
   mounted = false;
 

@@ -80,3 +80,14 @@ v1 单体 PyQt 版本现保留在 git history (tag/branch 视情况而定),工�
 ### 浏览器插件源码
 
 GA 浏览器插件位于 [plugin/browser-bridge](plugin/browser-bridge/README.md)，基于 [GenericAgent](https://github.com/lsdefine/GenericAgent)，保留 MIT 许可证。该目录可直接作为 Chrome 已解压扩展加载；来源记录、修改说明及更新方式见目录中的 README。后续发布流程应使用这份源码。
+
+### macOS 首次启动辅助
+
+DMG 中先将 Audio QC 拖入 Applications；仅当 macOS 拦截可信的未签名构建时，再双击“首次启动辅助.command”。脚本说明用途并等待输入 y 确认，只移除 `/Applications/Audio QC.app` 的下载隔离属性，不改变系统安全设置、不提供 Apple 签名或公证。请确认安装包来自本项目，并核对下载校验值；应用标识检查仅用于避免误操作，不证明来源。
+
+脚本也可能被 macOS 拦截。安装后可在终端手动执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Audio QC.app"
+open "/Applications/Audio QC.app"
+```

@@ -1,16 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="540" height="380" viewBox="0 0 540 380">
-  <defs>
-    <linearGradient id="bg" x2="0" y2="1"><stop stop-color="#ffffff"/><stop offset="1" stop-color="#f1f2f3"/></linearGradient>
-  </defs>
-  <rect width="540" height="380" fill="url(#bg)"/>
-  <g font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue',sans-serif" text-anchor="middle">
-    <text x="270" y="55" font-size="11" letter-spacing="3" fill="#8b8e94">AUDIO QC</text>
-    <text x="270" y="92" font-size="25" font-weight="600" fill="#25272b">拖入应用程序，即可安装</text>
-    <text x="270" y="119" font-size="12" fill="#8b8e94">将左侧 Audio QC 拖到右侧 Applications 文件夹</text>
-    <rect x="70" y="165" width="120" height="116" rx="24" fill="#e9eaec" opacity=".55"/>
-    <rect x="350" y="165" width="120" height="116" rx="24" fill="#e9eaec" opacity=".55"/>
-    <path d="M218 219h98m-13-13 13 13-13 13" stroke="#92969d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-    <text x="270" y="333" font-size="11" fill="#92969d">安装完成后，从应用程序中打开 Audio QC</text>
-    <text x="270" y="353" font-size="10" fill="#b0b3b8">Drag to Applications to install</text>
+  <rect width="540" height="380" fill="#fafafa"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif">
+    <text x="270" y="54" text-anchor="middle" font-size="19" font-weight="500" fill="#34363b">拖入 Applications 安装</text>
+    <path d="M225 150h90m-12-12 12 12-12 12" stroke="#a3a5aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M45 224h450" stroke="#e6e6e8"/>
+    <text x="225" y="270" font-size="12" fill="#62656c">首次启动被 macOS 拦截？</text>
+    <text x="225" y="293" font-size="11" fill="#8b8e94">安装后，可双击左侧辅助脚本。</text>
+    <text x="225" y="312" font-size="10" fill="#a1a3a8">仅移除 Audio QC 的下载隔离标记。</text>
+    <text x="270" y="359" text-anchor="middle" font-size="10" fill="#a1a3a8">脚本若也被拦截，请参阅下载页的手动操作说明。</text>
   </g>
 </svg>
