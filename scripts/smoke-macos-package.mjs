@@ -1,3 +1,4 @@
+import { detachDmg } from "./detach-dmg.mjs";
 import { lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -47,9 +48,11 @@ async function appChecks(appPath) {
 const work = await mkdtemp(path.join(tmpdir(), "audio-qc-macos-smoke-"));
 const mount = path.join(work, "mount");
 const extracted = path.join(work, "update-zip");
+let mounted = false;
 try {
   await run("mkdir", ["-p", mount]);
   await run("hdiutil", ["attach", path.join(releaseDir, dmg), "-nobrowse", "-readonly", "-mountpoint", mount]);
+  mounted = true;
   const mountedApp = path.join(mount, "Audio QC.app");
   await appChecks(mountedApp);
   // `stat()` follows the drag target to /Applications (a directory). `lstat()`
@@ -58,7 +61,8 @@ try {
   if (!applications.isSymbolicLink() && !applications.isFile()) {
     throw new Error("DMG Applications alias is missing");
   }
-  await run("hdiutil", ["detach", mount]);
+  await detachDmg(mount, run);
+  mounted = false;
 
   await run("mkdir", ["-p", extracted]);
   // ditto, unlike BSD unzip, retains macOS symlinks and executable mode bits.
@@ -66,6 +70,10 @@ try {
   await appChecks(path.join(extracted, "Audio QC.app"));
   console.log(`macOS ${arch} package smoke check passed`);
 } finally {
-  await run("hdiutil", ["detach", mount]).catch(() => undefined);
-  await rm(work, { recursive: true, force: true });
+  if (mounted) {
+    try { await detachDmg(mount, run); mounted = false; }
+    catch (error) { console.warn(`Leaving mounted image at ${mount}: ${error.message}`); }
+  }
+  // Never recursively remove a directory that is still a mounted filesystem.
+  if (!mounted) await rm(work, { recursive: true, force: true, maxRetries: 3, retryDelay: 1000 });
 }
