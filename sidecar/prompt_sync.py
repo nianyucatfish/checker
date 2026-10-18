@@ -23,7 +23,7 @@ def cache_path(): return paths.cache_dir() / 'remote-prompts.json'
 
 
 def cached():
-    try: return validate(json.loads(cache_path().read_text()))
+    try: return validate(json.loads(cache_path().read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError): return None
 
 

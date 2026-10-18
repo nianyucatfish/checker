@@ -1,3 +1,4 @@
+import os
 import io
 import json
 from types import SimpleNamespace
@@ -64,7 +65,8 @@ def test_settings_restore_saved_key_for_visibility_toggle_and_reset_client(tmp_p
     r = c.post('/config/tencent', json={'sheet_server_url': 'https://example.com/api', 'sheet_key': 'private-key', 'reviewer_name': '测试员'})
     assert r.status_code == 200 and r.json()['sheet_key_set']
     assert r.json()['sheet_key'] == 'private-key'
-    assert path.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o077 == 0
     first = tencent_sheet.get_client()
     r = c.post('/config/tencent', json={'reviewer_name': '测试员'})
     assert config.get_config().tencent_docs.sheet_key == 'private-key'
@@ -78,7 +80,7 @@ def test_settings_restore_saved_key_for_visibility_toggle_and_reset_client(tmp_p
 def test_table_view_marks_owner_and_acceptance_without_requiring_reviewer(tmp_path, monkeypatch):
     from sidecar import assignment_sheet as sheet
     path = tmp_path / 'config.toml'
-    path.write_text('[user]\nreviewer_name = "测试员"\n')
+    path.write_text('[user]\nreviewer_name = "测试员"\n', encoding='utf-8')
     monkeypatch.setenv('CHECKER_CONFIG', str(path))
     monkeypatch.setattr(config, '_cached', None)
     rows = payload()['rows']
