@@ -255,13 +255,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <input className={inp} value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://api.deepseek.com" />
               </div>
               <div>
-                <div className={lbl}>模型</div>
-                <ModelPicker value={model} onChange={setModel} models={models} loading={modelsLoading}
-                  canFetch={Boolean(endpoint.trim() && apiKey.trim())} onFetch={() => void loadModels()} />
-                <p className="text-xs text-fg-subtle mt-1">可手动填写，或获取列表后搜索选择。</p>
-                {modelsMessage && <p role="status" className="text-xs text-fg-muted mt-1">{modelsMessage}</p>}
-              </div>
-              <div>
                 <div className={lbl}>
                   API Key{llmKeySet && !showApiKey && <span className="text-fg-subtle"> (当前 {llmKeyMasked})</span>}
                 </div>
@@ -284,6 +277,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   </button>
                 </div>
               </div>
+              <div>
+                <div className={lbl}>模型</div>
+                <ModelPicker value={model} onChange={setModel} models={models} loading={modelsLoading}
+                  canFetch={Boolean(endpoint.trim() && apiKey.trim())} onFetch={() => void loadModels()} />
+                <p className="text-xs text-fg-subtle mt-1">{!endpoint.trim() || !apiKey.trim() ? "先填写服务地址和 API Key，即可获取模型列表；也可手动填写。" : "可手动填写，或点击获取按钮后搜索选择。"}</p>
+                {modelsMessage && <p role="status" className="text-xs text-fg-muted mt-1">{modelsMessage}</p>}
+              </div>
+
 
               {llmMsg && (
                 <div className={clsx("text-xs rounded px-2 py-1.5 break-all", llmMsg.ok ? "text-green-600 bg-green-500/10" : "text-red-500 bg-red-500/10")}>
