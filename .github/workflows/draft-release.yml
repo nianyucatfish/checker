@@ -32,10 +32,13 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       target_sha: ${{ steps.release.outputs.target_sha }}
+      should_build: ${{ steps.release.outputs.should_build }}
     steps:
       - name: Resolve and validate release identity
         id: release
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
@@ -56,9 +59,19 @@ jobs:
             [[ "$tag" == "v$version" ]] || { echo "Tag must match version exactly (v$version): $tag" >&2; exit 1; }
           fi
           printf 'version=%s\ntag=%s\ntarget_sha=%s\n' "$version" "$tag" "$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          # Publishing a draft creates its tag and triggers this workflow again.
+          # A public release is immutable here: skip its redundant build cleanly.
+          published="$(gh release view "$tag" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
+          if [[ "$published" == "false" ]]; then
+            echo "Release $tag is already public; skipping duplicate build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
 
   windows-x64:
     needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -105,6 +118,7 @@ jobs:
 
   macos:
     needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       matrix:
