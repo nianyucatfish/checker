@@ -256,7 +256,9 @@ jobs:
           compgen -G "release-assets/Audio QC-$VERSION-macos-x64-*.zip" >/dev/null
           compgen -G "release-assets/Audio QC-$VERSION-macos-arm64-*.dmg" >/dev/null
           compgen -G "release-assets/Audio QC-$VERSION-macos-arm64-*.zip" >/dev/null
-          (cd release-assets && sha256sum * > SHA256SUMS.txt)
+          # GitHub normalizes spaces in uploaded asset names to dots.
+          # Keep the checksum paths equal to the actual download filenames.
+          (cd release-assets && sha256sum * | sed 's/  Audio QC-/  Audio.QC-/' > SHA256SUMS.txt)
           unsigned=false
           compgen -G 'release-assets/*-unsigned.dmg' >/dev/null && unsigned=true
           {
