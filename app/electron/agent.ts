@@ -1,3 +1,4 @@
+import { requestError } from "../src/lib/requestError";
 // AgentRunner — tool-calling agent loop running in Electron main.
 //
 // 结构:
@@ -750,8 +751,7 @@ export class AgentRunner {
       signal,
     });
     if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`LLM HTTP ${resp.status}: ${text.slice(0, 500)}`);
+      throw await requestError(resp);
     }
     const data = (await resp.json()) as {
       message: Message;

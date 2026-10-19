@@ -435,10 +435,12 @@ export function AgentSidebar() {
           ]);
           break;
         }
-        case "error":
+        case "error": {
           setSending(false);
-          setError(compact(ev.data, 500));
+          const message = (ev.data as { message?: unknown } | null)?.message;
+          setError(typeof message === "string" ? message.replace(/^Error:\s*/, "") : "本次请求未完成，请稍后重试。");
           break;
+        }
       }
     });
     return off;
@@ -629,7 +631,7 @@ export function AgentSidebar() {
         {sheetConfigured === false && (
           <span
             className="shrink-0 text-[10px] leading-none px-1.5 py-1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400"
-            title="腾讯文档未配置或不完整:质检照常本地跑,分工表核对/写回由你人工完成。可在 设置 → 腾讯文档·用户 里配置。"
+            title="分工表尚未配置完整，可在设置 → 分工表 · 用户中填写服务器地址、表格密钥和验收负责人姓名。本地质检仍可继续。"
           >
             表格·本地
           </span>

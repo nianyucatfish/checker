@@ -79,11 +79,23 @@ def health():
     return {"ok": True, "service": "sidecar", "version": app.version}
 
 
+def _require_model_config(cfg):
+    missing = [name for name, value in [("服务地址", cfg.endpoint), ("API 密钥", cfg.api_key), ("模型名称", cfg.model)] if not value.strip()]
+    if missing:
+        raise HTTPException(status_code=400, detail="模型配置尚未完成，请前往「设置 → LLM API」填写" + "、".join(missing) + "并保存。")
+
+
+def _model_http_message(status):
+    if status in (401, 403): return "模型服务验证失败，请在设置中检查 API 密钥及模型访问权限。"
+    if status == 429: return "模型服务请求受限，请检查额度或稍后重试。"
+    if status in (400, 404): return "模型服务无法处理请求，请在设置中检查服务地址和模型名称。"
+    return "模型服务暂时不可用，请稍后重试。"
+
+
 @app.post("/chat", response_model=ChatOut)
 def chat(inp: ChatIn):
     cfg = reload_config().llm
-    if not cfg.endpoint or not cfg.api_key:
-        raise HTTPException(status_code=400, detail="llm.endpoint/api_key 未配置")
+    _require_model_config(cfg)
 
     body = {"messages": [m.model_dump() for m in inp.messages]}
     protocol = (cfg.protocol or "openai").lower()
@@ -105,9 +117,9 @@ def chat(inp: ChatIn):
             r.raise_for_status()
             data = r.json()
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"LLM HTTP {e.response.status_code}: {e.response.text[:500]}") from e
+        raise HTTPException(status_code=502, detail=_model_http_message(e.response.status_code)) from e
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"LLM request failed: {e}") from e
+        raise HTTPException(status_code=502, detail="无法连接模型服务，请检查网络和设置中的服务地址。") from e
 
     try:
         if protocol == "anthropic":
@@ -115,7 +127,7 @@ def chat(inp: ChatIn):
         else:
             content = data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as e:
-        raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
+        raise HTTPException(status_code=502, detail="模型服务返回了无法识别的内容，请检查模型和接口类型设置。") from e
     return ChatOut(message={"role": "assistant", "content": content}, model=cfg.model)
 
 
@@ -271,8 +283,7 @@ def agent_completion(body: dict):
     Electron main never sees it.
     """
     cfg = reload_config().llm
-    if not cfg.endpoint or not cfg.api_key:
-        raise HTTPException(status_code=400, detail="llm.endpoint/api_key 未配置")
+    _require_model_config(cfg)
 
     # 按 protocol 分发(适配在 llm_providers.py);agent 永远只发 OpenAI 形状,差异全在这翻译。
     protocol = (cfg.protocol or "openai").lower()
@@ -315,7 +326,7 @@ def agent_completion(body: dict):
                         print(f"[agent_completion] HTTP {r.status_code}, retry in {delay:.1f}s ({attempt+1}/{max_retries+1})", flush=True)
                         time.sleep(delay)
                         continue
-                    raise HTTPException(status_code=502, detail=f"LLM HTTP {r.status_code}: {r.text[:500]}")
+                    raise HTTPException(status_code=502, detail=_model_http_message(r.status_code))
                 data = r.json()
                 break
         except (httpx.TimeoutException, httpx.ConnectError) as e:
@@ -325,17 +336,17 @@ def agent_completion(body: dict):
                 print(f"[agent_completion] {type(e).__name__}, retry in {delay:.1f}s ({attempt+1}/{max_retries+1})", flush=True)
                 time.sleep(delay)
                 continue
-            raise HTTPException(status_code=502, detail=f"LLM request failed: {last_err}") from e
+            raise HTTPException(status_code=502, detail="连接模型服务超时，请检查网络和设置中的服务地址后重试。") from e
         except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"LLM request failed: {e}") from e
+            raise HTTPException(status_code=502, detail="无法连接模型服务，请检查网络和设置中的服务地址。") from e
     if data is None:
-        raise HTTPException(status_code=502, detail=f"LLM request failed after {max_retries+1} attempts: {last_err}")
+        raise HTTPException(status_code=502, detail="暂时无法连接模型服务，请稍后重试。")
 
     if protocol == "anthropic":
         try:
             parsed = llm.from_anthropic_response(data)
         except (KeyError, IndexError, TypeError) as e:
-            raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
+            raise HTTPException(status_code=502, detail="模型服务返回了无法识别的内容，请检查模型和接口类型设置。") from e
         msg = parsed["message"]
         finish_reason = parsed["finish_reason"]
         usage = parsed["usage"]
@@ -345,7 +356,7 @@ def agent_completion(body: dict):
             choice = data["choices"][0]
             msg = choice["message"]
         except (KeyError, IndexError, TypeError) as e:
-            raise HTTPException(status_code=502, detail=f"LLM response schema invalid: {data}") from e
+            raise HTTPException(status_code=502, detail="模型服务返回了无法识别的内容，请检查模型和接口类型设置。") from e
         finish_reason = choice.get("finish_reason", "")
         usage = data.get("usage", {})
         # 抽取 cache 命中数:覆盖 3 种主流 schema
@@ -947,15 +958,22 @@ def tool_move_paths(body: MovePathsIn):
 
 
 def _dev_error(e: Exception) -> HTTPException:
-    """把 sidecar 各种异常包成 400 + 可读文本,前端直接 alert。"""
-    from sidecar.tencent_sheet import TencentSheetError
+    from sidecar.tencent_sheet import TencentSheetError, TencentNotConfiguredError
+    if isinstance(e, TencentNotConfiguredError):
+        if "reviewer_name" in str(e):
+            message = "尚未填写验收负责人姓名，请前往「设置 → 分工表 · 用户」填写并保存。"
+        else:
+            message = "分工表尚未配置，请前往「设置 → 分工表 · 用户」填写服务器地址和表格密钥并保存。"
+        return HTTPException(status_code=400, detail=message)
     if isinstance(e, TencentSheetError):
-        return HTTPException(
-            status_code=400,
-            detail=f"{type(e).__name__}: {e} "
-                   f"(http_status={e.http_status}, api_code={e.api_code})",
-        )
-    return HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}")
+        if e.http_status in (401, 403):
+            message = "表格密钥无效或已更换，请在设置中更新，或联系管理员获取新密钥。"
+        elif e.http_status == 429:
+            message = "分工表请求过于频繁，请稍后重试。"
+        else:
+            message = "暂时无法读取分工表，请检查网络和服务器地址；若仍然失败，请联系管理员。"
+        return HTTPException(status_code=400, detail=message)
+    return HTTPException(status_code=400, detail="读取分工表失败，请稍后重试；若仍然失败，请联系管理员。")
 
 
 @app.get("/dev/sheet_status")

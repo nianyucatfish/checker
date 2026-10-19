@@ -1,3 +1,4 @@
+import { requestError } from "./lib/requestError";
 // 与 sidecar 通信的薄客户端。
 
 export interface ChatMessage {
@@ -288,7 +289,7 @@ async function getJson<T>(p: string, params?: Record<string, string>): Promise<T
   const url = new URL(base + p);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const r = await fetch(url.toString());
-  if (!r.ok) throw new Error(`${p} ${r.status}: ${await r.text()}`);
+  if (!r.ok) throw await requestError(r);
   return (await r.json()) as T;
 }
 
@@ -299,7 +300,7 @@ async function postJson<T>(p: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${p} ${r.status}: ${await r.text()}`);
+  if (!r.ok) throw await requestError(r);
   return (await r.json()) as T;
 }
 
