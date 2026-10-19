@@ -1,3 +1,4 @@
+import { waitForAgent } from "./agentReadiness";
 // Electron main process: spawn sidecar, manage window lifecycle.
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
@@ -290,9 +291,7 @@ let agentRunner: AgentRunner | null = null;
 let agentStartup: Promise<void> = Promise.resolve();
 
 async function readyAgent(): Promise<AgentRunner> {
-  await agentStartup;
-  if (!agentRunner) throw new Error("智能体启动失败，请重启软件；若仍然失败，请将日志反馈给开发者。");
-  return agentRunner;
+  return waitForAgent(agentStartup, () => agentRunner);
 }
 // 当前工作区(同步给 sidecar / mcp 子进程,做相对路径解析用)。
 // 渲染层每次切根都会推一次;mcp 子进程晚启 / 重启时也用它回灌。
