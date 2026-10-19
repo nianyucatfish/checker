@@ -46,14 +46,6 @@ function stripSummary(text: string): string {
   return text.replace(/<summary>[\s\S]*?<\/summary>/g, "").trim();
 }
 
-function compact(value: unknown, max = 200): string {
-  let s: string;
-  try { s = typeof value === "string" ? value : JSON.stringify(value); }
-  catch { s = String(value); }
-  if (!s) return "";
-  return s.length > max ? s.slice(0, max) + "…" : s;
-}
-
 function HumanCheckCard({
   turn,
   onResolve,
