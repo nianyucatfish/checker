@@ -6,7 +6,7 @@ import tempfile
 import urllib.request
 from sidecar import paths
 from sidecar.config import get_config
-from sidecar.remote_sheet import NoRedirect, validate_server_url
+from sidecar.remote_sheet import read_server_resource, validate_server_url
 
 FILES = {'agent_system.md', 'agent_workflow.md', 'advanced_tools.md'}
 
@@ -32,9 +32,7 @@ def pull():
     if not cfg.sheet_server_url or not cfg.sheet_key: raise ValueError('请先配置分工表服务器与表格密钥')
     url = validate_server_url(cfg.sheet_server_url) + '/prompts'
     request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + cfg.sheet_key})
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
-        raw = response.read(1000001)
-    if len(raw) > 1000000: raise ValueError('提示词响应过大')
+    raw = read_server_resource(request, 1000000)
     bundle = validate(json.loads(raw))
     p = cache_path();p.parent.mkdir(parents=True, exist_ok=True)
     temp_name = None

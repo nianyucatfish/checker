@@ -3,6 +3,7 @@ import io
 import json
 from types import SimpleNamespace
 import urllib.error
+import urllib.request
 import pytest
 from fastapi.testclient import TestClient
 from sidecar import config, tencent_sheet
@@ -98,3 +99,34 @@ def test_table_view_marks_owner_and_acceptance_without_requiring_reviewer(tmp_pa
     view = c.get('/sheet/view').json()
     assert len(view['items']) == 2 and not view['reviewer_set']
     assert not any(row['mine'] for row in view['items'])
+
+
+def test_server_prefers_direct_connection_and_uses_proxy_fallback(monkeypatch):
+    from sidecar.remote_sheet import read_server_resource
+    calls = []
+    class Opener:
+        def __init__(self, direct): self.direct = direct
+        def open(self, request, timeout):
+            if self.direct: raise urllib.error.URLError('network unavailable')
+            return io.BytesIO(b'ok')
+    def build(*handlers):
+        direct = any(isinstance(h, urllib.request.ProxyHandler) and h.proxies == {} for h in handlers)
+        calls.append(direct)
+        assert any(isinstance(h, NoRedirect) for h in handlers)
+        return Opener(direct)
+    monkeypatch.setattr('urllib.request.build_opener', build)
+    assert read_server_resource('https://example.com', 100) == b'ok'
+    assert calls == [True, False]
+
+
+@pytest.mark.parametrize('status', [301, 302, 401, 403, 429])
+def test_auth_errors_and_redirects_do_not_trigger_proxy_retry(monkeypatch, status):
+    from sidecar.remote_sheet import read_server_resource
+    calls = []
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(1)
+            raise urllib.error.HTTPError('https://example.com', status, 'error', {}, None)
+    monkeypatch.setattr('urllib.request.build_opener', lambda *args: Opener())
+    with pytest.raises(urllib.error.HTTPError): read_server_resource('https://example.com', 100)
+    assert len(calls) == 1

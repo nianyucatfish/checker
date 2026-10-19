@@ -23,6 +23,30 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def read_server_resource(request, max_bytes, timeout=10):
+    """Prefer direct access to our server, preserving system proxy as fallback.
+
+    Explicit ProxyHandler({}) bypasses OS and environment proxy discovery for
+    this request only. HTTPS validation and redirect refusal apply to both paths.
+    """
+    routes = [(urllib.request.ProxyHandler({}), NoRedirect()), (NoRedirect(),)]
+    for index, handlers in enumerate(routes):
+        try:
+            opener = urllib.request.build_opener(*handlers)
+            with opener.open(request, timeout=timeout) as response:
+                raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes: raise ValueError('response too large')
+            return raw
+        except urllib.error.HTTPError as e:
+            # Invalid keys, rate limits and redirects are not connectivity errors.
+            if index == 0 and e.code in (502, 503, 504): continue
+            raise
+        except OSError:
+            if index == 0: continue
+            raise
+    raise OSError('Server unavailable')
+
+
 class RemoteSheetClient:
     def __init__(self, url, key):
         self.url = validate_server_url(url)
@@ -45,10 +69,7 @@ class RemoteSheetClient:
                 return self._cache
             req = urllib.request.Request(self.url + '/sheet', headers={'Authorization': 'Bearer ' + self.key, 'Accept': 'application/json'})
             try:
-                opener = urllib.request.build_opener(NoRedirect())
-                with opener.open(req, timeout=20) as response:
-                    raw = response.read(16 * 1024 * 1024 + 1)
-                if len(raw) > 16 * 1024 * 1024: raise ValueError('response too large')
+                raw = read_server_resource(req, 16 * 1024 * 1024)
                 payload = json.loads(raw)
                 rows = payload['rows']
                 if not isinstance(rows, list) or not 2 <= len(rows) <= 5000: raise ValueError('invalid rows')
