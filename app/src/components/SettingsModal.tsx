@@ -1,3 +1,4 @@
+import { ModelPicker } from "./ModelPicker";
 import { useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, Loader2, PackageCheck, RefreshCw, X } from "lucide-react";
 import {
@@ -255,14 +256,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </div>
               <div>
                 <div className={lbl}>模型</div>
-                <input className={inp} list="llm-model-options" value={model} onChange={(e) => setModel(e.target.value)} placeholder="选择或输入模型名称" />
-                <datalist id="llm-model-options">{models.map(id => <option key={id} value={id} />)}</datalist>
-                <div className="flex items-center gap-2 mt-2">
-                  <button type="button" onClick={() => void loadModels()} disabled={modelsLoading || !endpoint.trim() || !apiKey.trim()} className="text-xs px-2 py-1 rounded border border-border hover:bg-bg-hover disabled:opacity-50 inline-flex items-center gap-1">
-                    {modelsLoading && <Loader2 size={12} className="animate-spin" />}{modelsLoading ? "获取中…" : "获取模型列表"}
-                  </button>
-                  <span className="text-xs text-fg-subtle">使用当前地址和密钥，无需先保存</span>
-                </div>
+                <ModelPicker value={model} onChange={setModel} models={models} loading={modelsLoading}
+                  canFetch={Boolean(endpoint.trim() && apiKey.trim())} onFetch={() => void loadModels()} />
+                <p className="text-xs text-fg-subtle mt-1">可手动填写，或获取列表后搜索选择。</p>
                 {modelsMessage && <p role="status" className="text-xs text-fg-muted mt-1">{modelsMessage}</p>}
               </div>
               <div>
