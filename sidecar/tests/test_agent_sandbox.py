@@ -31,6 +31,7 @@ def test_sheet_fixture_bypasses_tencent(monkeypatch, tmp_path):
     row[11] = "中等"
     row[12] = "否"
     row[13] = "齐全"
+    row[14] = "录音室 A"
     row[15] = "Neumann U87"
     row[16] = "Apollo Twin"
     row[17] = "Pro Tools"
