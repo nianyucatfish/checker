@@ -1083,3 +1083,26 @@ def sheet_view(force: bool = False):
                           for i, row in enumerate(rows[1:], 2) if sheet._cell(row, sheet.COL_SONG_NAME)]}
     except Exception as e:
         raise _dev_error(e)
+
+
+@app.post("/config/llm/models")
+def list_llm_models(body: dict):
+    from sidecar.model_catalog import fetch_models
+    cfg = reload_config().llm
+    values = {name: body.get(name, getattr(cfg, name)) for name in ("endpoint", "api_key", "protocol")}
+    if any(not isinstance(v, str) for v in values.values()):
+        raise HTTPException(400, "模型服务配置必须是文本。")
+    values = {k: v.strip() for k, v in values.items()}
+    if not values['endpoint'] or not values['api_key']:
+        raise HTTPException(400, "请先填写服务地址和 API 密钥，再获取模型列表。")
+    if values['protocol'] not in ('openai', 'anthropic'):
+        raise HTTPException(400, "请选择支持的接口协议。")
+    try:
+        return {"models": fetch_models(**values)}
+    except httpx.HTTPStatusError as e:
+        message = "该服务不支持获取模型列表，请手动填写模型名称。" if e.response.status_code in (404, 405) else _model_http_message(e.response.status_code)
+        raise HTTPException(502, message) from None
+    except httpx.HTTPError:
+        raise HTTPException(502, "无法获取模型列表，请检查网络和服务地址，也可以手动填写模型名称。") from None
+    except (ValueError, TypeError):
+        raise HTTPException(400, "无法读取模型列表，请检查服务地址，也可以手动填写模型名称。") from None

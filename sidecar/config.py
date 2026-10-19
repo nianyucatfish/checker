@@ -58,7 +58,7 @@ class LLMConfig:
     """
     endpoint: str = ""
     api_key: str = ""
-    model: str = "claude-opus-4-7"
+    model: str = ""
     protocol: str = "openai"
 
 
@@ -118,7 +118,7 @@ def _from_raw(raw: dict, source: Path) -> Config:
         llm=LLMConfig(
             endpoint=str(l.get("endpoint", "")),
             api_key=str(l.get("api_key", "")),
-            model=str(l.get("model", "claude-opus-4-7")),
+            model=str(l.get("model", "")),
             protocol=str(l.get("protocol", "openai")),
         ),
         agent_sandbox=AgentSandboxConfig(

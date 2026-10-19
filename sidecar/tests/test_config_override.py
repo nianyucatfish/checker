@@ -66,7 +66,7 @@ def test_write_llm_config_appends_missing_section(tmp_path, monkeypatch):
     assert raw["llm"]["protocol"] == "openai"
     assert raw["llm"]["endpoint"] == "http://new"
     assert raw["llm"]["api_key"] == "sk"
-    assert raw["llm"]["model"] == "claude-opus-4-7"
+    assert raw["llm"]["model"] == ""
 
 
 def test_load_config_ignores_legacy_llm_override(tmp_path, monkeypatch):

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, Loader2, PackageCheck, RefreshCw, X } from "lucide-react";
 import {
   devRefreshSheet,
   getLlmConfig,
+  fetchLlmModels,
   getTencentDocsConfig,
   saveLlmConfig,
   saveTencentDocsConfig,
@@ -23,6 +24,28 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [endpoint, setEndpoint] = useState("");
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsMessage, setModelsMessage] = useState("");
+  const catalogRequest = useRef(0);
+  useEffect(() => {
+    catalogRequest.current++;
+    setModels([]); setModelsMessage(""); setModelsLoading(false);
+    return () => { catalogRequest.current++; };
+  }, [protocol, endpoint, apiKey]);
+  const loadModels = async () => {
+    const request = ++catalogRequest.current;
+    setModelsLoading(true); setModelsMessage("");
+    try {
+      const out = await fetchLlmModels({ protocol, endpoint, api_key: apiKey });
+      if (request !== catalogRequest.current) return;
+      setModels(out.models);
+      setModelsMessage(out.models.length ? `已获取 ${out.models.length} 个模型，可选择或继续手动填写。` : "未返回可用模型，请手动填写模型名称。");
+    } catch (e) {
+      if (request === catalogRequest.current) setModelsMessage(e instanceof Error ? e.message : String(e));
+    } finally { if (request === catalogRequest.current) setModelsLoading(false); }
+  };
+
   const [showApiKey, setShowApiKey] = useState(false);
   const [llmKeyMasked, setLlmKeyMasked] = useState("");
   const [llmKeySet, setLlmKeySet] = useState(false);
@@ -232,7 +255,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </div>
               <div>
                 <div className={lbl}>模型</div>
-                <input className={inp} value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-chat" />
+                <input className={inp} list="llm-model-options" value={model} onChange={(e) => setModel(e.target.value)} placeholder="选择或输入模型名称" />
+                <datalist id="llm-model-options">{models.map(id => <option key={id} value={id} />)}</datalist>
+                <div className="flex items-center gap-2 mt-2">
+                  <button type="button" onClick={() => void loadModels()} disabled={modelsLoading || !endpoint.trim() || !apiKey.trim()} className="text-xs px-2 py-1 rounded border border-border hover:bg-bg-hover disabled:opacity-50 inline-flex items-center gap-1">
+                    {modelsLoading && <Loader2 size={12} className="animate-spin" />}{modelsLoading ? "获取中…" : "获取模型列表"}
+                  </button>
+                  <span className="text-xs text-fg-subtle">使用当前地址和密钥，无需先保存</span>
+                </div>
+                {modelsMessage && <p role="status" className="text-xs text-fg-muted mt-1">{modelsMessage}</p>}
               </div>
               <div>
                 <div className={lbl}>

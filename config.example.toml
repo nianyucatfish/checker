@@ -53,7 +53,7 @@ app_secret = ""
 protocol = "openai"
 endpoint = "http://127.0.0.1:8765"
 api_key = ""
-model = "claude-opus-4-7"
+model = ""
 
 
 [agent_sandbox]

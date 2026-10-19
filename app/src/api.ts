@@ -588,3 +588,7 @@ export interface SheetView {
 export async function getSheetView(force = false): Promise<SheetView> {
   return getJson(`/sheet/view?force=${force}`);
 }
+
+export async function fetchLlmModels(body: { protocol: string; endpoint: string; api_key: string }): Promise<{ models: string[] }> {
+  return postJson("/config/llm/models", body);
+}
