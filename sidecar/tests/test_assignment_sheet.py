@@ -143,6 +143,7 @@ _DEFAULTS = {
     "difficulty":             "中等",
     "tempo_changes":          "否",
     "four_pieces":            "齐全",
+    "recording_location":     "录音室 A",
     "microphone":             "Neumann U87",
     "sound_card":             "Apollo Twin",
     "recording_software":     "Pro Tools",
@@ -184,7 +185,7 @@ def _complete_row(**overrides) -> list[str]:
     row[11] = f["difficulty"]             # col 12
     row[12] = f["tempo_changes"]          # col 13
     row[13] = f["four_pieces"]            # col 14
-    # idx 14 / col 15 留空(反引号占位)
+    row[14] = f["recording_location"]     # col 15
     row[15] = f["microphone"]             # col 16
     row[16] = f["sound_card"]             # col 17
     row[17] = f["recording_software"]     # col 18
@@ -251,12 +252,12 @@ def test_all_required_filled_passes(fake_sheet):
     "genre", "emotion", "era",
     "transcribe_type", "transcribe_reviewer", "mix_owner", "mentor",
     "difficulty", "tempo_changes", "four_pieces",
-    "microphone", "sound_card", "recording_software", "mixer", "monitoring",
+    "recording_location", "microphone", "sound_card", "recording_software", "mixer", "monitoring",
     "vocal_a", "vocal_a_gender", "vocal_b", "vocal_b_gender",
     "pan_review_link",
 ])
 def test_each_required_field_when_empty_appears_in_missing(fake_sheet, field):
-    """逐一关闭 23 项必填字段,确认每个都能被 missing 检查抓到。"""
+    """逐一关闭 24 项必填字段,确认每个都能被 missing 检查抓到。"""
     fake_sheet([_complete_row(**{field: ""})])
     meta = asheet.get_song_meta("望春风")
     assert field in meta.missing_required_fields, (
@@ -482,3 +483,11 @@ def test_mcp_sheet_tools_map_not_configured_code(monkeypatch):
     out2 = mcp_server.sheet_get_song_meta("望春风")
     assert out2["ok"] is False
     assert out2["code"] == "SHEET_NOT_CONFIGURED"
+
+
+def test_recording_location_returned_and_whitespace_is_missing(fake_sheet):
+    fake_sheet([_complete_row(recording_location="录音室 A")])
+    meta = asheet.get_song_meta("望春风")
+    assert meta.recording_location == "录音室 A"
+    fake_sheet([_complete_row(recording_location="   ")])
+    assert "recording_location" in asheet.get_song_meta("望春风").missing_required_fields

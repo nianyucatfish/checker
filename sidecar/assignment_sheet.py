@@ -57,7 +57,7 @@ COL_MENTOR = 11
 COL_DIFFICULTY = 12
 COL_TEMPO_CHANGES = 13
 COL_FOUR_PIECES = 14
-# col 15 跳过(memory 笔记"真表头疑被吞")
+COL_RECORDING_LOCATION = 15
 COL_MICROPHONE = 16
 COL_SOUND_CARD = 17
 COL_RECORDING_SOFTWARE = 18
@@ -187,7 +187,7 @@ def _validate_backing_persons(value: str) -> str | None:
 #  必填字段 + validator 映射
 # ============================================================
 
-# 必填 23 项(2026-05-09 用户敲定:除选填外其他必填,歌手 AB 都要)。
+# 必填 24 项(2026-05-09 用户敲定:除选填外其他必填,歌手 AB 都要)。
 # 选填 5 项:a_score / b_score / backing / backing_gender / pan_mix_link
 # 改清单只改这,不改 SOP。
 _REQUIRED_META_FIELDS = [
@@ -204,6 +204,7 @@ _REQUIRED_META_FIELDS = [
     "difficulty",              # col 12 扒曲难度
     "tempo_changes",           # col 13 是否有速度变化
     "four_pieces",             # col 14 四大件
+    "recording_location",      # col 15 录音地点
     "microphone",              # col 16 话筒
     "sound_card",              # col 17 声卡
     "recording_software",      # col 18 录音软件
@@ -333,6 +334,7 @@ class SongMeta:
     difficulty: str
     tempo_changes: str
     four_pieces: str
+    recording_location: str
     microphone: str
     sound_card: str
     recording_software: str
@@ -509,6 +511,7 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
         "difficulty":             _cell(row, COL_DIFFICULTY),
         "tempo_changes":          _cell(row, COL_TEMPO_CHANGES),
         "four_pieces":            _cell(row, COL_FOUR_PIECES),
+        "recording_location":     _cell(row, COL_RECORDING_LOCATION),
         "microphone":             _cell(row, COL_MICROPHONE),
         "sound_card":             _cell(row, COL_SOUND_CARD),
         "recording_software":     _cell(row, COL_RECORDING_SOFTWARE),
@@ -570,6 +573,7 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
         difficulty=raw["difficulty"],
         tempo_changes=raw["tempo_changes"],
         four_pieces=raw["four_pieces"],
+        recording_location=raw["recording_location"],
         microphone=raw["microphone"],
         sound_card=raw["sound_card"],
         recording_software=raw["recording_software"],

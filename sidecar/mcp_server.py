@@ -207,7 +207,7 @@ def _find_song_root(file_or_dir: str, workspace_root: str) -> str:
 
 @mcp.tool()
 def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[str, Any]:
-    """Fetch song meta (28 fields) for 1.1 完整性 check. 人名已 sidecar 打码,网盘链接完整返回供下载和核对。
+    """Fetch song meta (including required recording_location / 录音地点) for 1.1 完整性 check. 人名已 sidecar 打码,网盘链接完整返回供下载和核对。
     Scope: only songs in current reviewer's range (身份隐藏 boundary).
     Key fields for 1.1: missing_required_fields, invalid_format_fields, derived.backing_count.
     歌名撞车(同 reviewer 下同 song_name 多行) → {ok: false, code: "AMBIGUOUS_SONG", candidates: [{row_index, song_name, owner, original_singer}]}, 用 candidates 里的 row_index 再调一次。

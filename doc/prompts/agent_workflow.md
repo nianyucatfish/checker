@@ -142,7 +142,7 @@ Part 1 的每个自动态都走同一个循环:
 **目标**:本歌的分工表条目必填字段都齐了。同时**确定交付形态**(几个文件夹 / 谁负责录混 / 谁负责编曲)供后续态使用。
 
 **步骤**:
-1. `sheet_get_song_meta(song)` → SongMeta(28 字段)
+1. `sheet_get_song_meta(song)` → SongMeta（含 `recording_location` 录音地点，空白会列入 `missing_required_fields`）
 2. `fs_list_dir(path="", max_depth=1)` 看工作区,有无 `{prefix}` / `{prefix}(混)` 配对
 3. 判**交付形态**: `mix_owner` 和 `pan_mix_link` 是配套字段,都空 → 单份;都非空 → 双份;**一个空一个有 → 数据不一致,note 让用户核对**。再用工作区有无 `(混)` 文件夹 cross-check。
 4. 单份交付时 `mix_owner` / `pan_mix_link` 报缺要**豁免**(`missing_required_fields` 里的它俩忽略);其他必填缺 → 写 note,推下一态。
