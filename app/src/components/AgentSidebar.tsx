@@ -342,6 +342,7 @@ export function AgentSidebar() {
         if (restored.length > 0) setTurns(restored);
       } catch (e) {
         console.warn("[agent] hydrate failed:", e);
+        if (!cancelled) setError("智能体初始化失败，请重启软件；若仍然失败，请将日志反馈给开发者。");
       }
     })();
     return () => { cancelled = true; };
@@ -903,7 +904,7 @@ export function AgentSidebar() {
               aria-checked={advancedTools}
               disabled={!advancedReady || advancedUpdating}
               className={`inline-flex items-center gap-2 text-[11px] disabled:opacity-40 disabled:cursor-not-allowed ${advancedTools ? "text-fg" : "text-fg-muted hover:text-fg"}`}
-              title="应用全局保存，切换对话和重启后保留；下一次模型请求生效。关闭后不再启动高级调用，正在执行的任务可用停止按钮中断。"
+              title={!advancedReady ? "正在等待智能体初始化；若长时间不可用，请查看错误提示并重启软件。" : advancedUpdating ? "正在保存高级工具设置…" : "应用全局保存，切换对话和重启后保留；下一次模型请求生效。关闭后不再启动高级调用，正在执行的任务可用停止按钮中断。"}
               onClick={async () => {
                 const targetChat = chatId;
                 setAdvancedUpdating(true);

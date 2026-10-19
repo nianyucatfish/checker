@@ -287,6 +287,13 @@ function spawnSidecar() {
 // 句柄;close() 会关 transport 并把子进程一并带走。
 let mcpClient: Client | null = null;
 let agentRunner: AgentRunner | null = null;
+let agentStartup: Promise<void> = Promise.resolve();
+
+async function readyAgent(): Promise<AgentRunner> {
+  await agentStartup;
+  if (!agentRunner) throw new Error("智能体启动失败，请重启软件；若仍然失败，请将日志反馈给开发者。");
+  return agentRunner;
+}
 // 当前工作区(同步给 sidecar / mcp 子进程,做相对路径解析用)。
 // 渲染层每次切根都会推一次;mcp 子进程晚启 / 重启时也用它回灌。
 let currentWorkspaceRoot: string | null = null;
@@ -489,14 +496,14 @@ ipcMain.handle("agent:pull-prompts", () => pullPublishedPrompts());
 
 // agent IPC 入口。chatId 由 renderer 生成并管理。
 ipcMain.handle("agent:send", async (_e, chatId: string, text: string) => {
-  if (!agentRunner) throw new Error("agent runner not ready");
-  await agentRunner.send(chatId, text);
+  const runner = await readyAgent();
+  await runner.send(chatId, text);
 });
 
-ipcMain.handle("agent:set-advanced-tools", (_e, chatId: unknown, enabled: unknown) => {
-  if (!agentRunner) throw new Error("agent runner not ready");
+ipcMain.handle("agent:set-advanced-tools", async (_e, chatId: unknown, enabled: unknown) => {
+  const runner = await readyAgent();
   if (typeof chatId !== "string" || !chatId || typeof enabled !== "boolean") throw new Error("Invalid arguments");
-  return agentRunner.setAdvancedTools(chatId, enabled);
+  return runner.setAdvancedTools(chatId, enabled);
 });
 
 // 开发者菜单:每次 LLM 调用前把 messages + tools dump 到 tmp/agent_contexts/。
@@ -521,8 +528,8 @@ ipcMain.handle("agent:cancel", (_e, chatId: string) => {
   agentRunner?.cancel(chatId);
 });
 ipcMain.handle("agent:hydrate", async (_e, chatId: string) => {
-  if (!agentRunner) throw new Error("agent runner not ready");
-  return agentRunner.hydrate(chatId);
+  const runner = await readyAgent();
+  return runner.hydrate(chatId);
 });
 ipcMain.handle(
   "agent:human-check-resolve",
@@ -1235,7 +1242,7 @@ app.whenReady().then(async () => {
     );
   }
 
-  startMcpClient().catch((e) => {
+  agentStartup = startMcpClient().catch((e) => {
     console.error("[mcp] startMcpClient failed:", e);
   });
 
