@@ -37,6 +37,10 @@ async function requireOneOf(relatives) {
 await walk(root).catch((error) => { throw new Error(`cannot inspect ${root}: ${error.message}`); });
 await Promise.all([
   requireOneOf(["python-runtime/python.exe", "python-runtime/bin/python3"]),
+  requireOneOf([
+    "python-runtime/Lib/site-packages/certifi/cacert.pem",
+    "python-runtime/lib/python3.12/site-packages/certifi/cacert.pem",
+  ]),
   requirePath("backend/sidecar/serve.py"),
   requirePath("backend/sidecar/requirements.txt"),
   requirePath("prompts/agent_workflow.md"),

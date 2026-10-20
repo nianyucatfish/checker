@@ -93,13 +93,18 @@ def collect_top_level_wavs(target_dirs):
     return out
 
 
-def collect_song_folders(workspace_root):
+def collect_song_folders(workspace_root, *, strict=False):
     """列出工作区下所有歌曲文件夹（一级目录）。"""
     if not workspace_root or not os.path.isdir(workspace_root):
+        if strict: raise FileNotFoundError(workspace_root)
         return []
+    if strict:
+        # DirEntry.is_dir propagates stat/read errors instead of silently hiding folders.
+        with os.scandir(workspace_root) as entries:
+            return sorted(entry.path for entry in entries if entry.is_dir())
     try:
         names = sorted(os.listdir(workspace_root))
-    except Exception:
+    except OSError:
         return []
     return [
         os.path.join(workspace_root, name)

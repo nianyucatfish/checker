@@ -1,3 +1,4 @@
+import { LatestRequest } from "../lib/latestRequest";
 import { useEffect, useState, useCallback, useMemo, useRef, useLayoutEffect } from "react";
 import {
   ChevronRight,
@@ -30,6 +31,9 @@ interface Props {
   selected: string | null;
   selectedIsDir: boolean;
   allErrors: CheckErrorOut[];
+  workspaceError?: string;
+  workspaceLoading?: boolean;
+  onRefresh?: () => void;
   refreshKey: number;               // 父级 bump 时,重拉所有已缓存目录的时长 + 条目
   onPickWorkspace: () => void;
   onSelect: (path: string, isDir: boolean) => void;
@@ -399,6 +403,9 @@ export function Explorer({
   selectedIsDir,
   allErrors,
   refreshKey,
+  workspaceError,
+  workspaceLoading,
+  onRefresh,
   onPickWorkspace,
   onSelect,
   onAutofixSong,
@@ -409,6 +416,10 @@ export function Explorer({
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [childrenCache, setChildrenCache] = useState<Map<string, DirEntryOut[]>>(new Map());
+  const directoryRequests = useRef(new LatestRequest());
+  const [directoryErrors, setDirectoryErrors] = useState<Set<string>>(new Set());
+  const childrenCacheRef = useRef(childrenCache);
+  childrenCacheRef.current = childrenCache;
   const [loading, setLoading] = useState<Set<string>>(new Set());
   const [durations, setDurations] = useState<Map<string, AudioDurationItem | null>>(new Map());
   const [inconsistent, setInconsistent] = useState<Set<string>>(new Set());
@@ -430,8 +441,10 @@ export function Explorer({
 
   const songsSet = useMemo(() => new Set(songs), [songs]);
 
-  // 工作区切换:清空所有缓存
-  useEffect(() => {
+  // Invalidate old in-flight responses before resetting this workspace's tree.
+  useLayoutEffect(() => {
+    directoryRequests.current.reset();
+    setDirectoryErrors(new Set());
     setExpanded(new Set());
     setChildrenCache(new Map());
     setLoading(new Set());
@@ -533,62 +546,28 @@ export function Explorer({
 
   const loadChildren = useCallback(
     async (p: string, force = false) => {
-      if (!force && childrenCache.has(p)) return;
-      setLoading((prev) => {
-        if (prev.has(p)) return prev;
-        const next = new Set(prev);
-        next.add(p);
-        return next;
-      });
+      if (!force && childrenCacheRef.current.has(p)) return;
+      const current = directoryRequests.current.start(p);
+      setLoading(prev => new Set(prev).add(p));
       try {
         const out = await listDir(p);
-        setChildrenCache((m) => {
-          const n = new Map(m);
-          n.set(p, out.entries);
-          return n;
-        });
+        if (!current()) return;
+        setChildrenCache(previous => new Map(previous).set(p, out.entries));
+        setDirectoryErrors(previous => { const next = new Set(previous); next.delete(p); return next; });
         fetchDurationsForEntries(out.entries);
       } catch {
-        setChildrenCache((m) => {
-          const n = new Map(m);
-          n.set(p, []);
-          return n;
-        });
+        // Keep existing entries; an I/O failure is not an empty directory.
+        if (current()) setDirectoryErrors(previous => new Set(previous).add(p));
       } finally {
-        setLoading((s) => {
-          const n = new Set(s);
-          n.delete(p);
-          return n;
-        });
+        if (current()) setLoading(previous => { const next = new Set(previous); next.delete(p); return next; });
       }
-    },
-    [childrenCache, fetchDurationsForEntries],
+    }, [fetchDurationsForEntries],
   );
 
-  // 目录改动后的热刷新(配合 rename / delete / paste / drop)
-  const refreshDir = useCallback(
-    async (p: string) => {
-      try {
-        const out = await listDir(p);
-        setChildrenCache((m) => {
-          const n = new Map(m);
-          n.set(p, out.entries);
-          return n;
-        });
-        fetchDurationsForEntries(out.entries);
-      } catch {
-        /* ignore */
-      }
-    },
-    [fetchDurationsForEntries],
-  );
+  const refreshDir = useCallback((p: string) => loadChildren(p, true), [loadChildren]);
 
   // 父级请求强制刷新(autofix / pad 后调用):清掉所有时长 + 不一致缓存,
   // 然后对每个已展开目录重拉 listDir + 时长。
-  const childrenCacheRef = useRef(childrenCache);
-  useEffect(() => {
-    childrenCacheRef.current = childrenCache;
-  }, [childrenCache]);
   useEffect(() => {
     if (refreshKey === 0) return; // 初始挂载时跳过
     const dirs = Array.from(childrenCacheRef.current.keys());
@@ -1230,7 +1209,10 @@ export function Explorer({
 
   return (
     <div className="pane">
-      <div className="pane-header">{root ? basename(root) : "工作区"}</div>
+      <div className="pane-header flex items-center justify-between">
+        <span className="truncate" title={root || "工作区"}>{root ? basename(root) : "工作区"}</span>
+        {root && <button type="button" className="shrink-0 text-xs text-fg-muted hover:text-fg" onClick={() => { onRefresh?.(); for (const p of directoryErrors) void refreshDir(p); }}>刷新</button>}
+      </div>
       <div
         className={clsx("pane-body", paneDragActive && "dragging")}
         tabIndex={0}
@@ -1252,7 +1234,10 @@ export function Explorer({
             </p>
           </div>
         )}
-        {root && songs.length === 0 && (
+        {root && workspaceError && <div role="alert" className="px-3 py-2 text-xs text-red-500">{workspaceError} <button className="underline" onClick={onRefresh}>重试</button></div>}
+        {root && directoryErrors.size > 0 && <div role="alert" className="px-3 py-2 text-xs text-fg-muted">部分目录读取失败，已保留原列表。<button className="underline" onClick={() => { for (const p of directoryErrors) void refreshDir(p); }}>重试</button></div>}
+        {root && workspaceLoading && songs.length === 0 && <div className="px-3 py-2 text-fg-muted">正在读取目录…</div>}
+        {root && !workspaceLoading && !workspaceError && songs.length === 0 && (
           <div className="px-3 py-2 text-fg-muted">该工作区下没有歌曲文件夹</div>
         )}
         {root && songEntries.map((c) => (

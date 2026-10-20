@@ -394,7 +394,10 @@ def agent_completion(body: dict):
 def tool_list_workspace(root: str = Query(..., description="workspace root absolute path")):
     if not os.path.isdir(root):
         raise HTTPException(status_code=400, detail=f"not a directory: {root}")
-    songs = fixers.collect_song_folders(root)
+    try:
+        songs = fixers.collect_song_folders(root, strict=True)
+    except OSError:
+        raise HTTPException(400, "暂时无法读取工作区，请确认目录仍可访问后重试。") from None
     return ListWorkspaceOut(songs=songs)
 
 

@@ -1,5 +1,7 @@
 """Read assignment snapshots over verified HTTPS; never follow credential-bearing redirects."""
 import json
+import ssl
+import certifi
 import threading
 import time
 from datetime import datetime
@@ -24,27 +26,18 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def read_server_resource(request, max_bytes, timeout=10):
-    """Prefer direct access to our server, preserving system proxy as fallback.
-
-    Explicit ProxyHandler({}) bypasses OS and environment proxy discovery for
-    this request only. HTTPS validation and redirect refusal apply to both paths.
-    """
-    routes = [(urllib.request.ProxyHandler({}), NoRedirect()), (NoRedirect(),)]
-    for index, handlers in enumerate(routes):
-        try:
-            opener = urllib.request.build_opener(*handlers)
-            with opener.open(request, timeout=timeout) as response:
-                raw = response.read(max_bytes + 1)
-            if len(raw) > max_bytes: raise ValueError('response too large')
-            return raw
-        except urllib.error.HTTPError as e:
-            # Invalid keys, rate limits and redirects are not connectivity errors.
-            if index == 0 and e.code in (502, 503, 504): continue
-            raise
-        except OSError:
-            if index == 0: continue
-            raise
-    raise OSError('Server unavailable')
+    """Use direct HTTPS with a bundled CA store, independent of OS proxy settings."""
+    context = ssl.create_default_context(cafile=certifi.where())
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=context),
+        NoRedirect(),
+    )
+    with opener.open(request, timeout=timeout) as response:
+        raw = response.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise ValueError('response too large')
+    return raw
 
 
 class RemoteSheetClient:

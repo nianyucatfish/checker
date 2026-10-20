@@ -489,3 +489,16 @@ def test_move_paths(workspace):
     assert body["executed"] == [os.path.join(dst_dir, "a.txt")]
     assert os.path.isfile(os.path.join(dst_dir, "a.txt"))
     assert not os.path.exists(src)  # 移动后源被删
+
+
+def test_workspace_read_failure_is_not_reported_as_empty(tmp_path, monkeypatch):
+    from sidecar import fixers
+    original = fixers.os.scandir
+    def denied(path):
+        if str(path) == str(tmp_path): raise PermissionError('temporarily unavailable')
+        return original(path)
+    monkeypatch.setattr(fixers.os, 'scandir', denied)
+    r = client.get('/tools/list_workspace', params={'root': str(tmp_path)})
+    assert r.status_code == 400
+    assert '重试' in r.json()['detail']
+    assert 'songs' not in r.json()

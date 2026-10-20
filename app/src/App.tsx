@@ -1,3 +1,4 @@
+import { LatestRequest } from "./lib/latestRequest";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
 import { Loader2 } from "lucide-react";
@@ -39,6 +40,10 @@ export default function App() {
   }, []);
 
   const [root, setRoot] = useState<string | null>(null);
+  const rootRef = useRef<string | null>(null);
+  const workspaceRequests = useRef(new LatestRequest());
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
   // root 变化时同步给 AgentRunner + api.ts(写操作前 pause-watch 用)
   useEffect(() => {
     void window.electronAPI.agentSetWorkspace(root);
@@ -123,10 +128,30 @@ export default function App() {
   const [mixConsoleOpen, setMixConsoleOpen] = useState(false);
   const [sidecarReady, setSidecarReady] = useState<boolean | null>(null);
 
+  const readWorkspace = async (target: string) => {
+    if (rootRef.current !== target) return null;
+    const current = workspaceRequests.current.start("list");
+    setWorkspaceLoading(true);
+    try {
+      const out = await listWorkspace(target);
+      if (!current() || rootRef.current !== target) return null;
+      setSongs(out.songs);
+      setWorkspaceError(null);
+      return out;
+    } catch (error) {
+      console.warn("[app] workspace read failed:", error);
+      if (current() && rootRef.current === target) setWorkspaceError("暂时无法读取目录，请确认目录仍可访问后重试。");
+      return null;
+    } finally { if (current()) setWorkspaceLoading(false); }
+  };
+
   const runScan = async (songsList: string[], rootPath: string) => {
+    if (rootRef.current !== rootPath) return;
+    const current = workspaceRequests.current.start("scan");
     setScanning(true);
     try {
       const out = await checkWorkspace(rootPath);
+      if (!current() || rootRef.current !== rootPath) return;
       const songPaths = [...songsList].sort((a, b) => b.length - a.length);
       const grouped: Record<string, CheckErrorOut[]> = {};
       Object.entries(out.errors).forEach(([path, errs]) => {
@@ -138,18 +163,24 @@ export default function App() {
       });
       setErrorsBySong(grouped);
     } finally {
-      setScanning(false);
+      if (current()) setScanning(false);
     }
   };
 
   const openWorkspace = async (picked: string, autoScan = true) => {
+    const changed = rootRef.current !== picked;
+    workspaceRequests.current.reset();
+    rootRef.current = picked;
+    setWorkspaceError(null);
+    setScanning(false);
+    if (changed) setSongs([]);
     setRoot(picked);
     setSelectedPath(null);
     setSelectedIsDir(false);
     setEditorPath(null);
     setErrorsBySong({});
-    const out = await listWorkspace(picked);
-    setSongs(out.songs);
+    const out = await readWorkspace(picked);
+    if (!out) return;
     localStorage.setItem(LAST_WORKSPACE_KEY, picked);
     if (autoScan) {
       await runScan(out.songs, picked);
@@ -164,13 +195,14 @@ export default function App() {
       if (cancelled) return;
       setSidecarReady(ok);
       if (!ok) return;
+      if (rootRef.current) return; // A manual folder selection takes priority over restore.
       const saved = localStorage.getItem(LAST_WORKSPACE_KEY);
       if (!saved) return;
       try {
         await openWorkspace(saved);
       } catch (e) {
         console.warn("[app] failed to restore workspace:", e);
-        localStorage.removeItem(LAST_WORKSPACE_KEY);
+        // A transient read/scan failure must not forget the user's workspace.
       }
     })();
     return () => {
@@ -209,9 +241,8 @@ export default function App() {
   const handleWorkspaceMutated = async () => {
     if (!root) return;
     try {
-      const out = await listWorkspace(root);
-      setSongs(out.songs);
-      await runScan(out.songs, root);
+      const out = await readWorkspace(root);
+      if (out) await runScan(out.songs, root);
     } catch (e) {
       console.warn("[app] mutation re-scan failed:", e);
     }
@@ -288,9 +319,8 @@ export default function App() {
       ].join("");
       await appAlert(msg);
       if (root) {
-        const out = await listWorkspace(root);
-        setSongs(out.songs);
-        await runScan(out.songs, root);
+        const out = await readWorkspace(root);
+        if (out) await runScan(out.songs, root);
         setTreeRefreshKey((k) => k + 1);
       }
     } finally {
@@ -368,6 +398,13 @@ export default function App() {
       <PanelGroup direction="horizontal" className="flex-1" autoSaveId="audio_qc.layout.main">
         <Panel id="explorer" order={1} defaultSize={20} minSize={12} maxSize={40}>
           <Explorer
+            workspaceError={workspaceError || undefined}
+            workspaceLoading={workspaceLoading}
+            onRefresh={() => {
+              void handleWorkspaceMutated().then(() => {
+                if (rootRef.current === root) setTreeRefreshKey(k => k + 1);
+              });
+            }}
             root={root}
             songs={songs}
             selected={selectedPath}

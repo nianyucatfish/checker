@@ -101,22 +101,39 @@ def test_table_view_marks_owner_and_acceptance_without_requiring_reviewer(tmp_pa
     assert not any(row['mine'] for row in view['items'])
 
 
-def test_server_prefers_direct_connection_and_uses_proxy_fallback(monkeypatch):
+def test_server_bypasses_proxy_and_uses_verified_bundled_ca(monkeypatch):
+    from sidecar.remote_sheet import read_server_resource
+    import ssl
+    calls = []
+    class Opener:
+        def open(self, request, timeout):
+            return io.BytesIO(b'ok')
+    def build(*handlers):
+        calls.append(handlers)
+        assert any(isinstance(h, urllib.request.ProxyHandler) and h.proxies == {} for h in handlers)
+        assert any(isinstance(h, NoRedirect) for h in handlers)
+        https = next(h for h in handlers if isinstance(h, urllib.request.HTTPSHandler))
+        assert https._context.verify_mode == ssl.CERT_REQUIRED
+        assert https._context.check_hostname
+        assert https._context.cert_store_stats()['x509_ca'] > 0
+        return Opener()
+    monkeypatch.setenv('HTTPS_PROXY', 'http://127.0.0.1:1')
+    monkeypatch.setattr('urllib.request.build_opener', build)
+    assert read_server_resource('https://example.com', 100) == b'ok'
+    assert len(calls) == 1
+
+
+def test_direct_failure_never_retries_through_system_proxy(monkeypatch):
     from sidecar.remote_sheet import read_server_resource
     calls = []
     class Opener:
-        def __init__(self, direct): self.direct = direct
         def open(self, request, timeout):
-            if self.direct: raise urllib.error.URLError('network unavailable')
-            return io.BytesIO(b'ok')
-    def build(*handlers):
-        direct = any(isinstance(h, urllib.request.ProxyHandler) and h.proxies == {} for h in handlers)
-        calls.append(direct)
-        assert any(isinstance(h, NoRedirect) for h in handlers)
-        return Opener(direct)
-    monkeypatch.setattr('urllib.request.build_opener', build)
-    assert read_server_resource('https://example.com', 100) == b'ok'
-    assert calls == [True, False]
+            calls.append(request)
+            raise urllib.error.URLError('direct connection failed')
+    monkeypatch.setattr('urllib.request.build_opener', lambda *args: Opener())
+    with pytest.raises(urllib.error.URLError):
+        read_server_resource('https://example.com', 100)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize('status', [301, 302, 401, 403, 429])

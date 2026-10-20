@@ -227,7 +227,7 @@ function sidecarEnv(): NodeJS.ProcessEnv {
   };
 }
 
-async function waitForPort(port: number, timeoutMs = 10000): Promise<void> {
+async function waitForPort(port: number, timeoutMs = 60000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const ok = await new Promise<boolean>((resolve) => {
@@ -583,7 +583,7 @@ async function stopMcpClient(): Promise<void> {
   }
 }
 
-function createWindow() {
+function createWindow(starting = false) {
   const appIcon = app.isPackaged
     ? path.join(process.resourcesPath, "icon.png")
     : path.join(app.getAppPath(), "..", "packaging", "assets", "icon.png");
@@ -621,6 +621,21 @@ function createWindow() {
     if (mixWindow && !mixWindow.isDestroyed()) mixWindow.destroy();
   });
 
+  if (starting) {
+    void win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(`<!doctype html>
+      <html lang="zh-CN"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+      <title>Audio QC</title><style>
+      body{margin:0;height:100vh;display:grid;place-items:center;background:#fafafa;color:#252525;font:15px system-ui,sans-serif}
+      main{text-align:center}h1{font-size:25px;font-weight:600}p{color:#777;line-height:1.8}
+      .spinner{width:24px;height:24px;margin:0 auto 24px;border:2px solid #ddd;border-top-color:#555;border-radius:50%;animation:spin 1s linear infinite}
+      @keyframes spin{to{transform:rotate(360deg)}}
+      </style><main><div class="spinner"></div><h1>正在启动 Audio QC</h1><p>正在准备本地服务…<br>首次启动可能需要一些时间，请稍候。</p></main></html>`));
+  } else {
+    loadMainWindow(win);
+  }
+}
+
+function loadMainWindow(win: BrowserWindow) {
   if (process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL);
     if (process.env.OPEN_DEVTOOLS === "1") win.webContents.openDevTools();
@@ -1214,6 +1229,7 @@ ipcMain.handle("mix:remove-track", (_e, p: unknown) => {
 ipcMain.handle("mix:get-tracks", () => Array.from(mixTracks));
 
 app.whenReady().then(async () => {
+  createWindow(true);
   // 调试上下文是单次运行快照；业务数据、配置、状态树均保留。
   try {
     fs.rmSync(path.join(RUNTIME.logDir, "electron", "agent_contexts"), { recursive: true, force: true });
@@ -1245,7 +1261,7 @@ app.whenReady().then(async () => {
     console.error("[mcp] startMcpClient failed:", e);
   });
 
-  createWindow();
+  if (mainWindow && !mainWindow.isDestroyed()) loadMainWindow(mainWindow);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
