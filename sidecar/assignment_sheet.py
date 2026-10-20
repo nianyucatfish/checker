@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import csv
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from sidecar.config import get_config
@@ -26,7 +26,7 @@ from sidecar.tencent_sheet import TencentNotConfiguredError, TencentSheetError, 
 
 
 class AmbiguousSongError(TencentSheetError):
-    """同 reviewer 下同 song_name 多行匹配,需要 row_index 消歧。
+    """全表中同 song_name 多行匹配,需要 row_index 消歧。
 
     携带 candidates:[{row_index, song_name, owner, original_singer}],owner 已打码。
     """
@@ -442,7 +442,7 @@ def list_my_pending() -> list[PendingSong]:
 def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
     """拉本歌的分工表 meta + missing/invalid + 派生事实(1.1 验收用)。
 
-    返回的 SongMeta 中人名 / 链接字段值已打码;original_singer 与非 PII 字段不打码。
+    返回的 SongMeta 中人员姓名打码，原唱、链接及其他元数据完整返回。
     sidecar 内部 raw 真值仅在本函数局部变量里使用,不返回上层。
 
     Args:
@@ -450,15 +450,9 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
         row_index: 可选;歌名撞车时用 row_index 锁定唯一一行。撞车且未给 row_index → AmbiguousSongError。
 
     Raises:
-        TencentSheetError: 配置缺 reviewer_name / song_name 不在当前用户范围 / API 挂等。
+        TencentSheetError: 表格配置缺失 / song_name 不存在 / API 挂等。
         AmbiguousSongError: 同 song_name 多行匹配且未传 row_index。
     """
-    reviewer = get_config().user.reviewer_name.strip()
-    if not reviewer:
-        raise TencentNotConfiguredError(
-            "user.reviewer_name not configured; 请在 设置 → 腾讯文档·用户 里填「验收负责人姓名」"
-        )
-
     rows = _load_rows()
     if not rows:
         raise TencentSheetError(f"分工表为空,无法定位歌 '{song_name}'")
@@ -467,16 +461,14 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
     target = song_name.strip()
     matches: list[tuple[int, list[str]]] = []
     for ri, row in enumerate(rows[1:], start=2):
-        if _cell(row, COL_REVIEWER) != reviewer:
-            continue
         if _cell(row, COL_SONG_NAME) != target:
             continue
         matches.append((ri, row))
 
     if not matches:
-        raise TencentSheetError(f"歌 '{song_name}' 不在当前用户的验收范围内")
+        raise TencentSheetError(f"分工表中未找到歌曲 '{song_name}'")
     if len(matches) > 1 and row_index is None:
-        # 撞车:同名多行。拿打码后的 owner / original_singer 给上层做消歧提示
+        # 同名多行：返回打码后的负责人和公开原唱，用行号消歧。
         candidates = [
             {
                 "row_index": ri,
@@ -495,6 +487,10 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
     else:
         row_index_use, row = matches[0]
 
+    return _song_meta(row_index_use, row)
+
+
+def _song_meta(row_index_use: int, row: list[str]) -> SongMeta:
     # raw 真值(局部用,**不返**给 LLM)
     raw = {
         "song_name":              _cell(row, COL_SONG_NAME),
@@ -621,3 +617,46 @@ def list_my_pending_rows():
 def list_my_accepted_rows():
     """整行版 dev panel 用 -- 不暴露给 agent。"""
     return _list_my_rows(accepted=True)
+
+
+def query_songs(*, status="pending", mine_only=False, keyword="", genre="", page=1, page_size=20):
+    """Query all assignment rows; filter before pagination and return only masked metadata."""
+    if status not in ("pending", "accepted", "all"):
+        raise ValueError("status 必须为 pending、accepted 或 all")
+    if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 50:
+        raise ValueError("page 必须大于等于 1，page_size 必须在 1–50 之间")
+    reviewer = get_config().user.reviewer_name.strip()
+    if mine_only and not reviewer:
+        raise TencentNotConfiguredError("仅查看我的歌曲需要先在设置中填写验收负责人姓名")
+    rows = _load_rows()
+    if rows:
+        _validate_headers(rows[0])
+    keyword = keyword.strip().casefold()
+    genre = genre.strip().casefold()
+    matches = []
+    for ri, row in enumerate(rows[1:], start=2):
+        song = _cell(row, COL_SONG_NAME)
+        if not song:
+            continue
+        accepted = _cell(row, COL_ACCEPTED) == ACCEPTED_VALUE
+        mine = bool(reviewer) and _cell(row, COL_REVIEWER) == reviewer
+        if status != "all" and accepted != (status == "accepted"):
+            continue
+        if mine_only and not mine:
+            continue
+        if keyword and keyword not in song.casefold() and keyword not in _cell(row, COL_ORIGINAL_SINGER).casefold():
+            continue
+        if genre and genre != _cell(row, COL_GENRE).casefold():
+            continue
+        matches.append((ri, row, accepted, mine))
+    total = len(matches)
+    start = (page - 1) * page_size
+    items = []
+    for ri, row, accepted, mine in matches[start:start + page_size]:
+        item = asdict(_song_meta(ri, row))
+        item.update(accepted=accepted, mine=mine, reviewer=_mask_name(_cell(row, COL_REVIEWER)))
+        items.append(item)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+            "has_next": start + page_size < total,
+            "filters": {"status": status, "mine_only": mine_only, "keyword": keyword, "genre": genre}}

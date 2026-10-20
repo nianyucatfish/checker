@@ -12,7 +12,7 @@ Tool inventory (see doc/prompts/agent_workflow.md):
 - state_tree.*: read (auto-init) / update —— 15 态 markdown 进度本
 - audit.*  : list_errors (MISSING_FILE 附带 workspace 候选清单)
 - read_text_file: 读纯文本,line_range 取片段,>8KB 自动 head+tail 截断
-- sheet.*  : list_my_pending / get_song_meta(写路径 mark_accepted / write_baidu_link 待补,依赖腾讯文档写 API)
+- sheet.*  : query / get_song_meta(写路径 mark_accepted / write_baidu_link 待补,依赖腾讯文档写 API)
 - fs.*     : list_dir
 - fix.*    : execute_plan(union ops: rename / delete / move / copy / write_text / text_edit;agent 自构造,不再有 propose_* 包装)
 
@@ -208,11 +208,11 @@ def _find_song_root(file_or_dir: str, workspace_root: str) -> str:
 @mcp.tool()
 def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[str, Any]:
     """Fetch song meta (including required recording_location / 录音地点) for 1.1 完整性 check. 人名已 sidecar 打码,网盘链接完整返回供下载和核对。
-    Scope: only songs in current reviewer's range (身份隐藏 boundary).
+    Scope: all songs in the assignment table; use row_index to disambiguate duplicate names.
     Key fields for 1.1: missing_required_fields, invalid_format_fields, derived.backing_count.
     歌名撞车(同 reviewer 下同 song_name 多行) → {ok: false, code: "AMBIGUOUS_SONG", candidates: [{row_index, song_name, owner, original_singer}]}, 用 candidates 里的 row_index 再调一次。
     On failure: {ok: false, code: "SONG_NOT_FOUND" | "AMBIGUOUS_SONG" | "SHEET_NOT_CONFIGURED" | "SHEET_FETCH_FAILED", message: str}。
-    SHEET_NOT_CONFIGURED(本机没配腾讯凭证/负责人,本场别再调 sheet_*)/ SHEET_FETCH_FAILED(重试一次仍挂)/ SONG_NOT_FOUND 都**不阻塞 QC**:按工作手册 1.1 降级分支走(本地推断交付形态 + 完整性欠账给用户人工核对)。"""
+    SHEET_NOT_CONFIGURED(未配置分工表访问,本场别再调 sheet_*)/ SHEET_FETCH_FAILED(重试一次仍挂)/ SONG_NOT_FOUND 都**不阻塞 QC**:按工作手册 1.1 降级分支走(本地推断交付形态 + 完整性欠账给用户人工核对)。"""
     try:
         meta = assignment_sheet.get_song_meta(song_name, row_index=row_index)
     except assignment_sheet.AmbiguousSongError as e:
@@ -227,7 +227,7 @@ def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[st
     except TencentSheetError as e:
         msg = str(e)
         # 区分 "不在范围" 与 "API 挂"
-        if "不在当前用户的验收范围" in msg or "分工表为空" in msg or "row_index=" in msg:
+        if "未找到歌曲" in msg or "分工表为空" in msg or "row_index=" in msg:
             return {"ok": False, "code": "SONG_NOT_FOUND", "message": msg}
         return {
             "ok": False,
@@ -238,6 +238,24 @@ def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[st
 
 
 @mcp.tool()
+def sheet_query(status: str = "pending", mine_only: bool = False, keyword: str = "", genre: str = "", page: int = 1, page_size: int = 20) -> dict[str, Any]:
+    """Read the full assignment table with filters and pagination. Default: all reviewers' pending songs.
+    status: pending / accepted / all. mine_only optionally limits to configured reviewer.
+    keyword: partial song name or original singer; genre: exact genre. page starts at 1; page_size 1–50 (default 20).
+    Returns items (song metadata, masked personnel/reviewer, full review links, accepted/mine), total,
+    total_pages, has_next, page, page_size and filters. Read further pages only when needed, keeping filters unchanged.
+    Use each item's row_index with sheet_get_song_meta to identify duplicate song names. Read-only.
+    """
+    try:
+        return assignment_sheet.query_songs(status=status, mine_only=mine_only, keyword=keyword, genre=genre, page=page, page_size=page_size)
+    except TencentNotConfiguredError as e:
+        return {"ok": False, "code": "SHEET_NOT_CONFIGURED", "message": str(e)}
+    except TencentSheetError as e:
+        return {"ok": False, "code": "SHEET_FETCH_FAILED", "message": str(e)}
+    except ValueError as e:
+        return {"ok": False, "code": "INVALID_ARGUMENT", "message": str(e)}
+
+
 def sheet_list_my_pending() -> dict[str, Any]:
     """List songs in current reviewer's range that are not yet marked accepted.
     Reviewer name read from config, NEVER appears in args/results (身份隐藏 boundary).

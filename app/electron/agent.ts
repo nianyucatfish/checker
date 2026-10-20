@@ -639,7 +639,7 @@ export class AgentRunner {
           code: resolved.code ?? "RESOLVE_FAILED",
           message: resolved.error,
           candidates: resolved.candidates,
-          hint: "用 candidates 里的精确 folder name(= {歌手}_{歌曲}_{扒曲人})再调一次 start_qc。如果是 sheet 上同名多歌,先 sheet_list_my_pending 看 row_index 再用 sheet_get_song_meta(song_name, row_index) 拿到 owner 帮你认歌。",
+          hint: "用 candidates 里的精确 folder name(= {歌手}_{歌曲}_{扒曲人})再调一次 start_qc。如果是 sheet 上同名多歌,先 sheet_query(keyword=歌名, status=all) 看 row_index 再用 sheet_get_song_meta(song_name, row_index) 拿到 owner 帮你认歌。",
         };
       }
       const songFolder = resolved.folder!;

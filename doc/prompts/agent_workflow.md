@@ -142,6 +142,8 @@ Part 1 的每个自动态都走同一个循环:
 **目标**:本歌的分工表条目必填字段都齐了。同时**确定交付形态**(几个文件夹 / 谁负责录混 / 谁负责编曲)供后续态使用。
 
 **步骤**:
+需要从分工表选择歌曲时，先用 `sheet_query()`：默认全表未验收，每页 20 首；可按 `status`（pending/accepted/all）、`mine_only`、歌名或原唱关键词 `keyword`、流派 `genre` 筛选。按 `total` / `has_next` 决定是否翻页，翻页保持筛选条件；不要把一页当成全部结果。人员姓名仍打码。
+
 1. `sheet_get_song_meta(song)` → SongMeta（含 `recording_location` 录音地点，空白会列入 `missing_required_fields`）
 2. `fs_list_dir(path="", max_depth=1)` 看工作区,有无 `{prefix}` / `{prefix}(混)` 配对
 3. 判**交付形态**: `mix_owner` 和 `pan_mix_link` 是配套字段,都空 → 单份;都非空 → 双份;**一个空一个有 → 数据不一致,note 让用户核对**。再用工作区有无 `(混)` 文件夹 cross-check。
@@ -155,7 +157,7 @@ Part 1 的每个自动态都走同一个循环:
 **注意**:
 - `调音台` / `监听` 默认必填。报缺时不要假定"对方没有就跳过",note 标"待用户确认是否真无";用户明确"没有"后才写"无"占位
 - 字段合法性以 `missing_required_fields` / `invalid_format_fields` 为准,**别二次判断**;唯一例外是 `mix_owner` / `pan_mix_link` 的配套豁免按上面步骤 3/4 处理
-- **`song_name` 不是唯一键**(同 reviewer 下可能同名多歌,典型如不同歌手翻唱同一首)。`sheet_get_song_meta(song_name)` 撞车会返 `{ok: false, code: "AMBIGUOUS_SONG", candidates: [...]}`,从 candidates 里挑对的 `row_index` 再调一次 `sheet_get_song_meta(song_name, row_index=N)`。
+- **`song_name` 不是唯一键**(全表中可能同名多歌,典型如不同歌手翻唱同一首)。`sheet_get_song_meta(song_name)` 撞车会返 `{ok: false, code: "AMBIGUOUS_SONG", candidates: [...]}`,从 candidates 里挑对的 `row_index` 再调一次 `sheet_get_song_meta(song_name, row_index=N)`。
 - **canonical key = song_folder**(工作区文件夹名 `{歌手}_{歌曲}_{扒曲人}`)。`start_qc` / `state_tree_*` 的 `song` 参数都用 folder name,不是 sheet 的 `song_name`;state_tree md 也按 folder name 落盘,跨 chat 自然共享。`start_qc` 会自动把模糊输入解析到唯一 folder,撞车会返候选让你选。
 
 **降级分支:表格不可用**(`sheet_get_song_meta` 返回 `SHEET_NOT_CONFIGURED` / `SHEET_FETCH_FAILED` / `SONG_NOT_FOUND` 任一时):

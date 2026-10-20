@@ -415,15 +415,9 @@ def test_dev_rows_normalize_masked_song_name_header(fake_sheet):
     assert len(items) == 1
 
 
-def test_get_song_meta_song_not_in_reviewer_scope(fake_sheet):
-    """别的 reviewer 的歌 → 抛 TencentSheetError(SONG_NOT_FOUND 语义)。"""
-    from sidecar.tencent_sheet import TencentSheetError
-    fake_sheet([_complete_row(
-        song_name="月亮代表我的心",
-        reviewer="另一个人",
-    )])
-    with pytest.raises(TencentSheetError, match="不在当前用户的验收范围"):
-        asheet.get_song_meta("月亮代表我的心")
+def test_get_song_meta_can_read_other_reviewers_song(fake_sheet):
+    fake_sheet([_complete_row(song_name="月亮代表我的心", reviewer="另一个人")])
+    assert asheet.get_song_meta("月亮代表我的心").song_name == "月亮代表我的心"
 
 
 def test_get_song_meta_reads_col_30_not_col_29(fake_sheet):
@@ -491,3 +485,40 @@ def test_recording_location_returned_and_whitespace_is_missing(fake_sheet):
     assert meta.recording_location == "录音室 A"
     fake_sheet([_complete_row(recording_location="   ")])
     assert "recording_location" in asheet.get_song_meta("望春风").missing_required_fields
+
+
+def test_query_filters_then_paginates_and_masks(fake_sheet):
+    rows = [_complete_row(song_name=f"歌{i}", reviewer="其他人") for i in range(5)]
+    rows[1][asheet.COL_ACCEPTED - 1] = "1"
+    fake_sheet(rows)
+    out = asheet.query_songs(page_size=2)
+    assert out["total"] == 4 and out["total_pages"] == 2 and out["has_next"]
+    assert [x["song_name"] for x in out["items"]] == ["歌0", "歌2"]
+    assert out["items"][0]["reviewer"] == "其xx"
+    assert out["items"][0]["owner"] == "张xx"
+    assert asheet.query_songs(page=2, page_size=2)["items"][0]["song_name"] == "歌3"
+    assert len(asheet.query_songs(status="accepted")["items"]) == 1
+    assert asheet.query_songs(status="all")["total"] == 5
+    assert asheet.query_songs(keyword="歌2")["total"] == 1
+    assert asheet.query_songs(genre="不存在")["total"] == 0
+    assert asheet.query_songs(mine_only=True)["total"] == 0
+    assert asheet.query_songs(page=99)["items"] == []
+
+
+def test_full_table_without_reviewer_and_duplicate_names(fake_sheet, monkeypatch):
+    from sidecar import config
+    fake_sheet([_complete_row(reviewer="甲"), _complete_row(reviewer="乙")])
+    config.get_config().user.reviewer_name = ""
+    out = asheet.query_songs()
+    assert out["total"] == 2
+    with pytest.raises(asheet.AmbiguousSongError):
+        asheet.get_song_meta("望春风")
+    assert asheet.get_song_meta("望春风", row_index=3).row_index == 3
+    with pytest.raises(Exception, match="验收负责人"):
+        asheet.query_songs(mine_only=True)
+
+
+@pytest.mark.parametrize("kwargs", [{"page": 0}, {"page_size": 51}, {"page_size": 0}, {"status": "bad"}])
+def test_query_rejects_invalid_pagination(kwargs):
+    with pytest.raises(ValueError):
+        asheet.query_songs(**kwargs)
