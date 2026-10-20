@@ -70,6 +70,17 @@ macOS 当前版本未经 Apple Developer ID 签名和公证。如果首次打开
 
 Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时分页返回。一个会话可检查多首歌，每首歌的进度独立保存并跨会话共享。试听和其他人工判断按界面提示确认；上传、填链接和最终验收标记仍需人工完成。
 
+### 5. 安装浏览器插件（按需）
+
+需要 Agent 操作浏览器时，在同一个 [Release 下载页](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.1) 下载 **`GA-Browser-Bridge-2.0.0-beta.1.zip`**：
+
+1. 解压 ZIP，保留其中的 `browser-bridge` 文件夹。
+2. Chrome 打开 `chrome://extensions`（Edge：`edge://extensions`），开启 **开发者模式**。
+3. 点击 **加载已解压的扩展程序**，选择 `browser-bridge` 文件夹。
+4. 打开 Audio QC，在插件弹窗中确认连接状态。
+
+已有旧版时先停用旧版，避免两个桥接插件同时运行。插件支持 GA 及兼容客户端，包内附有安装说明、来源记录和 MIT 许可证。
+
 ## 常用功能
 
 - **文件检查**：查看命名、结构、格式与时长等问题，并按检查结果处理。
@@ -87,7 +98,7 @@ Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时�
 
 **分工表拉取失败怎么办？** 检查表格密钥和服务器地址；若使用 TUN／虚拟网卡代理，尝试将分工表服务器设置为直连，再刷新。
 
-**浏览器操作需要额外安装什么？** 仅在需要 Agent 操作浏览器时，按 [GA 浏览器插件说明](plugin/browser-bridge/README.md) 加载 `plugin/browser-bridge`。当前安装包不会自动安装浏览器插件。
+**浏览器操作需要额外安装什么？** 在 Release 下载页获取独立的 `GA-Browser-Bridge-*.zip`，按上方步骤加载。桌面应用不会自动安装浏览器插件。
 
 **如何反馈问题？** 在 [Issues](https://github.com/nianyucatfish/checker/issues) 中提供系统、软件版本、操作步骤及错误提示；截图前请遮住密钥和私人信息。
 

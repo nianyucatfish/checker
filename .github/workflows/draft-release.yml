@@ -244,8 +244,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  browser-plugin:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check browser scripts and package loadable extension
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          for script in plugin/browser-bridge/*.js; do node --check "$script"; done
+          python scripts/package-browser-plugin.py "$VERSION" --output-dir release-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-browser-plugin
+          path: release-assets/GA-Browser-Bridge-${{ needs.prepare.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
   draft-release:
-    needs: [prepare, windows-x64, macos]
+    needs: [prepare, windows-x64, macos, browser-plugin]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -264,8 +286,9 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t files < <(find release-assets -maxdepth 1 -type f | sort)
-          [[ ${#files[@]} -eq 5 ]] || { printf 'Expected exactly 5 release assets, got:\n%s\n' "${files[*]}" >&2; exit 1; }
+          [[ ${#files[@]} -eq 6 ]] || { printf 'Expected exactly 6 release assets, got:\n%s\n' "${files[*]}" >&2; exit 1; }
           compgen -G "release-assets/Audio QC-$VERSION-windows-x64-portable.zip" >/dev/null
+          test -f "release-assets/GA-Browser-Bridge-$VERSION.zip"
           compgen -G "release-assets/Audio QC-$VERSION-macos-x64-*.dmg" >/dev/null
           compgen -G "release-assets/Audio QC-$VERSION-macos-x64-*.zip" >/dev/null
           compgen -G "release-assets/Audio QC-$VERSION-macos-arm64-*.dmg" >/dev/null
@@ -283,6 +306,10 @@ jobs:
             echo "## Artifacts"
             for file in "${files[@]}"; do echo "- \`$(basename "$file")\`"; done
             echo "- \`SHA256SUMS.txt\`"
+            echo
+            echo "## Browser plugin"
+            echo
+            echo "Unpack GA-Browser-Bridge-$VERSION.zip. Open chrome://extensions (or edge://extensions), enable Developer mode, and load the browser-bridge folder as an unpacked extension. Installation instructions and upstream MIT license are included."
             echo
             echo "## macOS first launch"
             echo
