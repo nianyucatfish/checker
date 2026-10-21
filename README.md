@@ -4,7 +4,7 @@
 
 **当前版本：2.0 Beta** · 支持 Windows 和 macOS
 
-[下载 Beta 版](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.1) · [全部版本](https://github.com/nianyucatfish/checker/releases) · [反馈问题](https://github.com/nianyucatfish/checker/issues)
+[下载 Beta 版](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.2) · [全部版本](https://github.com/nianyucatfish/checker/releases) · [反馈问题](https://github.com/nianyucatfish/checker/issues)
 
 ## 快速开始
 
@@ -72,7 +72,7 @@ Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时�
 
 ### 5. 安装浏览器插件（按需）
 
-需要 Agent 操作浏览器时，在同一个 [Release 下载页](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.1) 下载 **`GA-Browser-Bridge-2.0.0-beta.1.zip`**：
+需要 Agent 操作浏览器时，在同一个 [Release 下载页](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.2) 下载 **`GA-Browser-Bridge-2.0.0-beta.2.zip`**：
 
 1. 解压 ZIP，保留其中的 `browser-bridge` 文件夹。
 2. Chrome 打开 `chrome://extensions`（Edge：`edge://extensions`），开启 **开发者模式**。
