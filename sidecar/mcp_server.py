@@ -209,7 +209,7 @@ def _find_song_root(file_or_dir: str, workspace_root: str) -> str:
 def sheet_get_song_meta(song_name: str, row_index: int | None = None) -> dict[str, Any]:
     """Fetch song meta (including required recording_location / 录音地点) for 1.1 完整性 check. 人名已 sidecar 打码,网盘链接完整返回供下载和核对。
     Scope: all songs in the assignment table; use row_index to disambiguate duplicate names.
-    Key fields for 1.1: missing_required_fields, invalid_format_fields, derived.backing_count.
+    Key fields for 1.1: missing_required_labels, invalid_format_fields (label), derived.backing_count. Use field_labels for actual Chinese column names in all user-facing messages and human_check questions; never expose internal field names or invent translations. Link content is judged by the agent, not backend URL validation; accept share text containing a valid link and extraction code.
     歌名撞车(同 reviewer 下同 song_name 多行) → {ok: false, code: "AMBIGUOUS_SONG", candidates: [{row_index, song_name, owner, original_singer}]}, 用 candidates 里的 row_index 再调一次。
     On failure: {ok: false, code: "SONG_NOT_FOUND" | "AMBIGUOUS_SONG" | "SHEET_NOT_CONFIGURED" | "SHEET_FETCH_FAILED", message: str}。
     SHEET_NOT_CONFIGURED(未配置分工表访问,本场别再调 sheet_*)/ SHEET_FETCH_FAILED(重试一次仍挂)/ SONG_NOT_FOUND 都**不阻塞 QC**:按工作手册 1.1 降级分支走(本地推断交付形态 + 完整性欠账给用户人工核对)。"""

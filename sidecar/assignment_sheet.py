@@ -88,6 +88,47 @@ _EXPECTED_HEADERS = {
 }
 
 
+# 工具参数继续使用稳定字段名；面向用户的名称以实际表头为准。
+_FIELD_COLUMNS = {
+    'song_name': (1, '歌名'),
+    'owner': (2, '扒曲负责人'),
+    'original_singer': (3, '原唱'),
+    'original_singer_gender': (4, '原唱性别'),
+    'genre': (5, '流派'),
+    'emotion': (6, '情感'),
+    'era': (7, '年代'),
+    'transcribe_type': (8, '扒带类型'),
+    'transcribe_reviewer': (9, '扒带类型审核人'),
+    'mix_owner': (10, '录混负责人'),
+    'mentor': (11, '指导老师'),
+    'difficulty': (12, '扒曲难度'),
+    'tempo_changes': (13, '是否有速度变化'),
+    'four_pieces': (14, '四大件'),
+    'recording_location': (15, '录音地点'),
+    'microphone': (16, '话筒'),
+    'sound_card': (17, '声卡'),
+    'recording_software': (18, '录音软件'),
+    'mixer': (19, '调音台'),
+    'monitoring': (20, '监听'),
+    'vocal_a': (21, '主唱a'),
+    'vocal_a_gender': (22, 'a性别'),
+    'a_score': (23, 'a评分'),
+    'vocal_b': (24, '主唱b'),
+    'vocal_b_gender': (25, 'b性别'),
+    'b_score': (26, 'b评分'),
+    'backing': (27, '伴唱'),
+    'backing_gender': (28, '伴唱性别'),
+    'pan_review_link': (30, '审核人最终提交位置'),
+    'pan_mix_link': (32, '录混提交链接位置验收'),
+    'reviewer': (33, '验收负责人'),
+    'accepted': (34, '是否验收'),
+}
+
+
+def _field_labels(headers=None):
+    return {field: (_cell(headers, col) if headers else "") or fallback
+            for field, (col, fallback) in _FIELD_COLUMNS.items()}
+
 # ============================================================
 #  PII 打码
 # ============================================================
@@ -229,9 +270,7 @@ _FIELD_VALIDATORS = {
     "vocal_b":              _validate_chinese_name,
     # 伴唱多人特殊
     "backing":              _validate_backing_persons,
-    # 链接
-    "pan_review_link":      _validate_baidu_pan_url,
-    "pan_mix_link":         _validate_baidu_pan_url,
+    # 链接内容由 Agent 判断；这里只保留必填空值检查。
 }
 
 
@@ -346,6 +385,8 @@ class SongMeta:
     pan_mix_link: str
 
     # === 校验产物 + 派生事实 ===
+    field_labels: dict[str, str]
+    missing_required_labels: list[str]
     missing_required_fields: list[str]
     invalid_format_fields: list[dict]
     derived: DerivedFacts
@@ -487,10 +528,11 @@ def get_song_meta(song_name: str, row_index: int | None = None) -> SongMeta:
     else:
         row_index_use, row = matches[0]
 
-    return _song_meta(row_index_use, row)
+    return _song_meta(row_index_use, row, rows[0])
 
 
-def _song_meta(row_index_use: int, row: list[str]) -> SongMeta:
+def _song_meta(row_index_use: int, row: list[str], headers=None) -> SongMeta:
+    labels = _field_labels(headers)
     # raw 真值(局部用,**不返**给 LLM)
     raw = {
         "song_name":              _cell(row, COL_SONG_NAME),
@@ -533,7 +575,7 @@ def _song_meta(row_index_use: int, row: list[str]) -> SongMeta:
     for f, validator in _FIELD_VALIDATORS.items():
         reason = validator(raw[f])
         if reason:
-            invalid.append({"field": f, "reason": reason})
+            invalid.append({"field": f, "label": labels[f], "reason": reason})
 
     # 3) Derived(用 raw 真值算)
     backing_count = _parse_backing_count(raw["backing"])
@@ -577,6 +619,8 @@ def _song_meta(row_index_use: int, row: list[str]) -> SongMeta:
         monitoring=raw["monitoring"],
         pan_review_link=raw["pan_review_link"],
         pan_mix_link=raw["pan_mix_link"],
+        field_labels=labels,
+        missing_required_labels=[labels[f] for f in missing],
         missing_required_fields=missing,
         invalid_format_fields=invalid,
         derived=derived,
@@ -653,7 +697,7 @@ def query_songs(*, status="pending", mine_only=False, keyword="", genre="", page
     start = (page - 1) * page_size
     items = []
     for ri, row, accepted, mine in matches[start:start + page_size]:
-        item = asdict(_song_meta(ri, row))
+        item = asdict(_song_meta(ri, row, rows[0]))
         item.update(accepted=accepted, mine=mine, reviewer=_mask_name(_cell(row, COL_REVIEWER)))
         items.append(item)
     return {"items": items, "total": total, "page": page, "page_size": page_size,

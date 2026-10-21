@@ -290,12 +290,15 @@ def test_role_field_validates_chinese_name(fake_sheet, field):
     assert bad[0]["reason"] == "name_format_unusual"
 
 
-def test_get_song_meta_pan_link_wrong_domain(fake_sheet):
-    fake_sheet([_complete_row(pan_review_link="https://drive.google.com/x")])
+def test_get_song_meta_leaves_link_content_to_agent(fake_sheet):
+    fake_sheet([_complete_row(pan_review_link="链接: https://pan.baidu.com/s/test 提取码: abcd", pan_mix_link="链接: https://pan.baidu.com/s/mix 提取码: efgh")])
     meta = asheet.get_song_meta("望春风")
-    bad = [f for f in meta.invalid_format_fields if f["field"] == "pan_review_link"]
-    assert len(bad) == 1
-    assert bad[0]["reason"] == "not_baidu_pan"
+    assert not any(x["field"] in ("pan_review_link", "pan_mix_link") for x in meta.invalid_format_fields)
+    assert meta.pan_review_link.startswith("链接:")
+    fake_sheet([_complete_row(pan_review_link="非 URL 分享说明")])
+    assert not any(x["field"] == "pan_review_link" for x in asheet.get_song_meta("望春风").invalid_format_fields)
+    fake_sheet([_complete_row(pan_review_link="")])
+    assert "pan_review_link" in asheet.get_song_meta("望春风").missing_required_fields
 
 
 def test_get_song_meta_derived_backing_count_1(fake_sheet):
@@ -522,3 +525,26 @@ def test_full_table_without_reviewer_and_duplicate_names(fake_sheet, monkeypatch
 def test_query_rejects_invalid_pagination(kwargs):
     with pytest.raises(ValueError):
         asheet.query_songs(**kwargs)
+
+
+def test_sheet_result_uses_actual_headers_for_user_labels(fake_sheet, monkeypatch):
+    fake_sheet([_complete_row(transcribe_reviewer="", recording_location="")])
+    original = asheet._load_rows
+    def rows():
+        result = original()
+        result[0][8] = "扒带类型审核人"
+        result[0][14] = "实际录音地点"
+        return result
+    monkeypatch.setattr(asheet, "_load_rows", rows)
+    meta = asheet.get_song_meta("望春风")
+    assert meta.field_labels["transcribe_reviewer"] == "扒带类型审核人"
+    assert meta.field_labels["pan_mix_link"] == "录混提交链接位置验收"
+    assert "实际录音地点" in meta.missing_required_labels
+    assert "扒带类型审核人" in meta.missing_required_labels
+    assert asheet.query_songs()["items"][0]["field_labels"] == meta.field_labels
+
+
+def test_invalid_fields_include_chinese_header(fake_sheet):
+    fake_sheet([_complete_row(transcribe_reviewer="TODO")])
+    issue = next(x for x in asheet.get_song_meta("望春风").invalid_format_fields if x["field"] == "transcribe_reviewer")
+    assert issue["label"] == "扒带类型审核人"

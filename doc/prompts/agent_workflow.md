@@ -156,7 +156,7 @@ Part 1 的每个自动态都走同一个循环:
 
 **注意**:
 - `调音台` / `监听` 默认必填。报缺时不要假定"对方没有就跳过",note 标"待用户确认是否真无";用户明确"没有"后才写"无"占位
-- 字段合法性以 `missing_required_fields` / `invalid_format_fields` 为准,**别二次判断**;唯一例外是 `mix_owner` / `pan_mix_link` 的配套豁免按上面步骤 3/4 处理
+- 非链接字段合法性以 `missing_required_fields` / `invalid_format_fields` 为准；链接内容由 Agent 判断，接受包含有效链接与提取码的分享文本，不要求整格为纯 URL。面向用户使用 `field_labels` 的中文表头，缺失项优先使用 `missing_required_labels`；唯一例外是 `mix_owner` / `pan_mix_link` 的配套豁免按上面步骤 3/4 处理
 - **`song_name` 不是唯一键**(全表中可能同名多歌,典型如不同歌手翻唱同一首)。`sheet_get_song_meta(song_name)` 撞车会返 `{ok: false, code: "AMBIGUOUS_SONG", candidates: [...]}`,从 candidates 里挑对的 `row_index` 再调一次 `sheet_get_song_meta(song_name, row_index=N)`。
 - **canonical key = song_folder**(工作区文件夹名 `{歌手}_{歌曲}_{扒曲人}`)。`start_qc` / `state_tree_*` 的 `song` 参数都用 folder name,不是 sheet 的 `song_name`;state_tree md 也按 folder name 落盘,跨 chat 自然共享。`start_qc` 会自动把模糊输入解析到唯一 folder,撞车会返候选让你选。
 
@@ -329,7 +329,7 @@ Part 1 的每个自动态都走同一个循环:
 3. 待裁决清单为空(1.1-1.6 全 `[x]`,或仅有上述 1.1 / 1.5 暂缓特例)→ `state_tree_update(song, "1.7", done=true, note="")` → 进 Part 2。1.7 `[x]` 表示本轮复检已完成;特例欠账仍明确留在对应行的 `[ ]` 和 note 中,不能当作已结清
 4. 待裁决清单非空 → `human_check(state="1.7", reason="Part 1 累积的问题清单,请逐条决定", decisions=[{question: <某条非暂缓问题的 note 概括>, options: [<本条候选处置>]}, ...])` 阻塞;不为待混音台核对的时长差异提供提前修复选项
 5. 收 `answers`(与 decisions 等长,每条 `{choice, note}`):**严格遵守 invariant 5 —— 错误是否客观消除是唯一判据,choice 字面 ≠ done**。逐条按下面分类:
-   - 当条 `choice` 语义 = "**该错误其实不存在 / 已豁免**"(如 `tempo_changes 缺失 → 确认无速度变化`、`pan_review_link 误报 → 已确认有效链接`)→ audit 误报或人工豁免,**对应 1.x 行翻 `[x]`**,note 追加"用户豁免: ..."
+   - 当条 `choice` 语义 = "**该错误其实不存在 / 已豁免**"(如 “是否有速度变化”缺失 → 确认无速度变化、“审核人最终提交位置”误报 → 已确认有效链接)→ audit 误报或人工豁免,**对应 1.x 行翻 `[x]`**,note 追加"用户豁免: ..."
    - 当条 `choice` 语义 = "**暂不处理 / 留着遗留**"(错误客观还在,只是用户决定不修)→ 对应 1.x 行**保持 `[ ]`**,note 追加"用户决定暂不处理"。注意:"暂不处理"≠"错误消失",1.x 不翻 `[x]`
    - 当条 `choice` 语义 = "**用户外部去修**"(如"扒曲重导")→ 1.x 保持 `[ ]`,note 写"用户决定: ...,等用户修完续"
    - 当条 `choice` 语义 = "**可用现有工具做的修复**"→ 遵循确认流程修复,看 audit 结果再决定该行翻不翻;修完错误归零再 `[x]`,否则 `[ ]`。不包括尚未经过混音台人工检查的时长修复
