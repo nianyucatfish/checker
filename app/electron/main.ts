@@ -1,3 +1,5 @@
+import { startExternalAgent } from "./externalAgent";
+import { backendToolCatalog, callBackendTool } from "./externalBackend";
 import { waitForAgent } from "./agentReadiness";
 // Electron main process: spawn sidecar, manage window lifecycle.
 
@@ -30,7 +32,7 @@ import {
   type UpdateManifest,
 } from "./offlineUpdate";
 
-const SIDECAR_PORT = 8775; // TODO:后续改为随机端口 + /health 身份校验
+const SIDECAR_PORT = Number(process.env.CHECKER_SIDECAR_PORT || 8775); // TODO:后续改为随机端口 + /health 身份校验
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
 type RuntimeLayout = {
@@ -140,11 +142,11 @@ function resolveDevPython(projectRoot: string): string {
 }
 
 function configureAppDataPaths(): string {
-  const dataDir = app.isPackaged
+  const dataDir = process.env.CHECKER_APP_DATA_DIR || (app.isPackaged
     ? process.platform === "win32"
       ? path.join(path.dirname(process.execPath), "data")
       : path.join(app.getPath("appData"), "AudioQC")
-    : path.join(PROJECT_ROOT, "tmp", "electron-user-data");
+    : path.join(PROJECT_ROOT, "tmp", "electron-user-data"));
   const sessionDataDir = path.join(dataDir, "chromium");
   const logsDir = path.join(dataDir, "logs", "electron");
   const crashDumpsDir = path.join(dataDir, "crashDumps");
@@ -187,10 +189,10 @@ function resolveRuntimeLayout(): RuntimeLayout {
       python: resolveDevPython(PROJECT_ROOT),
       backendRoot: PROJECT_ROOT,
       promptsDir: path.join(PROJECT_ROOT, "doc", "prompts"),
-      dataDir: path.join(PROJECT_ROOT, "cache"),
-      cacheDir: path.join(PROJECT_ROOT, "cache"),
-      logDir: path.join(PROJECT_ROOT, "tmp"),
-      configPath: path.join(PROJECT_ROOT, "config.toml"),
+      dataDir: process.env.CHECKER_APP_DATA_DIR ? dataDir : path.join(PROJECT_ROOT, "cache"),
+      cacheDir: process.env.CHECKER_APP_DATA_DIR ? cacheDir : path.join(PROJECT_ROOT, "cache"),
+      logDir: process.env.CHECKER_APP_DATA_DIR ? logDir : path.join(PROJECT_ROOT, "tmp"),
+      configPath: process.env.CHECKER_APP_DATA_DIR ? path.join(dataDir, "config.toml") : path.join(PROJECT_ROOT, "config.toml"),
     };
   }
 
@@ -381,9 +383,7 @@ async function startMcpClient(): Promise<void> {
       } catch {
         return { ok: false, code: "FILE_NOT_FOUND", message: `文件不存在: ${filePath}` };
       }
-      if (w.isMinimized()) w.restore();
-      w.show();
-      w.focus();
+      // Agent tools prepare the preview without interrupting the user's current app.
       w.webContents.send("ui:open-file", filePath);
       return { ok: true };
     },
@@ -416,7 +416,8 @@ async function startMcpClient(): Promise<void> {
       }
       mixTracks.clear();
       for (const p of all) mixTracks.add(p);
-      await showMixWindowAnimated(lastToolbarButtonRect);
+      if (externalAgent?.active()) ensureMixWindow();
+      else await showMixWindowAnimated(lastToolbarButtonRect, false);
       broadcastMixTracks();
       return { ok: true, loaded: all };
     },
@@ -495,6 +496,7 @@ ipcMain.handle("agent:pull-prompts", () => pullPublishedPrompts());
 
 // agent IPC 入口。chatId 由 renderer 生成并管理。
 ipcMain.handle("agent:send", async (_e, chatId: string, text: string) => {
+  if (externalAgent?.active()) throw new Error("外部 Agent 会话占用工作区，请先通过 CLI 结束外部会话");
   const runner = await readyAgent();
   await runner.send(chatId, text);
 });
@@ -520,6 +522,7 @@ ipcMain.handle("agent:set-dump-llm", (_e, on: unknown) => {
   setDumpLlmContext(!!on);
 });
 ipcMain.handle("agent:start-qc", async (_e, chatId: string, song: string) => {
+  if (externalAgent?.active()) throw new Error("请先结束外部 Agent 会话");
   if (!agentRunner) throw new Error("agent runner not ready");
   await agentRunner.startQc(chatId, song);
 });
@@ -571,6 +574,61 @@ ipcMain.handle("agent:set-workspace", async (_e, root: string | null) => {
   agentRunner?.setWorkspace(root);
   await pushWorkspaceToAllBackends(root);
 });
+
+let externalAgent: Awaited<ReturnType<typeof startExternalAgent>> | undefined;
+const externalUiAcks = new Map<string, (result: { ok: boolean; message?: string }) => void>();
+ipcMain.on("external:ready", (event, id: string, result: { ok: boolean; message?: string }) => {
+  if (event.sender === mainWindow?.webContents) externalUiAcks.get(id)?.(result);
+});
+function requestExternalUi(channel: string, payload: unknown): Promise<void> {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return Promise.reject(new Error("请先打开 Audio QC 主窗口"));
+  const id = `${Date.now()}-${Math.random()}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { externalUiAcks.delete(id); reject(new Error("桌面界面未响应，请确认主窗口已打开")); }, 15_000);
+    externalUiAcks.set(id, result => {
+      clearTimeout(timer); externalUiAcks.delete(id);
+      result.ok ? resolve() : reject(new Error(result.message || "界面准备失败"));
+    });
+    win.webContents.send(channel, id, payload);
+  });
+}
+async function startExternalDesktop() {
+  const runner = await readyAgent();
+  const base = `http://127.0.0.1:${SIDECAR_PORT}`;
+  let apiTools = await backendToolCatalog(base);
+  let expectedRoot: string | null = null;
+  const discovery = process.env.CHECKER_EXTERNAL_CONNECTION || path.join(app.getPath("appData"), "AudioQC", "external-agent.json");
+  externalAgent = await startExternalAgent({
+    status: () => ({ app_version: app.getVersion(), workspace: currentWorkspaceRoot, model_required: false,
+      advanced_tools: runner.externalWorkflow().advanced_tools }),
+    workflow: () => runner.externalWorkflow(),
+    tools: async () => [...await runner.externalTools(), ...[...apiTools.values()].map(x => x.tool)],
+    internalBusy: () => runner.externalBusy(),
+    pendingHuman: () => false,
+    cancel: () => {},
+    open: async (id, root) => {
+      if (root !== undefined) {
+        const normalized = path.resolve(root);
+        if (!fs.statSync(normalized).isDirectory()) throw new Error("工作区不是目录");
+        await requestExternalUi("external:workspace", normalized);
+        currentWorkspaceRoot = normalized;
+        runner.setWorkspace(normalized);
+        await pushWorkspaceToAllBackends(normalized);
+      }
+      expectedRoot = currentWorkspaceRoot;
+      if (!expectedRoot) throw new Error("请先在软件中选择工作目录，或传入 workspace");
+      apiTools = await backendToolCatalog(base);
+    },
+    run: async (id, name, args) => {
+      if (expectedRoot !== currentWorkspaceRoot) throw new Error("工作区已切换，请关闭外部会话后重新连接");
+
+      const entry = apiTools.get(name);
+      return entry ? callBackendTool(base, entry, args) : runner.externalCall(id, name, args);
+    },
+  }, discovery);
+  console.log("[external] loopback interface ready; discovery:", discovery);
+}
 
 async function stopMcpClient(): Promise<void> {
   if (mcpClient) {
@@ -1136,11 +1194,11 @@ function ensureMixWindow(): BrowserWindow {
   return win;
 }
 
-async function showMixWindowAnimated(rect: ButtonRect | null): Promise<void> {
+async function showMixWindowAnimated(rect: ButtonRect | null, activate = true): Promise<void> {
   const win = ensureMixWindow();
   if (mixAnimating) return;
   if (win.isVisible()) {
-    win.focus();
+    if (activate) win.focus();
     return;
   }
   mixAnimating = true;
@@ -1150,12 +1208,12 @@ async function showMixWindowAnimated(rect: ButtonRect | null): Promise<void> {
     if (screenRect) {
       win.setBounds(screenRect);
       win.setOpacity(0);
-      win.show();
+      if (activate) win.show(); else win.showInactive();
       await animateMixWindow(win, screenRect, target, 0, 1);
     } else {
       win.setBounds(target);
       win.setOpacity(1);
-      win.show();
+      if (activate) win.show(); else win.showInactive();
     }
     notifyMixVisibility(true);
   } finally {
@@ -1262,6 +1320,7 @@ app.whenReady().then(async () => {
   });
 
   if (mainWindow && !mainWindow.isDestroyed()) loadMainWindow(mainWindow);
+  void agentStartup.then(startExternalDesktop).catch(e => console.error("[external] startup failed:", e));
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1271,6 +1330,7 @@ app.whenReady().then(async () => {
 console.log("[main] window-all-closed registered");
 app.on("window-all-closed", () => {
   isAppQuitting = true;
+  void externalAgent?.close();
   stopFsWatcher();
   if (mixWindow && !mixWindow.isDestroyed()) mixWindow.destroy();
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();
@@ -1280,6 +1340,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isAppQuitting = true;
+  void externalAgent?.close();
   stopFsWatcher();
   if (mixWindow && !mixWindow.isDestroyed()) mixWindow.destroy();
   if (sidecarProc && !sidecarProc.killed) sidecarProc.kill();

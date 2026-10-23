@@ -4,7 +4,7 @@
 
 **当前版本：2.0 Beta** · 支持 Windows 和 macOS
 
-[下载 Beta 版](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.2) · [全部版本](https://github.com/nianyucatfish/checker/releases) · [反馈问题](https://github.com/nianyucatfish/checker/issues)
+[下载 Beta 版](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.3) · [全部版本](https://github.com/nianyucatfish/checker/releases) · [反馈问题](https://github.com/nianyucatfish/checker/issues)
 
 ## 快速开始
 
@@ -72,7 +72,7 @@ Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时�
 
 ### 5. 安装浏览器插件（按需）
 
-需要 Agent 操作浏览器时，在同一个 [Release 下载页](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.2) 下载 **`GA-Browser-Bridge-2.0.0-beta.2.zip`**：
+需要 Agent 操作浏览器时，在同一个 [Release 下载页](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.3) 下载 **`GA-Browser-Bridge-2.0.0-beta.3.zip`**：
 
 1. 解压 ZIP，保留其中的 `browser-bridge` 文件夹。
 2. Chrome 打开 `chrome://extensions`（Edge：`edge://extensions`），开启 **开发者模式**。
@@ -80,6 +80,27 @@ Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时�
 4. 打开 Audio QC，在插件弹窗中确认连接状态。
 
 已有旧版时先停用旧版，避免两个桥接插件同时运行。插件支持 GA 及兼容客户端，包内附有安装说明、来源记录和 MIT 许可证。
+
+### 6. 使用 Codex / Claude 等外部 Agent
+
+Beta 3 起支持外部 Agent 接口。先打开软件，再解压配套的 `Audio-QC-Agent-Skill-<版本>.zip`，保留整个 `audio-qc` 文件夹。CLI 需要本机安装 Python 3.9+，无需额外 Python 包，也无需配置软件内置模型。
+
+**最简单：不安装 Skill，直接告诉本地 Agent：**
+
+> 阅读 `/路径/audio-qc/SKILL.md`，按照其中的说明，使用 CLI 完成质检。
+
+把路径替换为解压后的实际位置，例如 Windows 的 `C:\Users\你的用户名\Downloads\audio-qc\SKILL.md`。Agent 需要能读取本机文件、运行命令并连接本机服务。
+
+**希望以后直接调用：** 将整个 `audio-qc` 文件夹放到对应目录（目录不存在时新建）：
+
+| Agent | macOS / Linux 个人技能目录 | Windows 原生个人技能目录 | 发起任务 |
+| --- | --- | --- | --- |
+| Codex 本地客户端（桌面端 / CLI / IDE） | `~/.agents/skills/audio-qc/` | `%USERPROFILE%\.agents\skills\audio-qc\` | 选择 `audio-qc` 技能，或输入 `$audio-qc` 并描述任务 |
+| Claude Code 本地会话（终端 / IDE / 桌面 Code） | `~/.claude/skills/audio-qc/` | `%USERPROFILE%\.claude\skills\audio-qc\` | 输入 `/audio-qc` 并描述任务 |
+
+安装后确认 `audio-qc/SKILL.md` 和 `audio-qc/scripts/qc.py` 都存在。若未出现，重新打开 Agent 或新建会话。Windows 的 `%USERPROFILE%` 可粘贴到资源管理器地址栏，macOS 的 `~` 表示个人主目录。
+
+Claude 网页聊天、Cowork 和云端会话的安装方式及连接限制不同；本工具推荐使用能访问本机的 Codex 或 Claude Code 本地会话。详见 [各平台安装与使用](doc/外部Agent接入.md#各平台安装-skill)。安装路径和调用方式参考 [Codex 官方说明](https://learn.chatgpt.com/docs/build-skills)及 [Claude Code 官方说明](https://code.claude.com/docs/en/skills)。
 
 ## 常用功能
 
@@ -101,6 +122,10 @@ Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时�
 **浏览器操作需要额外安装什么？** 在 Release 下载页获取独立的 `GA-Browser-Bridge-*.zip`，按上方步骤加载。桌面应用不会自动安装浏览器插件。
 
 **如何反馈问题？** 在 [Issues](https://github.com/nianyucatfish/checker/issues) 中提供系统、软件版本、操作步骤及错误提示；截图前请遮住密钥和私人信息。
+
+## 外部 Agent 接入
+
+可通过本机接口／CLI + Skill 让 Codex 等外部 Agent 使用软件的质检工具，无需配置内置模型，也不要求客户端使用 MCP。流程直接读取软件当前生效版本，进度和人工确认界面共用。接入方式见 [外部 Agent 接入](doc/外部Agent接入.md)，Skill 位于 [skills/audio-qc](skills/audio-qc/SKILL.md)。Beta 3 起提供此功能。
 
 ## 开发与来源
 

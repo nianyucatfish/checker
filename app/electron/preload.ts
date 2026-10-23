@@ -64,6 +64,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("mix:visibility-changed", listener);
     return () => ipcRenderer.off("mix:visibility-changed", listener);
   },
+  onExternalWorkspace: (cb: (root: string) => Promise<void>) => {
+    const listener = async (_e: unknown, id: string, root: string) => {
+      try { await cb(root); ipcRenderer.send("external:ready", id, { ok: true }); }
+      catch (e) { ipcRenderer.send("external:ready", id, { ok: false, message: String(e) }); }
+    };
+    ipcRenderer.on("external:workspace", listener);
+    return () => ipcRenderer.off("external:workspace", listener);
+  },
   // ---------- agent ----------
   agentSend: (chatId: string, text: string) =>
     ipcRenderer.invoke("agent:send", chatId, text),

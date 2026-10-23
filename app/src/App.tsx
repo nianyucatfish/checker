@@ -238,6 +238,13 @@ export default function App() {
 
   // Explorer 内部写操作(rename / delete / paste)完成后回调,
   // 用来触发错误同步:重新拉 songs + 重扫,保证错误列表与文件系统不脱节。
+  useEffect(() => window.electronAPI.onExternalWorkspace(async target => {
+    // Reconnecting to the current workspace must preserve the visible scan results.
+    if (rootRef.current === target) return;
+    await openWorkspace(target);
+    if (rootRef.current !== target) throw new Error("工作区准备时已被切换");
+  }), []);
+
   const handleWorkspaceMutated = async () => {
     if (!root) return;
     try {

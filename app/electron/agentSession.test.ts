@@ -9,7 +9,7 @@ vi.mock("./db", () => ({
   updateSessionSong: vi.fn(), updateSessionAdvancedTools: vi.fn(), updateSessionLiveFrom: vi.fn(),
 }));
 import { AgentRunner } from "./agent";
-import { updateSessionLiveFrom, updateSessionSong } from "./db";
+import { createSessionWithId, appendMessage, updateSessionLiveFrom, updateSessionSong } from "./db";
 
 function setup() {
   const mcp = {
@@ -162,5 +162,55 @@ describe("multi-song conversations", () => {
     } finally {
       fs.rmSync(knowledgeDir, { recursive: true });
     }
+  });
+});
+
+
+describe("external agent tool reuse", () => {
+  it("shares the active QC flow without imposing built-in conversation or confirmation policies", () => {
+    const { runner, internal } = setup();
+    const before = runner.externalWorkflow();
+    expect(before.system_prompt).toContain("人工确认在当前对话中进行");
+    expect(before.system_prompt).not.toContain("human_check");
+    expect(before.system_prompt).not.toContain("不要求每轮");
+    expect(before.system_prompt).not.toContain("每轮回复最后一行写 <summary>");
+    expect(internal.systemPrompt).toContain("每轮回复最后一行写 <summary>");
+    expect(before.system_prompt).toContain(before.files["agent_workflow.md"]);
+    runner.applyPublishedPrompts({ "agent_system.md": "服务器系统提示", "agent_workflow.md": "服务器当前流程", "advanced_tools.md": "高级工具说明" });
+    const after = runner.externalWorkflow();
+    expect(after.system_prompt).toContain(internal.systemPrompt);
+    expect(after.system_prompt).toContain("服务器当前流程");
+    expect(after.system_prompt).toContain(after.knowledge);
+    expect(after.version).not.toBe(before.version);
+    expect(after.source).toBe("published");
+  });
+  it("leaves human confirmation to the external host instead of opening desktop cards", async () => {
+    const { runner, internal } = setup();
+    internal.emit = vi.fn();
+    expect((await runner.externalTools()).map(t => t.name)).not.toContain("human_check");
+    expect(await runner.externalCall("external-human", "human_check", {})).toMatchObject({ ok: false, code: "HOST_CONFIRMATION_REQUIRED" });
+    expect(internal.emit).not.toHaveBeenCalled();
+  });
+  it("executes existing tools without calling any model or creating sidebar conversation events", async () => {
+    const { runner, internal, mcp } = setup();
+    internal.callLlm = vi.fn(() => { throw new Error("must not call a model"); });
+    internal.emit = vi.fn();
+    const result = await runner.externalCall("external-test", "audit_list_errors", { song_path: "test" });
+    expect(result).toEqual({ errors: [] });
+    expect(mcp.callTool).toHaveBeenCalled();
+    expect(internal.callLlm).not.toHaveBeenCalled();
+    expect(internal.emit).not.toHaveBeenCalled();
+    expect(createSessionWithId).not.toHaveBeenCalled();
+    expect(appendMessage).not.toHaveBeenCalled();
+    expect(runner.externalBusy()).toBe(false);
+  });
+  it("applies the same global advanced-tool switch to external discovery and execution", async () => {
+    const { runner, mcp } = setup();
+    mcp.listTools.mockResolvedValue({ tools: ["code_run", "system_set_workspace", "audit_list_errors"].map(name => ({ name, inputSchema: { type: "object" } })) });
+    expect((await runner.externalTools()).map(t => t.name)).not.toContain("code_run");
+    expect((await runner.externalTools()).map(t => t.name)).not.toContain("system_set_workspace");
+    expect(await runner.externalCall("external-off", "code_run", {})).toMatchObject({ ok: false, code: "TOOL_DISABLED" });
+    runner.setAdvancedTools("external-off", true);
+    expect((await runner.externalTools()).map(t => t.name)).toContain("code_run");
   });
 });

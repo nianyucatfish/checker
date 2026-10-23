@@ -10,6 +10,7 @@ import { requestError } from "../src/lib/requestError";
 // - reload 后从 db hydrate,LLM messages + summaryTrail + 展示歌曲全部重建
 
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { ADVANCED_TOOLS, toolAllowed } from "./toolPolicy";
 import type { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
@@ -86,6 +87,7 @@ export interface ToolSchema {
 
 interface ChatState {
   chatId: string;
+  external?: boolean;
   song: string | null;      // 最近定位的歌曲,仅供 UI / 日志展示,不限制工具目标
   baseSystem: string;       // 稳定的通用指令 + 完整质检手册
   messages: Message[];
@@ -157,6 +159,8 @@ function readPromptFile(dir: string, name: string): string {
 
 export class AgentRunner {
   private advancedPrompt = "";
+  private promptFiles: Record<string, string> = {};
+  private promptSource = "bundled";
   private knowledgeSuffix = "";
   private advancedToolsEnabled = false;
   private advancedCalls = new Map<string, AbortController>();
@@ -192,12 +196,15 @@ export class AgentRunner {
     this.systemPrompt = readPromptFile(promptsDir, "agent_system.md") + "\n\n" +
       readPromptFile(promptsDir, "agent_workflow.md") + this.knowledgeSuffix;
     this.advancedPrompt = readPromptFile(promptsDir, "advanced_tools.md");
+    this.promptFiles = Object.fromEntries(["agent_system.md", "agent_workflow.md", "advanced_tools.md"].map(name => [name, readPromptFile(promptsDir, name)]));
   }
 
   applyPublishedPrompts(files: Record<string, string>): void {
     for (const name of ["agent_system.md", "agent_workflow.md", "advanced_tools.md"]) {
       if (typeof files[name] !== "string" || !files[name].trim() || Buffer.byteLength(files[name], "utf8") > 300000) throw new Error("Invalid prompt bundle");
     }
+    this.promptFiles = { ...files };
+    this.promptSource = "published";
     this.systemPrompt = files["agent_system.md"] + "\n\n" + files["agent_workflow.md"] + this.knowledgeSuffix;
     this.advancedPrompt = files["advanced_tools.md"];
     for (const chat of this.chats.values()) chat.baseSystem = this.systemPrompt;
@@ -439,6 +446,7 @@ export class AgentRunner {
   /** 定位歌曲仅更新展示信息;消息、摘要、轮数和静态 prompt 均保持不变。 */
   private focusSong(state: ChatState, song: string) {
     state.song = song;
+    if (state.external) return;
     updateSessionSong(state.chatId, song);
     this.emit({ chatId: state.chatId, type: "song_focus", data: { song } });
   }
@@ -615,6 +623,40 @@ export class AgentRunner {
     const mcp = await this.listMcpTools();
     return [...this.localToolSchemas(), ...mcp]
       .filter((t) => toolAllowed(t.function.name, state.advancedTools));
+  }
+
+  /** Share the active QC workflow, while leaving conversation policy to the host agent. */
+  externalWorkflow() {
+    const adapt = (text: string) => text.split("\n")
+      .filter(line => !(line.includes("<summary>") && /每轮|最后一行/.test(line))).join("\n")
+      .replace(/### human_check 用法[^\n]*[\s\S]*?(?=### 通用模式)/g,
+        "### 人工确认\n\n准备好试听或预览场景，在当前对话说明歌曲、步骤、问题和候选选项，等待用户回答。候选项覆盖通过与不通过，接受用户补充说明。根据实际回答更新进度与备注。\n\n")
+      .replace(/弹\s*`human_check`\s*阻塞/g, "在当前对话提问并等待回答")
+      .replace(/human_check/g, "人工确认");
+    const adapter = "人工确认在当前对话中进行：准备好试听或预览界面，说明歌曲、步骤、问题和选项，等待用户真实回答后按结果更新进度。" +
+      "手册中的人工确认示例描述需要询问的内容及顺序。\n\n";
+    const advanced = this.advancedToolsEnabled ? adapt(this.advancedPrompt) : "";
+    const system = adapter + adapt(this.systemPrompt);
+    const files = Object.fromEntries(Object.entries(this.promptFiles).map(([name, value]) => [name, adapt(value)]));
+    return { version: createHash("sha256").update(system + advanced).digest("hex"), source: this.promptSource,
+      files, system_prompt: system, advanced_prompt: advanced,
+      advanced_tools: this.advancedToolsEnabled, knowledge: this.knowledgeSuffix,
+      interaction_mode: "host_agent" };
+  }
+  externalBusy() { return [...this.chats.values()].some(state => state.running); }
+  async externalTools() {
+    return [...this.localToolSchemas(), ...await this.listMcpTools()]
+      .filter(t => t.function.name !== "human_check" && toolAllowed(t.function.name, this.advancedToolsEnabled))
+      .map(t => ({ name: t.function.name, description: t.function.description.replace(/human_check/g, "asking the user in the current conversation"), parameters: t.function.parameters }));
+  }
+  async externalCall(chatId: string, name: string, args: Record<string, unknown>) {
+    if (name === "human_check") return { ok: false, code: "HOST_CONFIRMATION_REQUIRED", message: "请在当前 Agent 对话中直接询问用户并等待回答。" };
+    // External clients own conversation history. Reuse tools without creating a desktop chat.
+    const state: ChatState = { chatId, external: true, song: null, baseSystem: this.systemPrompt,
+      messages: [], messageDbTurnIndexes: [], summaryTrail: [], turn: 0, cancelled: false,
+      running: true, advancedTools: this.advancedToolsEnabled, missedSummary: false };
+    try { return await this.executeTool(state, name, args); }
+    catch (e) { return { ok: false, code: "TOOL_EXCEPTION", message: String(e) }; }
   }
 
   // ============ 工具执行 ============

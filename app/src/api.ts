@@ -195,6 +195,7 @@ export type HydratedTurn =
 declare global {
   interface Window {
     electronAPI: {
+      onExternalWorkspace: (cb: (root: string) => Promise<void>) => () => void;
       selectWorkspace: () => Promise<string | null>;
       getSidecarUrl: () => Promise<string>;
       revealInFolder: (path: string) => Promise<void>;

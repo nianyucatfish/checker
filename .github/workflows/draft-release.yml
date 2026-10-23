@@ -266,8 +266,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  external-agent-skill:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Package standalone CLI and skill
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python skills/audio-qc/scripts/qc.py --help
+          python scripts/package-agent-skill.py "$VERSION" --output-dir release-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-external-agent-skill
+          path: release-assets/Audio-QC-Agent-Skill-${{ needs.prepare.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
   draft-release:
-    needs: [prepare, windows-x64, macos, browser-plugin]
+    needs: [prepare, windows-x64, macos, browser-plugin, external-agent-skill]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -286,9 +308,10 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t files < <(find release-assets -maxdepth 1 -type f | sort)
-          [[ ${#files[@]} -eq 6 ]] || { printf 'Expected exactly 6 release assets, got:\n%s\n' "${files[*]}" >&2; exit 1; }
+          [[ ${#files[@]} -eq 7 ]] || { printf 'Expected exactly 7 release assets, got:\n%s\n' "${files[*]}" >&2; exit 1; }
           compgen -G "release-assets/Audio QC-$VERSION-windows-x64-portable.zip" >/dev/null
           test -f "release-assets/GA-Browser-Bridge-$VERSION.zip"
+          test -f "release-assets/Audio-QC-Agent-Skill-$VERSION.zip"
           compgen -G "release-assets/Audio QC-$VERSION-macos-x64-*.dmg" >/dev/null
           compgen -G "release-assets/Audio QC-$VERSION-macos-x64-*.zip" >/dev/null
           compgen -G "release-assets/Audio QC-$VERSION-macos-arm64-*.dmg" >/dev/null
@@ -306,6 +329,10 @@ jobs:
             echo "## Artifacts"
             for file in "${files[@]}"; do echo "- \`$(basename "$file")\`"; done
             echo "- \`SHA256SUMS.txt\`"
+            echo
+            echo "## External agent skill"
+            echo
+            echo "Unpack Audio-QC-Agent-Skill-$VERSION.zip and place the audio-qc folder in your agent's skill directory. The standalone Python CLI connects to the running desktop application and reads its active QC workflow; no built-in model configuration is required."
             echo
             echo "## Browser plugin"
             echo
