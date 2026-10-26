@@ -4,7 +4,7 @@
 
 **当前版本：2.0 Beta** · 支持 Windows 和 macOS
 
-[下载 Beta 版](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.3) · [全部版本](https://github.com/nianyucatfish/checker/releases) · [反馈问题](https://github.com/nianyucatfish/checker/issues)
+[下载 Beta 版](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta) · [全部版本](https://github.com/nianyucatfish/checker/releases) · [反馈问题](https://github.com/nianyucatfish/checker/issues)
 
 ## 快速开始
 
@@ -72,7 +72,7 @@ Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时�
 
 ### 5. 安装浏览器插件（按需）
 
-需要 Agent 操作浏览器时，在同一个 [Release 下载页](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta.3) 下载 **`GA-Browser-Bridge-2.0.0-beta.3.zip`**：
+需要 Agent 操作浏览器时，在同一个 [Release 下载页](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta) 下载 **`GA-Browser-Bridge-2.0.0-beta.zip`**：
 
 1. 解压 ZIP，保留其中的 `browser-bridge` 文件夹。
 2. Chrome 打开 `chrome://extensions`（Edge：`edge://extensions`），开启 **开发者模式**。
@@ -83,7 +83,7 @@ Agent 可以筛选查询全表，默认查看未验收歌曲，结果较多时�
 
 ### 6. 使用 Codex / Claude 等外部 Agent
 
-Beta 3 起支持外部 Agent 接口。先打开软件，再解压配套的 `Audio-QC-Agent-Skill-<版本>.zip`，保留整个 `audio-qc` 文件夹。CLI 需要本机安装 Python 3.9+，无需额外 Python 包，也无需配置软件内置模型。
+2.0 Beta 起支持外部 Agent 接口。先打开软件，再解压配套的 `Audio-QC-Agent-Skill-<版本>.zip`，保留整个 `audio-qc` 文件夹。CLI 需要本机安装 Python 3.9+，无需额外 Python 包，也无需配置软件内置模型。
 
 **最简单：不安装 Skill，直接告诉本地 Agent：**
 
@@ -125,7 +125,7 @@ Claude 网页聊天、Cowork 和云端会话的安装方式及连接限制不同
 
 ## 外部 Agent 接入
 
-可通过本机接口／CLI + Skill 让 Codex 等外部 Agent 使用软件的质检工具，无需配置内置模型，也不要求客户端使用 MCP。流程直接读取软件当前生效版本，进度和人工确认界面共用。接入方式见 [外部 Agent 接入](doc/外部Agent接入.md)，Skill 位于 [skills/audio-qc](skills/audio-qc/SKILL.md)。Beta 3 起提供此功能。
+可通过本机接口／CLI + Skill 让 Codex 等外部 Agent 使用软件的质检工具，无需配置内置模型，也不要求客户端使用 MCP。流程直接读取软件当前生效版本，进度和人工确认界面共用。接入方式见 [外部 Agent 接入](doc/外部Agent接入.md)，Skill 位于 [skills/audio-qc](skills/audio-qc/SKILL.md)。2.0 Beta 起提供此功能。
 
 ## 开发与来源
 

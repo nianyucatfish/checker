@@ -2,7 +2,7 @@
 
 外部 Agent（例如 Codex）可以通过本机 HTTP 接口或随 Skill 提供的 CLI 使用软件的质检能力，不需要配置内置模型，也不需要客户端安装 MCP。软件内部继续共用现有工具实现。
 
-从 v2.0.0-beta.3 起支持此接口，Release 下载页附带 `Audio-QC-Agent-Skill-<版本>.zip`，其中包含可直接安装的 `audio-qc/` 文件夹和独立 CLI。
+从 v2.0.0-beta 起支持此接口，Release 下载页附带 `Audio-QC-Agent-Skill-<版本>.zip`，其中包含可直接安装的 `audio-qc/` 文件夹和独立 CLI。
 
 ## 使用方式
 
