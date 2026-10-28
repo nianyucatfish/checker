@@ -6,6 +6,10 @@
 
 [下载 Beta 版](https://github.com/nianyucatfish/checker/releases/tag/v2.0.0-beta) · [全部版本](https://github.com/nianyucatfish/checker/releases) · [反馈问题](https://github.com/nianyucatfish/checker/issues)
 
+![Audio QC 界面：文件检查、MIDI 与音频对照，以及智能体质检](doc/images/audio-qc-preview.png)
+
+左侧查看文件与检查结果，中间对照 MIDI 和音频，右侧通过智能体查询分工表并推进质检。
+
 ## 快速开始
 
 ### 1. 下载并打开
